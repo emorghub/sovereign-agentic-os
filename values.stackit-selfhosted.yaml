@@ -37,7 +37,7 @@ global:
   # cluster's default StorageClass if you'd rather not pin a name.
   storageClass: ""
   imagePullPolicy: IfNotPresent
-  # Bespoke images are pulled from ghcr.io/aborek (NOT kind-loaded) on a real SKE
+  # Bespoke images are pulled from ghcr.io/jashwanthv07 (NOT kind-loaded) on a real SKE
   # cluster, so a registry pull secret is required. `registry-pull-secret` is
   # materialised in-cluster (e.g. by External Secrets / `make secrets`); the chart
   # adds it to every bespoke workload's pod spec via this global list.
@@ -63,13 +63,19 @@ openmetadata:
   enabled: true
 
 # -----------------------------------------------------------------------------
-# Ollama (model-server) — upgrade to latest so ministral-3 loads correctly.
-# Pinned 0.6.8 in the chart default is too old for ministral-3 on this node.
+# Ollama (model-server) — KEEP the chart-default 0.6.8 (OLD engine). `latest`'s
+# NEW engine selects AMX matmul kernels that SIGSEGV on this node's virtualized
+# Xeon 6548Y+ (AMX advertised in CPUID but broken under the hypervisor; even a
+# 0.5B model crashes, and OLLAMA_LLM_LIBRARY is ignored by the new engine).
+# Verified-working combo = 0.6.8 + llmLibrary cpu_avx2 + model qwen2.5:3b (the
+# base default) — see STACKIT_DEPLOY_RUNBOOK.md §13. ministral-3 needs `latest`
+# and is therefore NOT usable on this node.
 # -----------------------------------------------------------------------------
 modelServer:
-  image:
-    tag: "latest"
-  # CPU headroom for Ministral 3 3B on the m3i.16 node (16 vCPU / 128 GB). Ollama
+  # Force the baseline AVX2 CPU runner (no AMX/AVX512 kernels) — the AMX workaround.
+  # Only honoured by the OLD engine (image tag <= 0.6.x, which the base pins).
+  llmLibrary: "cpu_avx2"
+  # CPU headroom for the 3B model on the m3i.16 node (16 vCPU / 128 GB). Ollama
   # sizes its thread pool to the cgroup CPU limit, so the chart's 4-core cap left
   # 12 cores idle and made single replies take 25s+. requests stay MODEST (2 cores
   # reserved — the node only commits ~48% of CPU) while limits let one reply BURST
@@ -135,7 +141,7 @@ ml:
   enabled: true
 
 # =============================================================================
-# Bespoke images -> ghcr.io/aborek/sovereign-os (NOT kind-loaded on a real SKE
+# Bespoke images -> ghcr.io/jashwanthv07/sovereign-os (NOT kind-loaded on a real SKE
 # cluster). The chart renders bespoke images as `{{ .image.repository }}:{{ .image.tag }}`
 # with NO global registry prefix, so the chart default `sovereign-os/<name>` is
 # kind-local and unpullable on STACKIT. Override every bespoke component's
@@ -147,7 +153,7 @@ ml:
 # =============================================================================
 osUI:
   image:
-    repository: ghcr.io/aborek/sovereign-os/os-ui
+    repository: ghcr.io/jashwanthv07/sovereign-os/os-ui
     # 0.1.3 = governance effects.ts fix (approved dataset_promote/certify now moves
     # the tier) + demo-data cleanup. Built/pushed by the orchestrator after the
     # feat/ecommerce-seed merge + cleanup land. Bumped from 0.1.1.
@@ -188,7 +194,7 @@ osUI:
 
 agentRuntime:
   image:
-    repository: ghcr.io/aborek/sovereign-os/agent-runtime
+    repository: ghcr.io/jashwanthv07/sovereign-os/agent-runtime
     # 0.1.1 = plan(reasoning tier)->execute(27B tier) two-tier hand-off in the IR
     # interpreter. MUST be rebuilt + pushed (scripts/build-images.sh / make
     # stackit-images ARGS=--push) before the helm upgrade or the pod ImagePullErrors.
@@ -198,52 +204,52 @@ agentRuntime:
 # the chart default + values.selfcontained.yaml) — pull its image from ghcr too.
 mockModel:
   image:
-    repository: ghcr.io/aborek/sovereign-os/mock-model
+    repository: ghcr.io/jashwanthv07/sovereign-os/mock-model
     tag: "0.1.1"
 
 sampleAgent:
   image:
-    repository: ghcr.io/aborek/sovereign-os/sample-agent
+    repository: ghcr.io/jashwanthv07/sovereign-os/sample-agent
     tag: "0.1.0"
 
 poetAgent:
   image:
-    repository: ghcr.io/aborek/sovereign-os/poet-agent
+    repository: ghcr.io/jashwanthv07/sovereign-os/poet-agent
     tag: "0.1.0"
 
 haystack:
   image:
-    repository: ghcr.io/aborek/sovereign-os/haystack-retriever
+    repository: ghcr.io/jashwanthv07/sovereign-os/haystack-retriever
     tag: "0.1.0"
 
 dbt:
   image:
-    repository: ghcr.io/aborek/sovereign-os/dbt
+    repository: ghcr.io/jashwanthv07/sovereign-os/dbt
     tag: "0.2.0"
 
 egressProxy:
   image:
-    repository: ghcr.io/aborek/sovereign-os/egress-proxy
+    repository: ghcr.io/jashwanthv07/sovereign-os/egress-proxy
     tag: "0.1.0"
 
 webFetch:
   image:
-    repository: ghcr.io/aborek/sovereign-os/web-fetch
+    repository: ghcr.io/jashwanthv07/sovereign-os/web-fetch
     tag: "0.1.0"
 
 queryTool:
   image:
-    repository: ghcr.io/aborek/sovereign-os/query-tool
+    repository: ghcr.io/jashwanthv07/sovereign-os/query-tool
     tag: "0.3.0"
 
 sandbox:
   image:
-    repository: ghcr.io/aborek/sovereign-os/sandbox-duckdb
+    repository: ghcr.io/jashwanthv07/sovereign-os/sandbox-duckdb
     tag: "0.1.0"
 
 superset:
   image:
-    repository: ghcr.io/aborek/sovereign-os/superset
+    repository: ghcr.io/jashwanthv07/sovereign-os/superset
     tag: "6.1.0"
 
 # dagster (Orchestration tab) — ENABLED. The webserver, daemon and the
@@ -258,18 +264,18 @@ dagster:
   # the webserver/daemon templates read the parent chart's own `.Values.imagePullSecrets`
   # and the user-deployments subchart reads ITS OWN `.Values.imagePullSecrets`
   # ($.Values.imagePullSecrets in charts/dagster-user-deployments/templates/deployment-user.yaml).
-  # All three pull the private ghcr.io/aborek/sovereign-os/dagster image, so the
+  # All three pull the private ghcr.io/jashwanthv07/sovereign-os/dagster image, so the
   # registry-pull-secret must be set in both places explicitly (otherwise the pods
   # ErrImagePull on a real SKE node — the user-code Deployment had to be live-patched).
   imagePullSecrets:
     - name: registry-pull-secret
   dagsterWebserver:
     image:
-      repository: ghcr.io/aborek/sovereign-os/dagster
+      repository: ghcr.io/jashwanthv07/sovereign-os/dagster
       tag: "0.2.0"
   dagsterDaemon:
     image:
-      repository: ghcr.io/aborek/sovereign-os/dagster
+      repository: ghcr.io/jashwanthv07/sovereign-os/dagster
       tag: "0.2.0"
   dagster-user-deployments:
     enabled: true
@@ -280,7 +286,7 @@ dagster:
         annotations:
           argocd.argoproj.io/sync-wave: "2"
         image:
-          repository: ghcr.io/aborek/sovereign-os/dagster
+          repository: ghcr.io/jashwanthv07/sovereign-os/dagster
           tag: "0.2.0"
           pullPolicy: IfNotPresent
         dagsterApiGrpcArgs:
@@ -360,13 +366,13 @@ litellm:
 mlflow:
   enabled: true
   image:
-    repository: ghcr.io/aborek/sovereign-os/mlflow
+    repository: ghcr.io/jashwanthv07/sovereign-os/mlflow
     tag: "2.19.0"
 
 mlAgent:
   enabled: true
   image:
-    repository: ghcr.io/aborek/sovereign-os/ml-agent
+    repository: ghcr.io/jashwanthv07/sovereign-os/ml-agent
     tag: "0.1.0"
 
 # KServe — serves the sklearn churn model (RawDeployment, no Knative). Ships ONLY
@@ -388,11 +394,11 @@ terminal:
   enabled: true
   broker:
     image:
-      repository: ghcr.io/aborek/sovereign-os/terminal-broker
+      repository: ghcr.io/jashwanthv07/sovereign-os/terminal-broker
       tag: "0.1.0"
   sandbox:
     image:
-      repository: ghcr.io/aborek/sovereign-os/sandbox-shell
+      repository: ghcr.io/jashwanthv07/sovereign-os/sandbox-shell
       tag: "0.1.0"
 
 # Workbench (the OS UI "Workbench" tab — persistent per-builder code-server) —
@@ -403,11 +409,11 @@ workbench:
   enabled: true
   broker:
     image:
-      repository: ghcr.io/aborek/sovereign-os/workbench-broker
+      repository: ghcr.io/jashwanthv07/sovereign-os/workbench-broker
       tag: "0.1.0"
   workspace:
     image:
-      repository: ghcr.io/aborek/sovereign-os/code-server-workbench
+      repository: ghcr.io/jashwanthv07/sovereign-os/code-server-workbench
       tag: "0.1.0"
 
 # -----------------------------------------------------------------------------

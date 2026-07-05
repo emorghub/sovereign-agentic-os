@@ -68,6 +68,14 @@ spec:
               value: "0"
             - name: OLLAMA_MODEL
               value: {{ $m.model | quote }}
+            {{- if $m.llmLibrary }}
+            # Force a specific Ollama CPU runner (OLD-engine images only, e.g.
+            # ollama <= 0.6.x). This node's CPU advertises AMX but it faults under
+            # the hypervisor, so the default runner SIGSEGVs on first inference;
+            # `cpu_avx2` selects a baseline AVX2 build (no AMX/AVX512 kernels).
+            - name: OLLAMA_LLM_LIBRARY
+              value: {{ $m.llmLibrary | quote }}
+            {{- end }}
           command: ["/bin/sh", "-c"]
           args:
             - |

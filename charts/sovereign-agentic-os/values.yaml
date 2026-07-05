@@ -504,14 +504,18 @@ modelServer:
     # Ollama (MIT) — OpenAI-compatible at /v1. Pinned for reproducibility.
     repository: ollama/ollama
     tag: "0.6.8"
-  # Default model tag pulled on first boot (Ollama library tag). This is the real
-  # Ministral 3 3B Q4_K_M tag — verify with
-  # `ollama pull ministral-3:3b-instruct-2512-q4_K_M` (~2.95 GB).
-  # LICENSE: Ministral 3 ships under APACHE-2.0 (OSI-permissive) — the stack is
-  #   Apache-clean by default; see NOTICE / THIRD-PARTY-LICENSES.md. To use a
-  #   different model, keep to permissively-licensed weights and size
-  #   modelServer.resources to the tag.
-  model: "ministral-3:3b-instruct-2512-q4_K_M"
+  # Default model tag pulled on first boot (Ollama library tag). Default is
+  # qwen2.5:3b (Apache-2.0) — runs on the pinned Ollama 0.6.8 (OLD engine).
+  # NOTE: the original default (ministral-3:3b-instruct-2512-q4_K_M) needs Ollama's
+  # NEW engine (ollama:latest), which selects AMX matmul kernels that SIGSEGV on
+  # virtualized Xeons (e.g. STACKIT m3i) — see values.stackit-selfhosted.yaml and
+  # STACKIT_DEPLOY_RUNBOOK.md §13. Keep to permissively-licensed weights and size
+  # modelServer.resources to the tag.
+  model: "qwen2.5:3b"
+  # Optional: force a specific Ollama CPU runner (OLD-engine images only). Leave
+  # empty by default; set (e.g. "cpu_avx2") only on nodes where the auto-selected
+  # runner faults — e.g. AMX advertised in CPUID but broken under the hypervisor.
+  llmLibrary: ""
   port: 11434
   # N replicas behind LiteLLM load-balancing (the Service round-robins). Bump for
   # more concurrent users (~3-5 for ~30 users on CPU).
@@ -839,24 +843,23 @@ litellm:
     limits: { cpu: "1", memory: 2Gi }
   proxy_config:
     model_list:
-      # --- Self-hosted DEFAULT (Ministral 3 3B, Apache-2.0, offline, no key) ----
+      # --- Self-hosted DEFAULT (qwen2.5:3b, Apache-2.0, offline, no key) --------
       # `sovereign-default` is the cheap-first light tier. The k8s Service in front
       # of the model-server Deployment round-robins across its `replicas` pods, so
       # this single entry already load-balances; LiteLLM adds retries/fallbacks on
       # top. `sovereign-mock` is a back-compat ALIAS (existing agents/UI default to
-      # that name) pointing at the SAME self-hosted default — despite the name it is
-      # now real Ministral 3, not the stub.
+      # that name) pointing at the SAME self-hosted default.
       # NOTE: proxy_config is static config (the LiteLLM subchart consumes it as-is,
       # in its OWN value context), so these are LITERALS — keep `model` and the
       # api_base port in sync with modelServer.model / modelServer.port above.
       - model_name: sovereign-default
         litellm_params:
-          model: openai/ministral-3:3b-instruct-2512-q4_K_M   # == modelServer.model
+          model: openai/qwen2.5:3b            # == modelServer.model
           api_base: http://model-server:11434/v1   # == modelServer.port
           api_key: "sk-local-unused"          # self-hosted; ignored, not a secret
-      - model_name: sovereign-mock            # back-compat alias -> Ministral default
+      - model_name: sovereign-mock            # back-compat alias -> self-hosted default
         litellm_params:
-          model: openai/ministral-3:3b-instruct-2512-q4_K_M
+          model: openai/qwen2.5:3b
           api_base: http://model-server:11434/v1
           api_key: "sk-local-unused"
       # --- External self-hosted over WireGuard (Mac Mini's Ollama qwen3:14b) ----
