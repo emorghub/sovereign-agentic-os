@@ -27,18 +27,19 @@ terraform {
   # go-live: create a dedicated `tfstate` bucket + credential first, then
   # `terraform init -migrate-state`. Use credentials separate from the workloads.
   #
-  # backend "s3" {
-  #   bucket                      = "sovereign-os-tfstate"
-  #   key                         = "mode-b/terraform.tfstate"
-  #   region                      = "eu01"
-  #   endpoints                   = { s3 = "https://object.storage.eu01.onstackit.cloud" }
-  #   skip_credentials_validation = true
-  #   skip_region_validation      = true
-  #   skip_requesting_account_id  = true
-  #   skip_metadata_api_check     = true
-  #   use_path_style              = true
-  #   # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY = the Object Storage credential.
-  # }
+  backend "s3" {
+    bucket                      = "emagos-tfstate"   # em-stackit-lab project (creds separate from emagos workloads)
+    key                         = "emagos/terraform.tfstate"
+    region                      = "eu01"
+    endpoints                   = { s3 = "https://object.storage.eu01.onstackit.cloud" }
+    skip_credentials_validation = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    use_path_style              = true
+    use_lockfile                = true               # S3-native state locking (no DynamoDB)
+    # Creds via env: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (F:\EM\EM_StackIT\.secrets\s3-credentials.env)
+  }
 }
 
 # Authentication (build-deploy-stackit.md: provisioning-scoped SA key, gitignored).
