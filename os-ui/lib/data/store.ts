@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
-import type { Role } from '../session.ts';
+import { type Role, roleAtLeast } from '../session.ts';
 import {
   type Dataset,
   type DataVisibility,
@@ -14,6 +14,7 @@ import {
   type VersionState,
   type ColumnDoc,
   type TrustLevel,
+  type DatasetUpstream,
   DatasetError,
   canTransition,
   emptyVersions,
@@ -25,8 +26,9 @@ import {
 } from './dataset-schema.ts';
 import { transparencyGate, gateReason } from './transparency.ts';
 import { CUBE_ARTIFACT, EXPOSURE_ARTIFACT, scaffoldCubeYaml, scaffoldExposureYaml } from './metrics.ts';
-import { assetTarget, productTarget } from './store-fqn.ts';
+import { assetTarget, productTarget, personalSchema, slug } from './store-fqn.ts';
 import { config } from '../config.ts';
+import { osMirror } from '../os-mirror.ts';
 
 // Re-export the FQN helpers so existing consumers keep importing them from the store.
 export { assetTarget, productTarget } from './store-fqn.ts';
@@ -72,11 +74,11 @@ export type DatasetSummary = {
   storage: ReturnType<typeof storageFor>;
 };
 
-type DataStoreState = { store: Map<string, DatasetRecord>; seeded: boolean; osHealthy: boolean; hydration: Promise<void> | null };
+type DataStoreState = { store: Map<string, DatasetRecord>; seeded: boolean; hydration: Promise<void> | null };
 const DS_KEY = Symbol.for('soa.data.store');
 function ds(): DataStoreState {
   const g = globalThis as unknown as Record<symbol, DataStoreState | undefined>;
-  if (!g[DS_KEY]) g[DS_KEY] = { store: new Map(), seeded: false, osHealthy: false, hydration: null };
+  if (!g[DS_KEY]) g[DS_KEY] = { store: new Map(), seeded: false, hydration: null };
   return g[DS_KEY]!;
 }
 
@@ -94,57 +96,32 @@ function now(): string {
  * mirrored fire-and-forget. Every backend path is graceful — an unreachable
  * OpenSearch NEVER fails a request; the store simply stays in-memory.
  *
- * NOTE: kept free of `server-only`/Next imports (only `config` + global `fetch`) so
- * the store stays directly unit-testable.
+ * The probe/bootstrap/write-through core is the shared `lib/os-mirror.ts` (a
+ * missing index is CREATED on first contact, never mistaken for a dead mirror).
+ * Kept free of `server-only`/Next imports so the store stays unit-testable.
  */
 
-async function osFetch(path: string, init?: RequestInit): Promise<Response | null> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 2500);
-  try {
-    return await fetch(`${config.opensearchUrl}${path}`, {
-      ...init,
-      signal: ctrl.signal,
-      cache: 'no-store',
-      headers: { 'content-type': 'application/json', accept: 'application/json', ...(init?.headers ?? {}) },
-    });
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function ensureIndex(): Promise<void> {
-  const head = await osFetch(`/${config.datasetsIndex}`, { method: 'HEAD' });
-  if (head && head.status === 404) {
-    await osFetch(`/${config.datasetsIndex}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        mappings: {
-          properties: {
-            id: { type: 'keyword' },
-            owner: { type: 'keyword' },
-            domain: { type: 'keyword' },
-            updatedAt: { type: 'date' },
-            // The single-source yaml + tool-native bodies are STORED (in _source)
-            // but not indexed: `artifacts` has arbitrary file-path keys, which
-            // would otherwise explode the mapping.
-            yaml: { type: 'text', index: false },
-            artifacts: { type: 'object', enabled: false },
-          },
-        },
-      }),
-    });
-  }
-}
+const mirror = osMirror({
+  index: config.datasetsIndex,
+  createBody: {
+    mappings: {
+      properties: {
+        id: { type: 'keyword' },
+        owner: { type: 'keyword' },
+        domain: { type: 'keyword' },
+        updatedAt: { type: 'date' },
+        // The single-source yaml + tool-native bodies are STORED (in _source)
+        // but not indexed: `artifacts` has arbitrary file-path keys, which
+        // would otherwise explode the mapping.
+        yaml: { type: 'text', index: false },
+        artifacts: { type: 'object', enabled: false },
+      },
+    },
+  },
+});
 
 function writeThrough(rec: DatasetRecord): void {
-  if (!ds().osHealthy) return;
-  void osFetch(`/${config.datasetsIndex}/_doc/${rec.id}?refresh=true`, {
-    method: 'PUT',
-    body: JSON.stringify(rec),
-  });
+  mirror.writeThrough(rec.id, rec);
 }
 
 /**
@@ -160,24 +137,10 @@ export async function ensureHydrated(): Promise<void> {
 
 async function hydrate(): Promise<void> {
   const s = ds();
-  const ping = await osFetch(`/${config.datasetsIndex}/_count`);
-  if (ping && ping.ok) {
-    s.osHealthy = true;
-    await ensureIndex();
-    const res = await osFetch(`/${config.datasetsIndex}/_search?size=1000`, {
-      method: 'POST',
-      body: JSON.stringify({ query: { match_all: {} } }),
-    });
-    if (res && res.ok) {
-      const data = (await res.json()) as { hits?: { hits?: { _source: DatasetRecord }[] } };
-      for (const h of data?.hits?.hits ?? []) {
-        const rec = h._source;
-        // Don't clobber records created in-process before hydration completed.
-        if (rec && rec.id && !s.store.has(rec.id)) s.store.set(rec.id, rec);
-      }
-    }
-  } else {
-    s.osHealthy = false;
+  const docs = (await mirror.hydrate(1000)) ?? []; // null → mirror down → in-memory only
+  for (const rec of docs as DatasetRecord[]) {
+    // Don't clobber records created in-process before hydration completed.
+    if (rec && rec.id && !s.store.has(rec.id)) s.store.set(rec.id, rec);
   }
   s.seeded = true;
 }
@@ -211,8 +174,8 @@ export function __resetStore(): void {
   const s = ds();
   s.store.clear();
   s.seeded = false;
-  s.osHealthy = false;
   s.hydration = null;
+  mirror.__reset();
 }
 
 // ------------------------------------------------------------------- scoping --
@@ -311,6 +274,90 @@ export function getDataset(id: string, user: Principal): Dataset {
   return viewOf(get(id), user);
 }
 
+/**
+ * All governed datasets (shared assets + certified products), UNSCOPED — the source
+ * the Cube model-sync sidecar reads via `GET /api/cube/models`. Deliberately not
+ * user-scoped: it emits ONLY governed tiers, so a private `dataset` (owner-only,
+ * personal lane) NEVER appears — the endpoint hands out model definitions + access
+ * policies, never row data, and is cluster-internal (see that route's trust-boundary
+ * note). The physical "Gold is built" gate lives in `cube-models.cubeDeliverable`.
+ */
+export function listGovernedDatasets(): Dataset[] {
+  ensureSeeded();
+  const out: Dataset[] = [];
+  for (const rec of ds().store.values()) {
+    const d = parseDataset(rec.yaml);
+    if (d.tier !== 'dataset') out.push(d);
+  }
+  return out;
+}
+
+/** A dataset the caller may JOIN into a Gold build (stage-4 reuse). */
+export type JoinableDataset = { id: string; name: string; domain: string; tier: Tier; fqn: string; columns: string[] };
+
+/**
+ * The canView-scoped list of OTHER datasets the caller can reuse in a Gold join: only
+ * governed tiers (asset/product) they may READ (never a private dataset they don't own)
+ * that actually have a physical table (silver/gold built). This is the SAME `canView`
+ * gate the catalog/list use — the join picker can never surface a dataset the caller
+ * can't see, and the route re-checks `getDataset` per pick as defense in depth.
+ */
+export function listJoinable(user: Principal, excludeId?: string): JoinableDataset[] {
+  ensureSeeded();
+  const out: JoinableDataset[] = [];
+  for (const rec of ds().store.values()) {
+    const d = parseDataset(rec.yaml);
+    if (d.id === excludeId) continue;
+    if (d.tier === 'dataset') continue; // private, owner-only — not reusable
+    if (!canView(d, user)) continue; // the hard visibility gate
+    if (!d.versions.gold.built && !d.versions.silver.built) continue; // must be materialized
+    out.push({ id: d.id, name: d.name, domain: d.domain, tier: d.tier, fqn: assetTarget(d), columns: d.columns.map((c) => c.name) });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** One dataset the Ask (NL→SQL) surface may show the model. */
+export type AskableDataset = {
+  id: string;
+  name: string;
+  domain: string;
+  tier: Tier;
+  /** Physical Trino FQN of the furthest BUILT layer. */
+  fqn: string;
+  description: string;
+  columns: ColumnDoc[];
+};
+
+/**
+ * The canView-scoped datasets Talk-to-your-data may put in the LLM prompt: ONLY
+ * datasets the caller may READ (the same `canView` gate the catalog/join picker
+ * use — another user's private schema/docs can NEVER appear here) that have a
+ * built physical layer to query. The FQN mirrors the write path: a private
+ * dataset lives in the caller's OWN `personal_<uid>` schema (canView private ⇒
+ * owner === caller), a governed asset/product in its domain schema.
+ */
+export function listAskable(user: Principal): AskableDataset[] {
+  ensureSeeded();
+  const out: AskableDataset[] = [];
+  for (const rec of ds().store.values()) {
+    const d = parseDataset(rec.yaml);
+    if (!canView(d, user)) continue; // the hard visibility gate
+    const f = furthest(d);
+    if (!f.layer) continue; // nothing materialized — nothing to query
+    const schema = d.tier === 'dataset' ? personalSchema(user.id) : d.domain;
+    out.push({
+      id: d.id,
+      name: d.name,
+      domain: d.domain,
+      tier: d.tier,
+      fqn: `iceberg.${schema}.${f.layer}_${slug(d.name)}`,
+      description: d.description,
+      columns: d.columns,
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 // ------------------------------------------------------------- create / edit --
 
 export function createDataset(user: Principal, input: { name: string; domain?: string }): Dataset {
@@ -359,6 +406,28 @@ export function buildVersion(
   if (patch.body !== undefined && next.artifact) {
     rec.artifacts = { ...(rec.artifacts ?? {}), [next.artifact]: patch.body };
   }
+  persist(rec, d);
+  return d;
+}
+
+/**
+ * Commit a Gold JOIN build (stage-4 reuse): mark the Gold version built with its
+ * compiled CTAS artifact, record the defined measures (they feed the Cube scaffold at
+ * promotion — T7) and the multi-upstream lineage edges (the additional datasets the
+ * join read). Editing is Creator+ on a dataset you can edit; called ONLY after the
+ * Build report is ✓ (the honesty contract — no dot without a real materialized table).
+ */
+export function buildGoldJoin(
+  id: string,
+  user: Principal,
+  input: { measures: Measure[]; upstreams: DatasetUpstream[]; artifact: string; body: string },
+): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  d.versions.gold = { built: true, passThrough: false, quality: 'unknown', updatedAt: now(), artifact: input.artifact };
+  rec.artifacts = { ...(rec.artifacts ?? {}), [input.artifact]: input.body };
+  d.measures = input.measures;
+  d.upstreams = input.upstreams;
   persist(rec, d);
   return d;
 }
@@ -504,12 +573,13 @@ export function requestPromotion(
 }
 
 /**
- * Apply an APPROVED promotion. The approval IS the authorization, so ownership is
- * NOT required here — but the approver must be a domain Builder/Admin (the role
- * gate) and the transparency gate is re-checked. This is the Creator→Builder
- * handoff: the Builder's approval promotes a dataset they don't own into Trino.
+ * Validate an approved promotion WITHOUT applying it — every gate the apply
+ * enforces (tier still pending, approver is a domain Builder/Admin, transparency
+ * green), returning the parsed dataset. The physical-publish path (T8) calls this
+ * FIRST, runs the real materialization, and only then flips the tier via
+ * {@link applyApprovedPromotion} — so a failed CTAS can never leave a flipped tier.
  */
-export function applyApprovedPromotion(req: PromotionRequest, approver: Principal): Dataset {
+export function validatePromotion(req: PromotionRequest, approver: Principal): Dataset {
   const rec = get(req.datasetId);
   const d = parseDataset(rec.yaml);
   if (d.tier !== 'dataset') fail('Dataset is no longer pending promotion', 409);
@@ -518,6 +588,18 @@ export function applyApprovedPromotion(req: PromotionRequest, approver: Principa
   if (!roleGate.ok) fail(roleGate.reason ?? 'promotion requires a Builder', 403);
   const gate = transparencyGate(d);
   if (!gate.ok) fail(`Promotion blocked — ${gateReason(gate)}`, 400);
+  return d;
+}
+
+/**
+ * Apply an APPROVED promotion. The approval IS the authorization, so ownership is
+ * NOT required here — but the approver must be a domain Builder/Admin (the role
+ * gate) and the transparency gate is re-checked. This is the Creator→Builder
+ * handoff: the Builder's approval promotes a dataset they don't own into Trino.
+ */
+export function applyApprovedPromotion(req: PromotionRequest, approver: Principal): Dataset {
+  const rec = get(req.datasetId);
+  const d = validatePromotion(req, approver);
 
   d.tier = 'asset'; // storageFor(asset) === 'trino-iceberg'
   d.visibility = visibilityFor('asset', req.visibility);
@@ -604,7 +686,7 @@ export function importProduct(id: string, importer: Principal): Dataset {
   // domain read access, so it is a Builder+ action. A participant/creator is
   // blocked (403) and must ask a domain Builder/Admin — this is the real control
   // (middleware lets every /api/* through to self-guard).
-  if (importer.role !== 'builder' && importer.role !== 'admin') {
+  if (!roleAtLeast(importer.role, 'builder')) {
     fail('Importing a data product requires a Builder or Admin — ask a domain Builder to import it', 403);
   }
   const rec = get(id);

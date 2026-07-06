@@ -74,6 +74,14 @@ opensearch:
     enabled: true
     size: 8Gi
 
+# Nightly logical dump of EVERY Postgres database to the lakehouse bucket
+# (s3://lakehouse/backups/pg/<stamp>/), 14-day retention — the consistent
+# Postgres backup path (Velero fs-backup deliberately skips live PGDATA).
+# See docs/backups.md.
+backup:
+  pgDump:
+    enabled: true
+
 # -----------------------------------------------------------------------------
 # Ollama (model-server) — KEEP the chart-default 0.6.8 (OLD engine). `latest`'s
 # NEW engine selects AMX matmul kernels that SIGSEGV on this node's virtualized
@@ -145,10 +153,11 @@ wireguard:
 # dagsterRetrain the monthly churn-retrain definition. ONLY modelServer.reasoning stays
 # OFF (no GGUF staged — in-box Ministral is the reasoning default; see above).
 #
-# PREREQUISITE for KServe: the KServe controller CRDs are NOT installed on the
-# cluster yet (cert-manager IS). `helm upgrade` with kserve.enabled=true FAILS
-# until the controller is bootstrapped — see the deploy recipe / report. cert-manager
-# is already present (no need to reinstall it).
+# PREREQUISITE for KServe: the KServe controller + CRDs are a cluster-scoped
+# bootstrap installed BEFORE this chart (docs/components/kserve.md). DONE on the
+# live cluster 2026-06-30: `helm install kserve oci://ghcr.io/kserve/charts/kserve
+# -n kserve --create-namespace --set kserve.controller.deploymentMode=RawDeployment`
+# (v0.15.0, RawDeployment — no Knative/Istio; cert-manager was already present).
 ml:
   enabled: true
 
@@ -181,7 +190,36 @@ osUI:
     # renamed `creator`->`agentic-leader`, label "Agentic Leader Program"; ladder
     # agentic-leader<builder<admin) + real Q3-2026 cohort seed (id=email) into
     # domain agentic-leader-q3-2026.
-    # 0.1.17 = close residual unauth routes (/api/policy PII leak, software/agents/
+    # 0.1.33 = SECURITY: MCP v2 P0 — unified promotion/certification ladder (one
+    # effects.ts seam) closes 8 governance back doors incl. a builder publishing a
+    # student's private knowledge draft; pending-handle governance queue; get_lineage;
+    # import_product. 0.1.32 = DURABILITY: mirror-bootstrap fix (404-index no longer kills the mirror)
+    # + every user-facing store persists (agents/dashboards/bets/knowledge/files) —
+    # artifacts survive redeploys. + 4-rank roles, nav consolidation, console UX,
+    # Science relabel, capability profiles, tile ordering, tutorials, MCP Wave B.
+    # 0.1.31 = SECURITY: platform tabs admin-only for real (sidebar minRole filter +
+    # server walls on 8 previously-ungated pages; Tutorials hub stays public).
+    # 0.1.30 = MCP Wave B (9 read-back/operate tools) + per-user drag-drop tile
+    # ordering (Strategy+BigBets) + bet-pillar dropdown fix (phantom store) + inline
+    # pillar create + capability profiles promoted/editable + connect-drawer UX
+    # (platform-equal steps) + tutorials for Strategy/Files/Governance/Monitoring.
+    # 0.1.29 = Data M1 complete (W5 physical publish + W6 NL->SQL) + MCP Wave A
+    # (8 governed tools: ingest/profile/silver/gold via MCP, query_metric,
+    # run_agent_system, Science list/get_model + prompt) + truthfulness fix + OPA
+    # banner fix + Science serving env. 0.1.28 = agent-MCP access (internal Agent-tab agents run their multi-agent
+    # workflows through the governed OS toolset via handleRpc AS THEIR OWNER; Grants
+    # picker; templates on MCP names; scheduled runs as owner). 0.1.27 = Data M1 W4
+    # (Gold join builder + Cube model auto-delivery) + Polaris-mart materialized.
+    # 0.1.26 = Data M1 W3 (upload->physical Bronze, Explore profile, Silver CTAS).
+    # 0.1.25 = honest Catalog (no 500) + admin role-permissions editor (/platform/roles).
+    # 0.1.24 = agent Build Forgejo 422 fix (POST-create vs PUT-update) + inline run
+    # output/steps view. 0.1.23 = Science tab: MLflow blank-page fix (skipTrailingSlashRedirect) + Featureform
+    # creator-openable. 0.1.22 = MCP OAuth managed-auth (Claude Desktop SSO connect via OS-native OAuth
+    # 2.1 + drawer identity UX). 0.1.21 = software builder Phase 1 (phase router: ask->build->preview->iterate,
+    # honest errors, build-spec MD). 0.1.20 = MCP major rebuild (instructions + Resources/guides + Prompts + discovery
+    # tools + connections MCP + promotion split + science run-as-caller). 0.1.19 = ship public/ (Monaco editor bundle) in the image + middleware skips
+    # /monaco — fixes AGENT.md/MEMORY.md editor stuck on Loading. 0.1.18 = global overarching-MCP connect button in top-right topbar (all golden
+    # paths from Claude). 0.1.17 = close residual unauth routes (/api/policy PII leak, software/agents/
     # status/models) + last store pins + docs refresh. GO-CLEAN. 0.1.16 = per-tab MCP write tools + AI ergonomics (typed errors, whoami,
     # list_capabilities). 0.1.15 = security lockdown 2 (gate unauth /api/query etc., fail-closed governed.ts,
     # login cache-bust) + all in-process stores globalThis-pinned + Software Delivery
@@ -193,7 +231,7 @@ osUI:
     # 0.1.11 = Agents-tab builder rebuild: globalThis store fix (AGENT.md/MEMORY.md
     # now load), single Auto/Reasoning/Execution model toggle (real sovereign-*
     # ids), React Flow drag-and-drop graph builder, master-detail rail + templates.
-    tag: "0.1.17"
+    tag: "0.1.33"
   # ---- Mailer: the OS sends its OWN mail via the in-cluster maddy MTA. --------
   # os-ui's SMTP transport is pointed at the in-cluster `mail` Service (587,
   # STARTTLS); maddy DKIM-signs and delivers as noreply@sovereign-agentic.com.
@@ -227,11 +265,21 @@ osUI:
 # and templates/mail/maddy.yaml for the open-relay guards + go-live steps.
 mail:
   enabled: true
-  # outbound: direct is the chart default. STACKIT/cloud commonly BLOCKS outbound
-  # :25 — if a test send to an external MX hangs/fails, flip to smarthost:
-  #   outbound: smarthost
-  #   smarthost: { host: "smtp.eu.mailgun.org", port: 465, scheme: tls }
-  # (+ create the mail-smarthost Secret with SMARTHOST_USER/SMARTHOST_PASS).
+  # VERIFIED 2026-07-05: STACKIT BLOCKS outbound :25 from this cluster. Tested from
+  # in-cluster pods (SNAT egress IP 213.17.17.64): :443 to arbitrary hosts connects
+  # instantly, but :25 to 1.1.1.1/8.8.8.8 times out and to real MX
+  # (gmail-smtp-in.l.google.com) returns ENETUNREACH ("network unreachable") — the
+  # classic OpenStack port-25 null-route. => DIRECT-to-MX WILL NOT DELIVER.
+  # Therefore maddy MUST relay through a smarthost (submission on 587/465, which
+  # STACKIT does NOT block). Do NOT rely on `outbound: direct` below.
+  #
+  # TO GO LIVE (smarthost): copy values.mail.private.example.yaml ->
+  # values.mail.private.yaml (gitignored), pick your EU-sovereign relay host, and
+  # apply it LAST (-f values.mail.private.yaml) so it flips outbound=smarthost.
+  # Relay CREDENTIALS never go in any values file — create the mail-smarthost
+  # Secret out-of-band (SMARTHOST_USER/SMARTHOST_PASS). DKIM signing is unaffected
+  # by the delivery path. `outbound: direct` is kept here only so the base renders;
+  # the private overlay is required for actual delivery.
   outbound: direct
 
 agentRuntime:
@@ -278,7 +326,12 @@ webFetch:
 queryTool:
   image:
     repository: ghcr.io/jashwanthv07/sovereign-os/query-tool
-    tag: "0.3.0"
+    tag: "0.4.0"   # 0.4.0 = governed /execute write path (Data M1 W2 T1)
+
+dataRunner:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/data-runner
+    tag: "0.1.0"
 
 sandbox:
   image:
@@ -336,7 +389,10 @@ dagster:
           - { name: TRINO_PORT, value: "8080" }
           - { name: TRINO_USER, value: dbt-sales }
           - { name: TRINO_CATALOG, value: iceberg }
-          - { name: TRINO_SCHEMA, value: analytics }
+          # sales, NOT analytics: profiles.yml + queryTool + the OPA governance map all
+          # target iceberg.sales — an analytics pin here would materialize dbt models
+          # into a dead, ungoverned schema (chart-sync flagged item #1).
+          - { name: TRINO_SCHEMA, value: sales }
         resources:
           requests: { cpu: 50m, memory: 384Mi }
           limits: { cpu: "1", memory: 1Gi }
@@ -411,7 +467,7 @@ mlAgent:
   enabled: true
   image:
     repository: ghcr.io/jashwanthv07/sovereign-os/ml-agent
-    tag: "0.1.0"
+    tag: "0.1.1"   # 0.1.1 = LangGraph node-name fix ("plan" collided with FlowState.plan -> import crash)
 
 # KServe — serves the sklearn churn model (RawDeployment, no Knative). Ships ONLY
 # the InferenceService CR; the controller + CRDs must be bootstrapped on the cluster
@@ -430,10 +486,16 @@ kserve:
 # values.private.yaml — NOT the insecure in-chart default.
 terminal:
   enabled: true
+  # Session lifetimes for the auto-connected, stays-open-while-logged-in shell:
+  # generous idle (4h — the tab keeps the WS open across in-app navigation; the
+  # session should not die under a user who stepped away) + a 12h hard ceiling.
+  # Logout / closing the browser tears the WS down and the pod is reaped at once.
+  idleTimeoutSeconds: 14400
+  maxSessionSeconds: 43200
   broker:
     image:
       repository: ghcr.io/jashwanthv07/sovereign-os/terminal-broker
-      tag: "0.1.0"
+      tag: "0.1.1"   # 0.1.1: sandbox imagePullSecrets + honest wait status/fail-fast
   sandbox:
     image:
       repository: ghcr.io/jashwanthv07/sovereign-os/sandbox-shell
@@ -491,7 +553,7 @@ dagsterRetrain:
 # ingress-nginx LoadBalancer (its public IP is written into the STACKIT DNS zone
 # by `make dns`); cert-manager issues Let's Encrypt certs. `agentic.datamasterclass.com` is
 # substituted with `terraform output dns_name` by render-values.sh.
-# Same 7 keys the chart's templates/ingress.yaml routes to in-cluster Services.
+# Same keys the chart's templates/ingress.yaml routes to in-cluster Services.
 # -----------------------------------------------------------------------------
 ingress:
   enabled: true
@@ -507,6 +569,26 @@ ingress:
     superset: "superset.agentic.datamasterclass.com"
     forgejo: "forgejo.agentic.datamasterclass.com"
     argocd: "argocd.agentic.datamasterclass.com"
+    # Terminal + Workbench broker hosts. WITHOUT these, the chart renders
+    # TERMINAL_BROKER_WS / WORKBENCH_BROKER_URL as "" on the os-ui
+    # (soa.terminalWsUrl / soa.consoleUrl) and neither console can reach its
+    # broker from the browser. The terminal host serves the wss:// PTY
+    # WebSocket; the workbench host serves the code-server reverse proxy (its
+    # Ingress also answers CORS for the OS UI origins — the session handshake
+    # is a cross-origin credentialed fetch).
+    terminal: "terminal.agentic.datamasterclass.com"
+    workbench: "workbench.agentic.datamasterclass.com"
+    # Dagster console (the "Open Dagster" target on the Orchestration/Components
+    # tab). WITHOUT this the chart renders DAGSTER_CONSOLE_URL as "" on the
+    # os-ui and the UI has no reachable console to open.
+    dagster: "dagster.agentic.datamasterclass.com"
+  # Dagster OSS has NO auth of its own (every other exposed console has a login),
+  # so its Ingress enforces nginx basic-auth from this htpasswd Secret (key
+  # `auth`, release namespace). Create it once:
+  #   htpasswd -Bbn <user> '<password>' | kubectl -n agentic-os \
+  #     create secret generic dagster-basic-auth --from-file=auth=/dev/stdin
+  # ingress-nginx fails CLOSED (503) while the Secret is absent.
+  dagsterBasicAuthSecret: dagster-basic-auth
 
 # NOTE: NO objectStorage/postgres/opensearch/llm `external:` blocks here on
 # purpose — every backend stays BUNDLED (the values.selfcontained.yaml +

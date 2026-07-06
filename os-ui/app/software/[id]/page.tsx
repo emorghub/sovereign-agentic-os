@@ -12,6 +12,7 @@ import CodePanel from '@/components/CodePanel';
 import { useToolWindow } from '@/components/ToolWindowProvider';
 import { useApi } from '@/lib/useApi';
 import { getUrlParam, patchUrl } from '@/lib/url-params';
+import { roleAtLeast, type Role as SessionRole } from '@/lib/session';
 
 type Visibility = 'Personal' | 'Shared' | 'Certified';
 type Tool = { name: string; description: string; write: boolean };
@@ -48,7 +49,7 @@ type App = {
   dataArtifactId: string | null;
 };
 type Connection = { id: string; name: string; principal: string; visibility: Visibility; tools: Tool[] } | null;
-type Data = { user: { id: string; role: string }; app: App; connection: Connection };
+type Data = { user: { id: string; role: SessionRole }; app: App; connection: Connection };
 
 const STAGES = ['forgejo', 'actions', 'harbor', 'argocd', 'live'] as const;
 const STAGE_LABEL: Record<string, string> = {
@@ -124,7 +125,10 @@ export default function AppPage() {
       const res = await fetch(`/api/apps/${id}/deploy${action ? `?action=${action}` : ''}`, { method: 'POST' });
       const body = await res.json();
       if (!res.ok) setDeployMsg(`✗ ${body.error}`);
-      else if (action === 'preview') setDeployMsg(`✓ Private preview running at ${body.app.deploy.previewUrl}`);
+      else if (action === 'preview')
+        setDeployMsg(
+          '✓ Preview requested — your commits are real. The served preview URL is pending the in-cluster runner (next release).',
+        );
       else if (body.kind === 'review') setDeployMsg('✓ Sent to a Builder for review (see Deploy reviews).');
       else setDeployMsg('✓ Routine update — published within the approved envelope.');
       reload();
@@ -222,9 +226,8 @@ export default function AppPage() {
   const surface = app.surface ?? { ui: true, api: true };
   const dep = deployBadge(app.deploy.state);
   const version = app.deploy.releases > 0 ? `v${app.deploy.releases}` : 'Unpublished';
-  const canEditCode = data.user.role === 'builder' || data.user.role === 'admin';
+  const canEditCode = roleAtLeast(data.user.role, 'builder');
   const canPromoteUI = promoteLabel(app.visibility);
-  const liveUrl = `https://${app.subdomain}`;
   // A deploy is already awaiting a Builder — block re-requesting (it would open a
   // duplicate review card and orphan the pending one). Point to the review inbox.
   const inReview = app.deploy.state === 'review';
@@ -266,11 +269,17 @@ export default function AppPage() {
                 </div>
                 <div className="row" style={{ gap: 8, alignItems: 'center', flexShrink: 0 }}>
                   {surface.ui ? (
-                    app.deploy.state === 'live' ? (
-                      <a className="btn" href={liveUrl} target="_blank" rel="noreferrer">Open app UI ↗</a>
-                    ) : (
-                      <button className="btn" disabled title="Publish a release to go live">Open app UI ↗</button>
-                    )
+                    <button
+                      className="btn"
+                      disabled
+                      title={
+                        app.deploy.state === 'live'
+                          ? 'Deploy approved — the in-cluster runner that serves this app ships in the next release.'
+                          : 'Publish a release to go live'
+                      }
+                    >
+                      Open app UI ↗
+                    </button>
                   ) : null}
                   {surface.api ? (
                     <button className={surface.ui ? 'btn ghost' : 'btn'} onClick={() => setShowApi((v) => !v)}>

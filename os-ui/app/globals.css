@@ -1244,6 +1244,103 @@ code {
   font-size: 11px;
 }
 
+/* The consolidated Components operator list: one calm bordered list per layer,
+   a row per component (dot · name · version · one-line blurb · badge · actions),
+   details behind an expand — no cards-in-cards. */
+.comp-list {
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.comp-item + .comp-item {
+  border-top: 1px solid var(--border);
+}
+
+.comp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px 10px 14px;
+}
+
+.comp-expand {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.comp-item:hover {
+  background: rgba(200, 162, 74, 0.03);
+}
+
+.comp-ver {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.comp-blurb {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.comp-row .badge,
+.comp-row .btn,
+.comp-row .switch,
+.comp-row .chip {
+  flex: none;
+}
+
+.comp-detail {
+  padding: 2px 16px 16px 32px;
+}
+
+.comp-detail .comp-summary {
+  margin-top: 4px;
+}
+
+.comp-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.comp-chiprow .chip {
+  font-size: 11px;
+}
+
+.comp-toollist {
+  margin: 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+}
+
+@media (max-width: 860px) {
+  .comp-blurb {
+    display: none;
+  }
+}
+
 /* Reasoning-target segmented control (agent editor) — three-way model choice.
    Reuses the warm gold tokens + snappy transitions of the design system so the
    selected state reads identically in light + dark; the routing/fallback
@@ -3216,6 +3313,35 @@ button.card.tile:hover .tile-action { opacity: 1; }
   gap: 12px;
 }
 
+/* Global "Connect your AI Tool via MCP" button — lives in the top-right topbar
+   on every page. Apple-dark: translucent white border, muted fill, off-white
+   text; teal ⊕ spark signals "connect". Transitions on hover only. */
+.topbar-mcp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+.topbar-mcp-btn:hover {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.30);
+}
+.topbar-mcp-btn .tut-link-spark {
+  color: var(--teal);
+  font-size: 11px;
+}
+
 /* The single tutorial trigger (Home card + tab header) */
 .tut-link {
   display: inline-flex;
@@ -4911,4 +5037,44 @@ button.card.tile:hover .tile-action { opacity: 1; }
   .rs-preset-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* -------------------------------------------------------- Tile-order drag ---- */
+
+/* ⋮⋮ grab handle — quiet dot-grid affordance, appears on parent hover only */
+.drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  cursor: grab;
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 1px;
+  line-height: 1;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.14s ease, color 0.14s ease;
+  flex-shrink: 0;
+  user-select: none;
+}
+.drag-handle:active { cursor: grabbing; }
+
+/* Show handle when the draggable parent is hovered or is the drag source */
+[draggable='true']:hover .drag-handle,
+[data-drag-source='true'] .drag-handle {
+  opacity: 1;
+}
+
+/* Drop target highlight — calm gold outline */
+[draggable='true'][data-drag-over='true'] {
+  outline: 2px solid var(--gold-line);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
+
+/* Drag source — slight fade so the native ghost + original are distinguishable */
+[data-drag-source='true'] {
+  opacity: 0.5;
 }

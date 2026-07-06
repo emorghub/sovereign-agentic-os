@@ -92,10 +92,10 @@ export const TOOLS: Record<string, Tool> = {
     protocol: 'http',
     frame: 'strip',
     basePath: '/tools/featureform',
-    minRole: 'builder',
+    minRole: 'creator',
     embeddable: true,
     sso: { mode: 'none' },
-    note: 'Featureform OSS has no per-user accounts; builder+ only.',
+    note: 'Featureform OSS has no per-user accounts; the proxy + role gate IS the access control. creator+ (matches MLflow, its Science-tab sibling) so a creator can open it from the Layer-4 grid.',
   },
   cube: {
     key: 'cube',
@@ -218,7 +218,7 @@ export function resolveTool(key: string): Tool | undefined {
 
 /* ---------------------------------------------------------------- role gate */
 
-/** True when `role` ranks at or above `minRole` (participant<creator<builder<admin). */
+/** True when `role` ranks at or above `minRole` (creator<builder<domain_admin<admin). */
 export function roleAllowed(role: Role, minRole: Role): boolean {
   return ROLES.indexOf(role) >= ROLES.indexOf(minRole);
 }

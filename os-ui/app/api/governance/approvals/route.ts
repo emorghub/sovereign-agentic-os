@@ -3,9 +3,10 @@
  */
 import { NextResponse } from 'next/server';
 import { currentUser } from '@/lib/auth';
-import { decide, getApproval, listApprovals, recordEffect } from '@/lib/approvals';
+import { decide, ensureHydrated, getApproval, listApprovals, recordEffect } from '@/lib/approvals';
 import { canApprove, canSee, roleLabel } from '@/lib/governance/roles';
 import { applyEffect } from '@/lib/governance/effects';
+import { buildEffectDeps } from '@/lib/governance/ladder';
 import { record as audit } from '@/lib/governance/audit';
 import { remember } from '@/lib/governance/standing';
 
@@ -19,6 +20,7 @@ export const dynamic = 'force-dynamic';
  *     if "approve & remember" — writes a standing policy. An approval IS an action.
  */
 export async function GET() {
+  await ensureHydrated();
   const user = await currentUser();
   if (!user) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   const visible = listApprovals().filter((a) => canSee(user, a));
@@ -68,9 +70,16 @@ export async function POST(req: Request) {
   }
 
   // Approve === act: execute the governed effect, then audit (+ optional standing).
+  // The approver's FULL session identity is passed (id + role + domains): the
+  // dataset publish runs its CTAS as this identity — the approving Builder, never
+  // the requester — and the physical publisher is injected at this server boundary.
   let effect;
   try {
-    effect = await applyEffect(updated, user.id);
+    effect = await applyEffect(
+      updated,
+      { id: user.id, role: user.role, domains: user.domains },
+      buildEffectDeps(),
+    );
   } catch (e) {
     // The decision stands (item is approved) but the effect failed — record the
     // failure to audit rather than silently dropping it, and surface a 502.
@@ -86,7 +95,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ approval: { ...getApproval(updated.id) }, applied: null, error: 'Effect failed' }, { status: 502 });
   }
   let standingPolicyId: string | undefined;
-  if (body?.remember && updated.rememberable) {
+  // Never mint a standing policy from an effect that reported failure (e.g. a
+  // publish whose materialization failed — the tier did not flip).
+  if (effect.ok && body?.remember && updated.rememberable) {
     const sp = remember({
       kind: updated.kind,
       payload: updated.payload,
@@ -96,7 +107,7 @@ export async function POST(req: Request) {
     });
     standingPolicyId = sp.id;
   }
-  recordEffect(updated.id, { applied: effect.applied, live: effect.live, standingPolicyId });
+  recordEffect(updated.id, { applied: effect.applied, live: effect.live, standingPolicyId, publish: effect.publish });
   audit({
     actor: user.id,
     action: effect.audit.action,
@@ -110,6 +121,7 @@ export async function POST(req: Request) {
     approval: { ...getApproval(updated.id) },
     applied: effect.applied,
     live: effect.live,
+    publish: effect.publish,
     standingPolicyId,
   });
 }

@@ -16,6 +16,7 @@ import { enqueue, decide as decideApproval, listApprovals } from '@/lib/approval
 import { securityScan } from './scan.ts';
 import { detectSurface } from './metadata.ts';
 import { getSnapshot } from './server.ts';
+import { roleAtLeast } from '@/lib/session';
 import type {
   DeployEnvelope,
   DiffSummary,
@@ -59,7 +60,7 @@ const FOOTPRINT: Record<App['template'], ResourceFootprint> = {
 };
 
 function isBuilder(user: CurrentUser): boolean {
-  return user.role === 'builder' || user.role === 'admin';
+  return roleAtLeast(user.role, 'builder');
 }
 
 /** The exact governed scope a deploy is asking for (the envelope under review). */
@@ -113,9 +114,21 @@ function appFiles(app: App): ScaffoldFile[] {
 // --------------------------------------------------------------- Preview -------
 
 /**
+ * The HONEST preview/deploy state for Phase 1. The build + commit loop is real
+ * (real Forgejo commits), but no in-cluster runner serves a preview or live
+ * workload yet — so we NEVER fabricate a URL (the old `…sandbox.local` host was
+ * unresolvable). Preview enters the private iterate state; the served workload is
+ * explicitly pending. Phase 2 wires the real runner and fills these URLs.
+ */
+export const PREVIEW_PENDING_NOTE =
+  'Preview is not yet available — the in-cluster preview runner ships in the next release. ' +
+  'Your commits are real; the served preview URL is pending.';
+
+/**
  * Start a PRIVATE sandbox preview the creator runs themselves — no review. Any
  * owner (or a Builder in the domain) can preview. This is the free-iteration
- * loop; only going live in the domain is gated.
+ * loop; only going live in the domain is gated. Phase 1: this marks the app as
+ * previewing but reports the runner as PENDING (no fabricated URL).
  */
 export async function startPreview(appId: string, user: CurrentUser): Promise<App> {
   const app = await getAppByIdInternal(appId);
@@ -124,13 +137,14 @@ export async function startPreview(appId: string, user: CurrentUser): Promise<Ap
   if (!ownerOrBuilder) throw withStatus(new Error('Only the creator can preview this app'), 403);
   if (app.status === 'archived') throw withStatus(new Error('Archived apps cannot run a preview'), 409);
   app.deploy.state = app.deploy.state === 'live' ? 'live' : 'preview';
-  app.deploy.previewUrl = `https://preview--${app.slug}.${app.domain}.sandbox.local`;
+  // Honest: no runner yet → no URL. Do not claim a working preview.
+  app.deploy.previewUrl = null;
   await persistApp(app);
   void trace({
     principal: app.mcpPrincipal,
     tool: 'generate',
     input: { action: 'start_preview', by: user.id },
-    output: { previewUrl: app.deploy.previewUrl },
+    output: { preview: 'pending-runner', note: PREVIEW_PENDING_NOTE },
     decision: 'allow',
   });
   return app;

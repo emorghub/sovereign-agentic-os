@@ -31,11 +31,34 @@ test('GAP 2: the agents-systems create route no longer accepts a client visibili
   assert.match(read('app/api/agents/systems/[id]/promote/route.ts'), /promoteSystem/);
 });
 
-test('GAP 3: marketplace import paths gate on Builder+', () => {
-  assert.match(read('lib/marketplace/adapters.ts'), /role !== 'builder' && [^\n]*role !== 'admin'/, 'GovernedImportAdapter.import gates Builder+');
+test('GAP 3: marketplace import paths gate on Builder+ (rank-based — domain_admin inherits)', () => {
+  assert.match(read('lib/marketplace/adapters.ts'), /!roleAtLeast\(viewer\.role, 'builder'\)/, 'GovernedImportAdapter.import gates Builder+');
   assert.match(read('lib/artifacts.ts'), /roleRank\(user\.role\) < roleRank\('builder'\)/, 'addFromMarketplace gates Builder+');
-  assert.match(read('lib/data/store.ts'), /importer\.role !== 'builder'/, 'importProduct gates Builder+');
+  assert.match(read('lib/data/store.ts'), /!roleAtLeast\(importer\.role, 'builder'\)/, 'importProduct gates Builder+');
   assert.match(read('lib/tabs.ts'), /Marketplace'[^\n]*role: 'Builder/, 'Marketplace tab carries a role hint');
+});
+
+test('GAP 7 (4-rank migration): the governance users route enforces the domain_admin scoping predicates server-side', () => {
+  const src = read('app/api/governance/users/route.ts');
+  // Floor: user administration is Domain admin+ (builders are NOT people-admins).
+  assert.match(src, /canAdministerUsers/, 'floor gate wired');
+  // Subset rule: target domains ⊆ actor domains, on list AND every mutation.
+  assert.match(src, /userAdminInScope/, 'subset rule wired');
+  // No-lateral/no-upward: a domain_admin never touches an admin/domain_admin.
+  assert.match(src, /canTouchUser|canTouchTarget/, 'target-protection wired');
+  // Role-assignment ceiling: canManageRole caps a domain_admin at builder.
+  assert.match(src, /canManageRole/, 'role ceiling wired');
+  // Hard delete stays platform-admin-only.
+  assert.match(src, /user\.role !== 'admin'/, 'DELETE stays admin-only');
+  // Every mutation audits the actor.
+  assert.match(src, /actor: user\.id/, 'mutations audited with the actor');
+});
+
+test('GAP 8 (4-rank migration): the Platform-group user routes stay requireAdmin (tab gating from 0.1.31 not reopened)', () => {
+  for (const p of ['app/api/users/route.ts', 'app/api/users/[id]/route.ts']) {
+    assert.match(read(p), /requireAdmin/, `${p} must stay admin-only`);
+  }
+  assert.match(read('app/api/platform-admin/access/route.ts'), /adminCtx/, 'platform-admin access stays adminCtx-gated');
 });
 
 test('GAP 4: science predict routes bind identity to the session, never the body', () => {
@@ -77,6 +100,17 @@ test('LOCKDOWN 3: /api/knowledge/docs gates GET (DLS filter) + POST (session-sta
   assert.match(src, /owner: u\.id/, 'POST stamps the owner from the session');
   assert.match(src, /domain: u\.domains\[0\]/, 'POST stamps the domain from the session');
   assert.match(src, /visibility: 'Personal'/, 'POST defaults to Personal visibility');
+});
+
+test('LOCKDOWN: /api/data/ask requires a session, scopes context via listAskable, executes ONLY via queryRun(sql, principal)', () => {
+  const src = read('app/api/data/ask/route.ts');
+  assert.match(src, /requirePrincipal/, 'ask must gate on a session (401 for anon)');
+  assert.match(src, /listAskable\(user\)/, 'the LLM context must be the canView-scoped registry list');
+  assert.match(src, /queryRun\(sql, principal\)/, 'execution must go through the governed read path');
+  assert.match(src, /runAsk\(/, 'generation must pass the validating orchestrator (read-only single SELECT)');
+  assert.doesNotMatch(src, /body\.principal/, 'principal must come from the session, never the body');
+  assert.doesNotMatch(src, /body\.sql/, 'the client can never supply the SQL — only the question');
+  assert.match(src, /trace\(\{/, 'every ask turn is Langfuse-traced');
 });
 
 test('LOCKDOWN 4: /api/traces requires a session and scopes to the caller (admin = all)', () => {
@@ -123,6 +157,7 @@ const USER_GATED_GETS = [
   'app/api/agents/route.ts',
   'app/api/status/route.ts',
   'app/api/agents/models/route.ts',
+  'app/api/agents/tool-catalog/route.ts',
 ];
 
 test('LEAK-FIX 1: /api/policy GET is ADMIN-only (full grants matrix + all principal emails)', () => {
@@ -149,4 +184,64 @@ for (const p of USER_GATED_GETS) {
 test('LEAK-FIX: /api/software GET scopes private repos to admins (no cross-user private recon)', () => {
   const src = read('app/api/software/route.ts');
   assert.match(src, /user\.role === 'admin' \? all : all\.filter\(\(r\) => !r\.private\)/, 'non-admins never see private repos');
+});
+
+test('ROLE-PERMS: the role-permissions API is admin-only on both verbs', () => {
+  const src = read('app/api/platform-admin/roles/route.ts');
+  // adminCtx() is the authoritative admin gate (401 anon / 403 non-admin).
+  assert.match(src, /adminCtx\(\)/, 'GET/PATCH must pass through adminCtx');
+  // The mutating verb recompiles OPA grants for the affected role's users.
+  assert.match(src, /compileRoleToGrants/, 'PATCH must recompile OPA grants on change');
+  assert.match(src, /audit\(/, 'PATCH must audit the capability change');
+});
+
+// ---------------------------------------------------------------------------
+// Platform-group page gates (sidebar tab → server enforces the same rule).
+// ---------------------------------------------------------------------------
+
+test('PLATFORM-GATE 1: /components has a server-side admin layout', () => {
+  const src = read('app/components/layout.tsx');
+  assert.match(src, /currentUser/, 'app/components/layout.tsx must call currentUser');
+  assert.match(src, /role !== 'admin'/, 'app/components/layout.tsx must gate non-admins');
+});
+
+test('PLATFORM-GATE 2: /terminal is admin-only at the page level', () => {
+  const src = read('app/terminal/page.tsx');
+  assert.match(src, /role !== 'admin'/, 'app/terminal/page.tsx must have admin-only gate');
+});
+
+test('PLATFORM-GATE 3: /about has a server-side admin gate in the page', () => {
+  const src = read('app/about/page.tsx');
+  assert.match(src, /currentUser/, 'app/about/page.tsx must call currentUser');
+  assert.match(src, /role !== 'admin'/, 'app/about/page.tsx must gate non-admins');
+});
+
+test('PLATFORM-GATE 4: consolidated Platform tabs — Governance is builder+, the rest admin', () => {
+  const src = read('lib/tabs.ts');
+  for (const label of ['Admin', 'Components', 'Terminal', 'About / Licenses']) {
+    assert.match(src, new RegExp(`label: '${label.replace('/', '\\/')}[^']*'[^}]*minRole: 'admin'`, 's'),
+      `Platform tab "${label}" must declare minRole: 'admin'`);
+  }
+  // Governance: builders approve promotions here — admin-gating it would break
+  // the sharing ladder.
+  assert.match(src, /label: 'Governance'[^}]*minRole: 'builder'/s,
+    "Governance must declare minRole: 'builder'");
+  // Tutorials (OS group) must NOT carry minRole (visible to all — students need it).
+  const tutBlock = src.match(/label: 'Tutorials'[^}]*/s)?.[0] ?? '';
+  assert.doesNotMatch(tutBlock, /minRole/, "Tutorials must not declare minRole (all-roles visible)");
+});
+
+test('PLATFORM-GATE 5: removed tab routes are redirect stubs, not content (no 404s for old links)', () => {
+  const targets: Record<string, string> = {
+    'app/users/page.tsx': '/platform',
+    'app/gateway/page.tsx': '/components',
+    'app/orchestration/page.tsx': '/components',
+    'app/consoles/page.tsx': '/components',
+    'app/workbench/page.tsx': '/components',
+  };
+  for (const [p, target] of Object.entries(targets)) {
+    const src = read(p);
+    assert.match(src, /from 'next\/navigation'/, `${p} must use next/navigation redirect`);
+    assert.match(src, new RegExp(`redirect\\('${target}'\\)`), `${p} must redirect to ${target}`);
+  }
 });
