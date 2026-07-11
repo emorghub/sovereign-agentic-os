@@ -19,14 +19,14 @@ import {
   activeScopeCounts,
   type ScopeGroups as CoreScopeGroups,
   type ScopedTiles,
-} from '../scopes.ts';
+} from '../core/scopes.ts';
 
 export type DatasetScope = ScopeKey;
 
 export const DATASET_SCOPES: { key: DatasetScope; label: string }[] = [
   { key: 'all', label: 'All Data' },
   { key: 'mine', label: 'My Data' },
-  { key: 'shared', label: 'Shared Data' },
+  { key: 'shared', label: 'Shared in Domain Data' },
   { key: 'marketplace', label: 'Marketplace Data' },
 ];
 

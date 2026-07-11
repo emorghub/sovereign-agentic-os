@@ -2,10 +2,10 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import type { CurrentUser } from '@/lib/auth';
+import type { CurrentUser } from '@/lib/core/auth';
 import type { McpTool } from './server';
 import { pendingHandle, whoCanApprove } from './pending';
-import { decide, getApproval, listApprovals, recordEffect, type Approval, type ApprovalStatus, type ApprovalKind } from '@/lib/approvals';
+import { decide, getApproval, listApprovals, recordEffect, type Approval, type ApprovalStatus, type ApprovalKind } from '@/lib/governance/approvals';
 import { canApprove, canSee, roleLabel } from '@/lib/governance/roles';
 import { applyEffect } from '@/lib/governance/effects';
 import { buildEffectDeps, fileArtifactCertification, isLadderKind, type LadderKind } from '@/lib/governance/ladder';
@@ -17,8 +17,8 @@ import type { ImportMode } from '@/lib/marketplace/types';
 import { canViewPolicyPlane, consolidatedPlane, listEgress, policySources } from '@/lib/governance/policy-view';
 import { listStanding } from '@/lib/governance/standing';
 import { listCaps, checkCap } from '@/lib/governance/cost';
-import { listUsers } from '@/lib/users';
-import { roleAtLeast } from '@/lib/session';
+import { listUsers } from '@/lib/platform-admin/users';
+import { roleAtLeast } from '@/lib/core/session';
 
 /**
  * THE GOVERNANCE QUEUE + LADDER META-TOOLS (mcp-v2 P0). These wrap the EXISTING

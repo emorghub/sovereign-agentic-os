@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { CurrentUser } from '@/lib/auth';
+import type { CurrentUser } from '@/lib/core/auth';
 import { handleRpc, ALL_MCP_TOOLS, type JsonRpcResponse, type ToolError } from './server.ts';
 import { ALL_WRITE_TOOLS } from './write-tools.ts';
 import { __resetStore as resetData } from '@/lib/data/store';
@@ -12,8 +12,8 @@ import { __resetStore as resetFiles } from '@/lib/files/store';
 import { __resetDashboards } from '@/lib/dashboards/store';
 import { __resetBets, auditLog } from '@/lib/bigbets/store';
 import { __resetSources, __resetStrategy, __seedStrategy } from '@/lib/bigbets/sources';
-import { __resetApprovals } from '@/lib/approvals';
-import { __resetAppsCache } from '@/lib/apps';
+import { __resetApprovals } from '@/lib/governance/approvals';
+import { __resetAppsCache } from '@/lib/software/apps';
 
 /**
  * MCP WAVE B — operate & read-back parity. Seven single-reads (get_metric,

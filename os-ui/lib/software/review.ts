@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import type { CurrentUser } from '@/lib/auth';
+import type { CurrentUser } from '@/lib/core/auth';
 import {
   getAppByIdInternal,
   persistApp,
@@ -10,15 +10,15 @@ import {
   newId,
   withStatus,
   type App,
-} from '@/lib/apps';
-import { trace } from '@/lib/agent-governed';
-import { enqueue, decide as decideApproval, listApprovals } from '@/lib/approvals';
+} from '@/lib/software/apps';
+import { trace } from '@/lib/infra/agent-governed';
+import { enqueue, decide as decideApproval, listApprovals } from '@/lib/governance/approvals';
 import { securityScan } from './scan.ts';
 import { detectSurface } from './metadata.ts';
 import { getSnapshot } from './server.ts';
 import { deployApp, runnerStatus, type RunnerApp, type RunnerOutcome, type RunnerStatus } from './runner.ts';
-import { roleAtLeast } from '@/lib/session';
-import { config } from '@/lib/config';
+import { roleAtLeast } from '@/lib/core/session';
+import { config } from '@/lib/core/config';
 
 /** The app's live host, ALWAYS computed from the CURRENT apps domain — not the
  *  `app.subdomain` stored at creation time (which may carry a stale default like

@@ -2,8 +2,8 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import type { CurrentUser } from '@/lib/auth';
-import type { Role } from '@/lib/session';
+import type { CurrentUser } from '@/lib/core/auth';
+import type { Role } from '@/lib/core/session';
 import type { McpTool, JsonSchema } from './server';
 
 // --- Governed read/list lib functions (the EXACT same the UI + /api call) ------
@@ -21,7 +21,7 @@ import {
   listAppFilesForViewer,
   readAppFileForViewer,
   templateFiles,
-} from '@/lib/apps';
+} from '@/lib/software/apps';
 import { forgejoReachable, getSnapshot } from '@/lib/software/server';
 import { getReviewCard, listReviewCards, PREVIEW_PENDING_NOTE } from '@/lib/software/review';
 import {
@@ -29,18 +29,16 @@ import {
   getConnectionForUser,
   createConnection,
   testConnection,
-} from '@/lib/connections';
-import { promoteThroughSeam } from '@/lib/governance/ladder';
-import {
   CONNECTION_TEMPLATES,
   isPersonalConnectable,
   type ConnectionTemplateKey,
-} from '@/lib/connection-model';
+} from '@/lib/connections';
+import { promoteThroughSeam } from '@/lib/governance/ladder';
 import { scaffoldCubeYaml, cubeViewName } from '@/lib/data/metrics';
 import { cubeDeliverable } from '@/lib/data/cube-models';
 import { loadGuide, isGuidePath, GUIDE_PATHS } from '@/lib/tabs/guides';
-import { config } from '@/lib/config';
-import { queryRun } from '@/lib/governed';
+import { config } from '@/lib/core/config';
+import { queryRun } from '@/lib/infra/governed';
 import { versionTarget } from '@/lib/data/store-fqn';
 import type { Layer } from '@/lib/data/dataset-schema';
 import {
@@ -161,9 +159,13 @@ const readTools: McpTool[] = [
         return { datasetId: id, name: dataset.name, available: false, reason: 'Nothing built yet — bring in a Bronze version first (ingest_dataset).' };
       }
 
-      const fqn = versionTarget(dataset, layer);
-      // The principal Trino's OPA plugin governs row/column on — same as /api/query.
-      const principal = user.domains[0] ?? user.id;
+      // Viewer-aware FQN: the OWNER profiles their personal lane (which holds every
+      // layer, promoted or not); a non-owner profiles the promoted copy in the domain
+      // schema. The read PRINCIPAL must OWN that schema (readPrincipalFor's contract):
+      // the owner's personal lane is read AS the owner, the domain copy AS the domain.
+      const fqn = versionTarget(dataset, layer, { id: user.id });
+      const isOwner = user.id === dataset.owner;
+      const principal = isOwner ? user.id : (user.domains[0] ?? user.id);
       let columns: ProfileColumn[];
       try {
         columns = parseDescribe(await queryRun(`describe ${fqn}`, principal));

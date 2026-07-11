@@ -5,14 +5,14 @@
 
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { useUser } from '@/lib/useUser';
-import { canPromote } from '@/lib/session';
+import { canPromote } from '@/lib/core/session';
 import {
   type Artifact,
   type ArtifactType,
   type Visibility,
   badgeClass,
   TYPE_LABELS,
-} from '@/lib/artifact-model';
+} from '@/lib/core/artifact-model';
 
 export type SpecField = {
   key: string;
@@ -278,7 +278,7 @@ export default function ArtifactPanel({
           <div className="row" style={{ gap: 6, alignItems: 'center' }}>
             {a.archived ? <span className="badge" style={{ opacity: 0.75 }}>Archived</span> : null}
             <span className={isCert ? badgeClass('Certified') : badgeClass(a.visibility)}>
-              {isCert ? 'Certified' : a.visibility}
+              {isCert ? 'Certified' : a.visibility === 'Shared' ? 'Shared in Domain' : a.visibility}
             </span>
           </div>
         </div>
@@ -427,7 +427,7 @@ export default function ArtifactPanel({
           <div className="tabstrip" style={{ marginBottom: 0 }}>
             {(['All', 'Personal', 'Shared', 'Certified'] as const).map((f) => (
               <button key={f} className={filter === f ? 'active' : ''} onClick={() => setFilter(f)}>
-                {f}{f !== 'All' ? ` (${counts[f]})` : ''}
+                {f === 'Shared' ? 'Shared in Domain' : f}{f !== 'All' ? ` (${counts[f]})` : ''}
               </button>
             ))}
           </div>

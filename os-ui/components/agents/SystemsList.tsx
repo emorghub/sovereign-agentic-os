@@ -7,11 +7,11 @@ import { useState } from 'react';
 import { useApi } from '@/lib/useApi';
 import { useUser } from '@/lib/useUser';
 import NewSystemPanel from './NewSystemPanel';
-import { roleAtLeast } from '@/lib/session';
-import { SCOPE_GROUPS, groupByScope, scopeCounts, type ScopeKey } from '@/lib/scopes';
+import { roleAtLeast } from '@/lib/core/session';
+import { SCOPE_GROUPS, groupByScope, scopeCounts, type ScopeKey } from '@/lib/core/scopes';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
-import type { Visibility } from '@/lib/lifecycle';
+import type { Visibility } from '@/lib/core/lifecycle';
 import DomainTag from '@/components/DomainTag';
 
 /**
@@ -34,6 +34,7 @@ type Summary = {
 type Groups = { mine: Summary[]; domain: Summary[]; marketplace: Summary[] };
 
 const visClass = (v: string) => (v === 'Shared' ? 'vis-shared' : v === 'Marketplace' ? 'vis-certified' : 'vis-personal');
+const visLabel = (v: string) => (v === 'Shared' ? 'Shared in Domain' : v);
 
 /** Systems visibility → the OS-wide lifecycle visibility (drives the delete gate). */
 const lcVis = (v: Summary['visibility']): Visibility =>
@@ -72,7 +73,7 @@ export default function SystemsList({ onOpen }: { onOpen: (id: string) => void }
         <div className="row" style={{ gap: 6, alignItems: 'center' }}>
           {(s.visibility === 'Shared' || s.visibility === 'Marketplace') ? <DomainTag domain={s.domain} /> : null}
           {s.archived ? <span className="badge muted">archived</span> : null}
-          <span className={`badge ${visClass(s.visibility)}`}>{s.visibility}</span>
+          <span className={`badge ${visClass(s.visibility)}`}>{visLabel(s.visibility)}</span>
         </div>
       </div>
       <div className="row" style={{ gap: 6, marginTop: 10, flexWrap: 'wrap' }}>

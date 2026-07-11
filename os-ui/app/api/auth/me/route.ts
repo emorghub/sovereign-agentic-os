@@ -2,8 +2,8 @@
  * Copyright 2026 Borek Data Ventures UG
  */
 import { NextResponse } from 'next/server';
-import { currentUser } from '@/lib/auth';
-import { getPublicUser } from '@/lib/users';
+import { currentUser } from '@/lib/core/auth';
+import { getPublicUser } from '@/lib/platform-admin/users';
 
 export const dynamic = 'force-dynamic';
 

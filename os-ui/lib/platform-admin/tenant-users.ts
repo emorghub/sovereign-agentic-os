@@ -8,9 +8,9 @@ import {
   listUsers,
   updateUser,
   type PublicUser,
-} from '@/lib/users';
-import type { Role } from '@/lib/session';
-import { osMirror } from '../os-mirror.ts';
+} from '@/lib/platform-admin/users';
+import type { Role } from '@/lib/core/session';
+import { osMirror } from '../infra/os-mirror.ts';
 
 /**
  * Tenant-user adapter (Ory seam) for Platform Admin → Users & Access.
@@ -145,6 +145,29 @@ export async function reactivateUser(id: string): Promise<AccessUser> {
 /** Assign / revoke the tenant Admin role (org-wide). */
 export async function setTenantAdmin(id: string, isAdmin: boolean): Promise<PublicUser> {
   return updateUser(id, { role: isAdmin ? 'admin' : 'creator' });
+}
+
+/**
+ * Edit a user's profile fields (name, email) and/or role + domain memberships.
+ * Platform-Admin surface (tenant-wide, Admin only). Validates domains non-empty
+ * and delegates to the user directory's updateUser which handles email dedup and
+ * hash-write-through. Omitted fields are passed as undefined so updateUser leaves
+ * them untouched.
+ */
+export async function editUser(
+  id: string,
+  patch: { name?: string; email?: string; role?: Role; domains?: string[] },
+): Promise<PublicUser> {
+  if (patch.domains !== undefined) {
+    const clean = [...new Set((patch.domains).map((d) => d.trim()).filter(Boolean))];
+    if (clean.length === 0) {
+      const e = new Error('At least one domain membership is required');
+      (e as Error & { status?: number }).status = 400;
+      throw e;
+    }
+    patch = { ...patch, domains: clean };
+  }
+  return updateUser(id, patch);
 }
 
 /** Set a user's INITIAL domain memberships (org-wide). In-domain role changes

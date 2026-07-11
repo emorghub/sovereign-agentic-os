@@ -3,8 +3,8 @@
  */
 import { NextResponse } from 'next/server';
 import { roleModel } from '@/lib/models/roles';
-import { requireUser } from '@/lib/auth';
-import { getAppForUser, saveChat } from '@/lib/apps';
+import { requireUser } from '@/lib/core/auth';
+import { getAppForUser, saveChat } from '@/lib/software/apps';
 import { runTabAgent, renderAssistantText } from '@/lib/assistant/runtime';
 import { AssistantNotConfiguredError } from '@/lib/assistant/complete';
 

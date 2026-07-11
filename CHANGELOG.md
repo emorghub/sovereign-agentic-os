@@ -15,6 +15,104 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 _Nothing yet._
 
+## [os-ui 0.1.74] — 2026-07-10
+
+### Feature — "Talk to…" Context Copilots (all 5 Context tabs)
+- **A governed, read-only copilot on every Context tab** (Data · Knowledge · Files · Metrics · Connections). Each `Talk to X` panel assembles a DLS-scoped, metadata-driven overview of what *you* can see on that tab, runs the tab's existing governed retrieval **as the caller** (Data → NL→SQL over the lakehouse, Knowledge → knn retrieval, Files → file search; Metrics/Connections grounded on their catalog), packs it within the reasoning model's window via the **Context Assembler** (hard ceiling — no more 200K blow-ups), and answers with the reasoning model. New tab-module `lib/talk/` (contract-compliant) + `POST /api/talk/[tab]` (session-gated). Degrades honestly on retrieval/model failure — never fabricates.
+- **Reasoning shown *separately* from the answer.** A dedicated reasoner keeps `reasoning_content` intact; the UI puts it behind a muted, collapsible "Show thinking" panel above the prominent answer, with real citation chips (only entitled ids, real deep links) and a collapsible "what ran" (SQL/retrieval) disclosure below.
+
+### Fix
+- **Pillar↔bet link is now two-way.** Linking a Big Bet to a Strategy pillar stamped only one side (`pillar.betIds`) and left `bet.pillarId` unset (and unlink didn't clear it); both directions now stay consistent.
+
+### Infra
+- **OpenSearch snapshot register Job is now a proper Helm hook** (`post-install,post-upgrade` + `before-hook-creation`), so it recreates cleanly on every `helm upgrade` instead of failing on the immutable-Job re-apply.
+- **OpenSearch snapshot Jobs now actually run.** Both the register Job and the daily CronJob used `curlimages/curl` (named user `curl_user`) under `runAsNonRoot`, which the kubelet can't verify without a numeric uid → `CreateContainerConfigError` (the manual `#112` snapshot test passed, but the *automated* Jobs never started). Pinned `runAsUser/runAsGroup/fsGroup: 100` so the container starts and can write the snapshot-repo PVC.
+
+## [os-ui 0.1.73] — 2026-07-10
+
+### Infra
+- **OpenSearch Backup & Restore now works.** The cluster had no snapshot repository (and couldn't register one — no `repository-s3` plugin, no `path.repo`). Added `path.repo` + a dedicated 20Gi snapshot PVC, an idempotent `register-opensearch-snapshot-repo` Job (fs repo `sovereign-fs`), and a daily 03:00 snapshot CronJob (gated on `opensearchSnapshots.enabled`, on for STACKIT). *(Deploying it rolls the OpenSearch StatefulSet once so the snapshot volume + `path.repo` take effect.)*
+- **App image pull from the in-cluster Forgejo registry fixed** (node-level): a small additive DaemonSet configures each node's containerd to resolve `forgejo-http` + use plain HTTP for that one registry — so OS-built apps (e.g. the Campaign Manager) actually deploy instead of `ImagePullBackOff`.
+
+### Refactor (Phase 2)
+- **Tab-loose files consolidated into their modules** (per `ARCHITECTURE.md`): `apps.ts`→software · `governance.ts`/`approvals.ts`→governance · `platform*.ts`/`users.ts`/`recovery.ts`/`terminal-session.ts`→platform-admin · `gateway-usage.ts`→monitoring · `agent-*.ts`→agents · `data-handoff.ts`→data · `planning.ts`→strategy. 15 history-preserving `git mv`s; behavior identical (1857 tests). The `lib/` root is now essentially free of tab-loose files (only the two client hooks remain for Phase 3).
+
+## [os-ui 0.1.72] — 2026-07-10
+
+### Governance / OPA (the definitive flip-flop fix)
+- **Fix (the recurring `query_data`/`retrieve` OPA-deny "flip-flop") — root-caused and made durable.** The chart seeds `data.grants` with **bare** principal keys, but os-ui's policy-compiler publishes at runtime via `PUT /v1/data/grants` with **`domain:`/`user:`-prefixed** keys — and a PUT is a *full-document replace*, so publishing **wiped the chart's bare seed**, after which `authz.rego`'s bare lookup missed → deny (until the next OPA restart re-read the seed → allow: the nondeterministic flip-flop). Now the chart seed lives at a **disjoint `seed_grants` path** (the runtime PUT to `data.grants` can never clobber it) and **`authz.rego` unions both documents**, resolving each principal under bare + `domain:` + `user:` forms. Fail-closed preserved. Verified with the real `opa` CLI (9/9 authz + 29/29 full policy suite). *(Also on the chart: OPA `--watch` + a complete `checksum/policy` annotation so a grant change reloads deterministically.)*
+
+### Refactor (Phase 1b)
+- **`lib/core` + `lib/infra` carved out** of the loose `lib/*.ts` files, per `ARCHITECTURE.md`: 48 files moved (history-preserving `git mv`) into `lib/core/` (config · session · auth · scopes · lifecycle · versioning · artifact-model · tabs · …) and `lib/infra/` (governed spine + clients: governed · agent-governed · os-mirror · secrets · k8s · …), 414 importers rewritten. Pure structural change — behavior identical (1857 tests unchanged). Establishes the one-way `tab → infra → core` dependency layering.
+
+## [os-ui 0.1.71] — 2026-07-10
+
+### Agents / context (the 200K fix)
+- **Context Assembler** — a first-class, budget-aware context builder (`lib/infra/context/`) with a model-context registry (per-model window + reserved output, admin/env-overridable), tool-result **compaction** (row-sets → header + sample + "…N more", long text → head/tail), and a greedy pinned-first pack that **guarantees the prompt never exceeds the model window**. Wired into the single-agent harness, the multi-node graph handoff (assembled summary, not the full transcript), **and Ask the OS**. Fixes the `ContextWindowExceededError` (200K) agent-run failures. Ships with an embedding-relevance seam for Phase 2.
+- **Agent data discovery** — an agent granted `query_data` now auto-gets `list_datasets`/`get_dataset`/`profile_dataset` (and knowledge/files equivalents), plus a "discover-before-you-act, never guess identifiers" directive, so agents resolve real FQNs instead of hallucinating table names.
+- **Stale-FQN defense** — the ACT prompt now treats any table name in an agent's stored instructions as possibly stale and re-resolves to the current domain-gold FQN (a promoted dataset lives at `iceberg.<domain>.gold_<slug>`, never the owner's `personal_<uid>` lane).
+- **Workspace default routing** now offers only **Standard / Reasoning** (the live admin role models), not the raw LiteLLM catalog.
+- **Build/Run persistence** — a persisted activity marker + last-run report, so returning to the Agents tab shows "building/running…" or the last outcome instead of a blank slate.
+
+### Knowledge
+- **Tacit knowledge over MCP** — `author_knowledge` now takes per-step **and** workflow-level (`TACIT.md`) `tacit`; the knowledge guide (which described a non-existent `type`/`body`/`actors` API) is rewritten to the real tool.
+- **Markdown-only knowledge is retrievable** — the chunker now chunks the workflow's prose body into citable units (previously prose-only workflows indexed 0 units).
+- Knowledge tab sub-area **"Knowledge" → "General"** (siblings: General + Workflows).
+
+### Data / Nav
+- **Data tab: "Talk to Data"** replaces the raw Query-the-Lakehouse SQL editor (raw SQL lives in the Admin **Query** console); NL question → governed `/api/data/ask` → answer + results + the SQL it ran.
+- **Users & Access** now lives only under **Admin** (removed the duplicate from Governance).
+
+### Refactor (Phase 1a)
+- **Connections** consolidated into `lib/connections/` as the reference **tab-module** (index/schema/store/README) per the new `ARCHITECTURE.md` contract.
+
+## [os-ui 0.1.70] — 2026-07-09
+
+Agent data-plane hardening — from a live end-to-end test of an agent reading/writing data, files, and knowledge through Trino/dbt/OPA.
+
+### Governance / OPA (the recurring `query_data` deny — root-caused + fixed)
+- **OPA no longer serves stale grants.** OPA loaded `/policies/data.json` once at boot with no reload and the Deployment's checksum annotation omitted `requiresApproval` — so a grant change (e.g. the cohort's `query`/`retrieve`) could silently never take effect, denying `query_data`/`search_knowledge` until a manual restart (the "flip-flop"). Now: the checksum annotation covers all policy/data fields **and** OPA runs with `--watch` (hot-reload). *(Live-confirmed: after reload, `query_data` returns rows and the cohort grant is present.)*
+- **Fix (knowledge retrieval always denied):** `search_knowledge`/`retrieve` authorized on the **user id** instead of the **domain** (grants are domain-keyed), so it fell to an empty offline mock for everyone. Now gates on the domain principal, exactly like `query_data`.
+
+### Agents
+- **Reliable tool-calling on gpt-oss.** The worker model (`gpt-oss-20b`, OpenAI "harmony" format) leaked channel control tokens into tool names (`query_data<|channel|>commentary`) → intermittent tool errors that exhausted the agent's step budget. The tool-call parser now **strips harmony tokens** and **recovers commentary-channel tool calls**, and agent tool-calling routes to a new **admin-configurable `tools` model role** (defaults to the Qwen tier for native tool-calls; `LITELLM_TOOLS_MODEL` / Admin settings override).
+
+### Data / Metrics (Cube)
+- **Promotion is fail-closed.** Publishing a dataset to a domain asset now **independently verifies the physical gold materialized in the domain schema** before flipping the tier (502, tier untouched, if absent) — no more "promoted" assets whose gold only exists in the owner's personal lane. Added a governed **re-materialize/repair** path for an already-promoted-but-missing asset.
+- **Cube fixes:** defining a metric requires a **promoted (domain-schema) gold** with a clear "promote to Shared first" message (a cube can only read the domain schema its `cube-sales` principal is entitled to); cube dimensions/`drill_members` are **reconciled to real mart columns** (can't reference a missing column like `region`); and the **Metrics tab is fail-soft** — one broken model renders an inline "unavailable" tile instead of 500-ing the whole tab.
+
+### Infra
+- **ClickHouse (Langfuse) is PVC-backed** with a `wait-for-clickhouse` init-container gating langfuse-web, so trace-schema migrations always run against a ready CH across redeploys. *(Deployed in 0.1.69; PVC live.)*
+
+## [os-ui 0.1.69] — 2026-07-09
+
+### Navigation / access
+- **Menu now hides what a role can't use.** `LLM Gateway`, `Monitoring`, and the `MCP` setup tab are **builder+/admin only** (hidden from creators/students). Creators still connect over MCP — the `/api/mcp` endpoint + their per-user token are unaffected; only the configuration tab is hidden. (Governance was already builder+, and Admin/Components/Terminal/Query/About already admin-only.)
+- **New Admin "Query" console** (Admin → Terminal → **Query** → About) — dual-mode **Lakehouse SQL + Cube** console for admins, over the governed read path (admin-scoped, 403 for non-admins).
+- **Rename:** the visibility label **"Shared" → "Shared in Domain"** across every tab (scope switcher, badges, tiles) — internal keys/enums unchanged.
+
+### Data (detail rework)
+- **Removed the confusing "Advanced Build Rail."** Everything is now inline on one screen with section-level **Edit** (Documentation, Data quality, Metrics, Bring-in-data/Bronze, Configuration/dbt SQL). The three primary actions — **Turn into Silver · Turn into Gold · Archive** — moved to a single **action row at the bottom**.
+
+### Strategy
+- **Strategic-pillar headline target.** Each pillar now shows a **big target number** tied to a value-metric type — **EBIT · Revenue · Time Back Hours · # Risks Mitigated · Custom** (user-named, with an optional unit + monetary flag) — and a smaller **"so far: …"** achieved-to-date figure below it, with a subtle on-track/behind cue. Targets carry a **horizon** (year-end · 6 · 12 · 24 · 36-month) that computes a clear **end date** (default: year-end of the current calendar year). Only Builder/Admin set targets; creators view. New MCP tool `set_pillar_target` keeps agents in lockstep.
+- **Currency is a tenant Admin setting** (EUR/CHF/USD + other ISO currencies), applied to monetary metrics only (Hours → `h`, Risks → integer count) — the Strategy tab never picks currency locally.
+
+### Governance / Admin
+- **Fix (User & Access edit):** the Platform Admin users surface had **no edit form** — only deactivate/reactivate/tenant-admin. Added an edit panel + `edit` op so an admin can change a user's **name/email/role/domains** and have it persist to the `os-users` mirror (admin-gated).
+
+### Versioning
+- **Software** version history is now **git-backed** — the app's Forgejo commit log is the version list, and *restore* re-commits a prior commit's files onto HEAD as a new auditable commit (non-destructive, governed). Version panel now shown on Software detail.
+- **Data** datasets (no per-dataset repo) get an **append-only snapshot history** — each edit snapshots the prior `dataset.yaml`; restore is reversible. Version panel now shown on Dataset detail.
+- **Knowledge:** a creator on a live + Shared **workflow** can now file **Request certification** (Marketplace rung) — admin-gated, no self-publish. (Personal-knowledge promote ladder already existed.)
+
+### LLM Gateway
+- **Fix (usage showed 0 requests / 0 tokens):** the usage panel called LiteLLM `/global/activity` **without a date range** (a bare call 400s) and read a `sum_*` shape this LiteLLM version doesn't return. Now passes a rolling 30-day window and sums the `daily_data[]` rollup (keeps `sum_*` back-compat) — real tenant totals show again.
+- **Fix (Model Hub blank `[]`):** replaced the iframe to LiteLLM's empty `/public/model_hub` with an **OS-native model list** rendered from `/v1/models` (server-side, key-free) — the brokered models always show.
+
+### Durability (infra)
+- **Langfuse ClickHouse hardening.** ClickHouse was `emptyDir` (a pod/node roll wiped all trace tables); it is now **PVC-backed** (10Gi) on STACKIT. Added a `wait-for-clickhouse` **initContainer** on langfuse-web that polls CH `/ping` before the web container starts, so the schema migration always runs against a ready ClickHouse on every redeploy — no manual web-pod bounce. *(Enabling the PVC on an existing cluster needs a one-time `kubectl delete deployment clickhouse`.)*
+
 ## [os-ui 0.1.68] — 2026-07-09
 
 ### Agents / Governance (durability fix)

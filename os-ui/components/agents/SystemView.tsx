@@ -15,10 +15,10 @@ import { commitSystem } from './commitSystem';
 import { addAgent, addHandoffEdge, addSuperviseEdge, removeAgent, removeEdge, setEntrypoint, setNodePositions } from '@/lib/agents/canvas-edit';
 import type { Schedule, System } from '@/lib/agents/system-schema';
 import type { ModelInfo } from '@/lib/agents/routing';
-import { roleAtLeast, type Role } from '@/lib/session';
+import { roleAtLeast, type Role } from '@/lib/core/session';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
-import type { Visibility } from '@/lib/lifecycle';
+import type { Visibility } from '@/lib/core/lifecycle';
 import DomainTag from '@/components/DomainTag';
 
 // React Flow + Monaco are heavy, client-only, and SSR-tolerant only when lazy —
@@ -39,6 +39,20 @@ const GraphCanvas = dynamic(() => import('./GraphCanvas'), {
 
 type LastBuildRow = { tool: string; applied: boolean; verified: boolean; status: 'ok' | 'fail'; detail: string; error?: string };
 type LastBuild = { ok: boolean; at: number; rows: LastBuildRow[] };
+type ActivityMarker = { kind: 'building' | 'running'; startedAt: number };
+type LastRun = {
+  at: number;
+  running: boolean;
+  ok: boolean;
+  path: string[];
+  traces: number;
+  held: number;
+  steps: { node: string; tool: string; effect: string; ran?: boolean }[];
+  output?: string;
+  mode?: 'live' | 'offline-mock';
+  traceStoreAvailable?: boolean;
+  traceUrl?: string;
+};
 
 type SystemViewData = {
   id: string;
@@ -52,6 +66,8 @@ type SystemViewData = {
   disabledAgents: string[];
   lastActivity: string | null;
   lastBuild: LastBuild | null;
+  activity: ActivityMarker | null;
+  lastRun: LastRun | null;
   system: System;
   ir: unknown;
   compileError: string | null;
@@ -68,6 +84,7 @@ type RoutingData = { activities: string[]; tiers: Record<string, string>; table:
 type Panel = 'yaml' | 'grants' | 'build';
 
 const visClass = (v: string) => (v === 'Shared' ? 'vis-shared' : v === 'Marketplace' ? 'vis-certified' : 'vis-personal');
+const visLabel = (v: string) => (v === 'Shared' ? 'Shared in Domain' : v);
 
 /** Systems visibility → the OS-wide lifecycle visibility (drives the delete gate). */
 const lcVis = (v: SystemViewData['visibility']): Visibility =>
@@ -229,7 +246,7 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
         <div className="system-title-block">
           <span className="system-title">{data.name}</span>
           {(data.visibility === 'Shared' || data.visibility === 'Marketplace') ? <DomainTag domain={data.domain} /> : null}
-          <span className={`badge ${visClass(data.visibility)}`}>{data.visibility}</span>
+          <span className={`badge ${visClass(data.visibility)}`}>{visLabel(data.visibility)}</span>
           {data.origin === 'forked' ? <span className="badge muted">forked copy</span> : null}
           <span className={`badge ${data.running ? 'ok' : 'muted'}`}>{data.running ? 'running' : 'stopped'}</span>
           {data.schedule.kind !== 'manual' ? <span className="badge warn">{data.schedule.kind}</span> : null}
@@ -337,10 +354,10 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
           <MonacoFile systemId={systemId} path="system.yaml" canEdit={data.canEdit} height={420} reloadSignal={reloadKey} onSaved={reloadAll} />
         ) : null}
         {panel === 'grants' ? (
-          <GrantsRouting systemId={systemId} system={sys} canEdit={data.canEdit} canDirectWrite={roleAtLeast(data.role, 'builder')} models={models} routing={routingData} onChanged={reloadAll} />
+          <GrantsRouting systemId={systemId} system={sys} canEdit={data.canEdit} canDirectWrite={roleAtLeast(data.role, 'builder')} roles={{ reasoning: modelsData?.roles?.reasoning || 'sovereign-reasoning', standard: modelsData?.roles?.standard || 'sovereign-default' }} routing={routingData} onChanged={reloadAll} />
         ) : null}
         {panel === 'build' ? (
-          <BuildRunPanel systemId={systemId} running={data.running} canEdit={data.canEdit} lastBuild={data.lastBuild} onStateChange={reloadAll} />
+          <BuildRunPanel systemId={systemId} running={data.running} canEdit={data.canEdit} lastBuild={data.lastBuild} activity={data.activity} lastRun={data.lastRun} onStateChange={reloadAll} />
         ) : null}
       </div>
 

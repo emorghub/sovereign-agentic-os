@@ -2,8 +2,8 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import { config } from '@/lib/config';
-import type { CurrentUser } from '@/lib/auth';
+import { config } from '@/lib/core/config';
+import type { CurrentUser } from '@/lib/core/auth';
 import { handleRpc, toolsForTab, listToolsForRole, type McpTab } from '@/lib/mcp/server';
 import { loadTabContext, tabTitle } from '@/lib/tabs/context';
 import {
@@ -16,6 +16,7 @@ import {
   type ToolSpec,
 } from './agentic.ts';
 import { resolveAssistantModelId } from './complete.ts';
+import { inputBudget, modelContext } from '@/lib/models/context-windows';
 
 /**
  * Server wiring for the agentic assistant harness. Binds the pure PLAN→ACT loop
@@ -107,6 +108,9 @@ export function liteLlmCaller(): LlmCall {
       messages: req.messages,
       temperature: req.temperature ?? 0.2,
     };
+    // Cap the model's own output at the model window's reserved tail — the other
+    // half of the context-budget guarantee (input is bounded by the assembler).
+    if (req.maxTokens && req.maxTokens > 0) body.max_tokens = req.maxTokens;
     if (req.tools && req.tools.length > 0) {
       body.tools = req.tools;
       body.tool_choice = 'auto';
@@ -152,25 +156,83 @@ export function liteLlmCaller(): LlmCall {
   };
 }
 
+/**
+ * Strip OpenAI "harmony" channel control tokens (gpt-oss / gpt-oss-20b) out of a
+ * string. Harmony framing (`<|start|>…<|channel|>commentary<|message|>…<|end|>`,
+ * plus `<|call|>`/`<|return|>`) can leak into a tool-call's `function.name` (e.g.
+ * `query_data<|channel|>commentary`) or wrap a tool call emitted as commentary
+ * TEXT rather than as a structured `tool_calls` entry. We defensively strip every
+ * such control token so a harmony-formatting model degrades gracefully instead of
+ * erroring with a mangled tool name.
+ */
+const HARMONY_TOKEN = /<\|[^|]*\|>/g;
+
+export function stripHarmonyTokens(s: string): string {
+  return s.replace(HARMONY_TOKEN, '').trim();
+}
+
+/** Clean a leaked tool name: drop harmony tokens and any channel-word tail. */
+function cleanToolName(raw: string): string {
+  // `query_data<|channel|>commentary` → strip tokens → `query_datacommentary`?
+  // No: strip the token AND everything the model appended after it (channel word,
+  // `to=…` routing, whitespace). A valid MCP tool name is a bare identifier.
+  const beforeToken = raw.split('<|')[0];
+  const cleaned = stripHarmonyTokens(beforeToken);
+  const m = cleaned.match(/[A-Za-z_][A-Za-z0-9_]*/);
+  return m ? m[0] : cleaned;
+}
+
+function safeArgs(raw: unknown): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(String(raw ?? '{}'));
+    if (parsed && typeof parsed === 'object') return parsed as Record<string, unknown>;
+  } catch {
+    /* fall through */
+  }
+  return {};
+}
+
+/**
+ * Recover a tool call a harmony model emitted as commentary-channel TEXT instead
+ * of a structured `tool_calls` entry — e.g. `…<|channel|>commentary to=query_data
+ * <|message|>{"question":"…"}<|call|>`. Returns the first `{ name, args }` found,
+ * or null. Best-effort and side-effect-free; the native `tool_calls` path is
+ * always preferred when present.
+ */
+export function parseHarmonyToolCall(content: string): { name: string; args: Record<string, unknown> } | null {
+  if (!content.includes('<|')) return null;
+  // `to=<name>` names the tool the commentary channel is calling.
+  const to = content.match(/to=\s*([A-Za-z_][A-Za-z0-9_.]*)/);
+  if (!to) return null;
+  const name = cleanToolName(to[1]);
+  if (!name) return null;
+  // Args are the JSON object after the last `<|message|>` (or the first `{…}`).
+  const afterMsg = content.split('<|message|>').pop() ?? content;
+  const brace = afterMsg.match(/\{[\s\S]*\}/);
+  return { name, args: brace ? safeArgs(brace[0]) : {} };
+}
+
 /** Parse an OpenAI-shaped assistant message into the harness completion shape. */
 export function parseLlmMessage(message: Record<string, unknown>): LlmCompletion {
-  const content = String(message.content ?? '').trim();
+  const rawContent = String(message.content ?? '');
+  const content = stripHarmonyTokens(rawContent);
   const rawCalls = Array.isArray(message.tool_calls) ? (message.tool_calls as Array<Record<string, unknown>>) : [];
   const toolCalls = rawCalls
     .map((c, i) => {
       const fn = (c.function ?? {}) as Record<string, unknown>;
-      const name = String(fn.name ?? '');
+      const name = cleanToolName(String(fn.name ?? ''));
       if (!name) return null;
-      let args: Record<string, unknown> = {};
-      try {
-        const parsed = JSON.parse(String(fn.arguments ?? '{}'));
-        if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>;
-      } catch {
-        args = {};
-      }
-      return { id: String(c.id ?? `call-${i}`), name, args };
+      return { id: String(c.id ?? `call-${i}`), name, args: safeArgs(fn.arguments) };
     })
     .filter((c): c is NonNullable<typeof c> => c !== null);
+
+  // Fallback: a harmony model that emitted its tool call as commentary TEXT (no
+  // structured tool_calls) still gets executed instead of treated as a final answer.
+  if (toolCalls.length === 0) {
+    const recovered = parseHarmonyToolCall(rawContent);
+    if (recovered) toolCalls.push({ id: 'harmony-0', name: recovered.name, args: recovered.args });
+  }
+
   return { content, toolCalls };
 }
 
@@ -194,6 +256,7 @@ export async function runTabAgent(input: RunTabAgentInput): Promise<AgenticResul
   // config tiers as opaque ids the fake caller ignores.
   const injected = input.llm;
   const assistantId = injected ? config.litellmExecModel : resolveAssistantModelId();
+  const ctx = modelContext(assistantId);
   return runAgentic({
     system: osSystem(input.tab, input.extraContext),
     userMessages: input.messages,
@@ -203,6 +266,8 @@ export async function runTabAgent(input: RunTabAgentInput): Promise<AgenticResul
     planModel: injected ? config.litellmReasoningModel : assistantId,
     actModel: assistantId,
     maxIterations: input.maxIterations,
+    budget: inputBudget(assistantId),
+    maxOutputTokens: ctx.reservedOutput,
   });
 }
 

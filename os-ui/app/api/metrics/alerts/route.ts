@@ -2,10 +2,10 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { trace as gvTrace } from '@/lib/agent-governed';
+import { trace as gvTrace } from '@/lib/infra/agent-governed';
 import { requirePrincipal, errorResponse } from '@/lib/data/server';
-import { roleAtLeast } from '@/lib/session';
-import { getPublicUser } from '@/lib/users';
+import { roleAtLeast } from '@/lib/core/session';
+import { getPublicUser } from '@/lib/platform-admin/users';
 import { type AlertRule, evaluateAlert } from '@/lib/metrics/alerts';
 import { deliverAlert } from '@/lib/dashboards/delivery';
 

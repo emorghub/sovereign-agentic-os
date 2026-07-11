@@ -2,13 +2,13 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/auth';
+import { requireUser } from '@/lib/core/auth';
 import { getSystem, archiveSystem, unarchiveSystem, deleteSystem, ensureHydrated } from '@/lib/agents/store';
 import { purgeSystemResources } from '@/lib/agents/physical-delete';
 import { realForgejo } from '@/lib/agents/build/live-clients';
 import { reconcileScheduleCron } from '@/lib/agents/schedule-cron';
 import { compile } from '@/lib/agents/langgraph-compile';
-import { config } from '@/lib/config';
+import { config } from '@/lib/core/config';
 
 export const dynamic = 'force-dynamic';
 
@@ -47,6 +47,8 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       disabledAgents: view.disabledAgents,
       lastActivity: view.lastActivity,
       lastBuild: view.lastBuild ?? null,
+      activity: view.activity ?? null,
+      lastRun: view.lastRun ?? null,
       system: view.system,
       ir,
       compileError,

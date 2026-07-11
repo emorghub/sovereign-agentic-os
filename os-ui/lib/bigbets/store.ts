@@ -33,8 +33,8 @@ import {
   roleAtLeast,
 } from './model.ts';
 import { resolveArtifact, sourceFor } from './sources.ts';
-import { osMirror } from '../os-mirror.ts';
-import { type ArtifactVersion, versionLog } from '../versioning.ts';
+import { osMirror } from '../infra/os-mirror.ts';
+import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
 
 /**
  * State pinned to `globalThis` so it is a TRUE singleton across all Next.js
@@ -570,4 +570,18 @@ export function _getBetRaw(betId: string): BigBet | null {
 }
 export function _allBets(): BigBet[] {
   return [...state().bets.values()];
+}
+
+/**
+ * Internal: stamp (or clear) a bet's pillarId without going through the full
+ * edit gate (used by the Strategy pillar store to keep the two-way index in
+ * sync when it calls linkBet / unlinkBet). The bet's owner-edit gate does NOT
+ * apply here — it is a governed back-reference, not a user-facing field edit.
+ */
+export function _setPillarId(betId: string, pillarId: string | undefined): void {
+  const bet = state().bets.get(betId);
+  if (!bet) return;
+  bet.pillarId = pillarId;
+  bet.updatedAt = now();
+  writeThrough(bet);
 }

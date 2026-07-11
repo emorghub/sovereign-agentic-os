@@ -2,16 +2,16 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/auth';
+import { requireUser } from '@/lib/core/auth';
 import { getConnectionForUser } from '@/lib/connections';
-import { roleAtLeast } from '@/lib/session';
+import { roleAtLeast } from '@/lib/core/session';
 import {
   SAFETY_PRESETS,
   type SafetyPreset,
   setAgentPreset,
   setAgentToolPreset,
   setDomainDefaultPreset,
-} from '@/lib/governance';
+} from '@/lib/governance/governance';
 
 export const dynamic = 'force-dynamic';
 

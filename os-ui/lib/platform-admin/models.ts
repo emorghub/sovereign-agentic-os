@@ -25,7 +25,7 @@
  * unit-testable.
  */
 
-import { osMirror } from '../os-mirror.ts';
+import { osMirror } from '../infra/os-mirror.ts';
 import { roleModel } from '../models/roles.ts';
 
 export type ModelTask = 'chat' | 'reasoning' | 'embedding';
@@ -101,7 +101,7 @@ const DEFAULT_ASSISTANT = '';
 
 /** The effective model_names that are current ROLE defaults (from roles.ts). */
 function roleDefaultIds(): string[] {
-  return [roleModel('standard'), roleModel('reasoning'), roleModel('embeddings')];
+  return [roleModel('standard'), roleModel('reasoning'), roleModel('tools'), roleModel('embeddings')];
 }
 
 function modelsState(): ModelsState {

@@ -395,6 +395,14 @@ clickhouse:
     # the headroom to stay green through boot and steady state.
     requests: { cpu: 200m, memory: 2Gi }
     limits: { cpu: "2", memory: 6Gi }
+  # Data volume. Off by default so a local kind tenant stays ephemeral (fast
+  # teardown). Turn ON for any DURABLE deploy (STACKIT) so Langfuse trace tables
+  # survive a pod roll — without this a CH restart silently wipes all traces and
+  # forces a full re-migration. RWO PVC + Recreate strategy (no two writers).
+  # storageClass falls back to global.storageClass (soa.storageClass helper).
+  persistence:
+    enabled: false
+    size: 10Gi
   local:
     password: clickhouse-local-dev
 
@@ -436,6 +444,32 @@ langfuse:
     additionalEnvFrom:
       - secretRef:
           name: langfuse-init
+
+    # ---- CH readiness gate ----
+    # initContainer that polls ClickHouse HTTP /ping before langfuse-web starts.
+    # This ensures CH is fully up and accepting connections BEFORE Langfuse's
+    # startup migration runs (CLICKHOUSE_MIGRATION_URL → native port 9000), so
+    # the migration cannot silently no-op against an unready CH.
+    # Uses busybox wget (tiny, no extra image pull). Safe to run every redeploy:
+    # Langfuse's CH migration is idempotent (it checks schema versions first).
+    extraInitContainers:
+      - name: wait-for-clickhouse
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        command:
+          - sh
+          - -c
+          - |
+            echo "Waiting for ClickHouse HTTP /ping …"
+            until wget -qO- http://clickhouse:8123/ping 2>/dev/null | grep -q Ok; do
+              echo "  CH not ready, retrying in 5s"
+              sleep 5
+            done
+            echo "ClickHouse is ready."
 
     # Middleware tier — wave 1. Applies to BOTH langfuse deployments (web + worker)
     # via the subchart's shared deployment annotations. NOTE: langfuse-k8s exposes
@@ -1042,6 +1076,43 @@ opensearch:
     # Heap is -Xmx512M; request covers heap + Lucene off-heap/page cache.
     requests: { cpu: 250m, memory: 1Gi }
     limits: { cpu: "2", memory: 1536Mi }
+
+# OpenSearch filesystem snapshot repository.
+# Enabled on durable deploys (values.stackit-selfhosted.yaml). Disabled by
+# default so the ephemeral local/kind slice stays zero-PVC. When enabled:
+#   • a PVC is provisioned at /usr/share/opensearch/snapshots inside the pod
+#     (via extraVolumes/extraVolumeMounts on the OpenSearch StatefulSet)
+#   • opensearch.yml gains `path.repo: ["/usr/share/opensearch/snapshots"]`
+#     (a pod restart is required the first time this is added)
+#   • a post-install/post-upgrade Job idempotently registers the "fs" repo
+#     as `_snapshot/sovereign-fs` (name the Backup & Restore feature expects)
+#   • an optional daily CronJob triggers a snapshot of all indices
+# The repository type is "fs" (filesystem). repository-s3 is NOT installed in
+# the bundled OpenSearch image, so S3-type repos are unavailable without a
+# custom image rebuild — fs is the correct choice for a single-node PVC deploy.
+opensearchSnapshots:
+  enabled: false                          # off for local/kind; on for STACKIT
+  repositoryName: sovereign-fs            # name used by the register Job + UI
+  mountPath: /usr/share/opensearch/snapshots
+  pvc:
+    size: 20Gi
+    accessMode: ReadWriteOnce
+    # storageClass falls back to global.storageClass (same as all other PVCs)
+  # Post-install/post-upgrade Job that registers the fs snapshot repo.
+  registerJob:
+    image:
+      repository: curlimages/curl
+      tag: "8.8.0"
+    resources:
+      requests: { cpu: 50m, memory: 32Mi }
+      limits: { cpu: 200m, memory: 64Mi }
+  # Optional nightly CronJob that snapshots all indices.
+  cronJob:
+    enabled: true
+    schedule: "0 3 * * *"              # 03:00 UTC, after pg-dump (02:30)
+    resources:
+      requests: { cpu: 50m, memory: 32Mi }
+      limits: { cpu: 200m, memory: 64Mi }
 
 # OpenSearch Dashboards — UI over OpenSearch. Security disabled to match the
 # (local) security-disabled OpenSearch node. (Aliased `osdashboards` so k8s

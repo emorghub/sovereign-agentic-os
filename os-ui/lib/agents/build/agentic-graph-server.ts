@@ -3,7 +3,8 @@
  */
 import 'server-only';
 import { roleModel } from '@/lib/models/roles';
-import type { CurrentUser } from '@/lib/auth';
+import { inputBudget, modelContext } from '@/lib/models/context-windows';
+import type { CurrentUser } from '@/lib/core/auth';
 import { ALL_MCP_TOOLS, isMcpTab, listToolsForRole, toolsForTab, type McpTab } from '@/lib/mcp/server';
 import { loadTabContext, tabTitle } from '@/lib/tabs/context';
 import { tabToolExecutor, liteLlmCaller } from '@/lib/assistant/runtime';
@@ -37,10 +38,31 @@ import {
  * the two LiteLLM tiers — so the Software Delivery Team genuinely builds and
  * requests deploys AS THE SIGNED-IN USER, with no embedded token and no system
  * principal.
+ *
+ * CONTEXT BUDGETING (the multi-node 400 fix): every node runs the shared
+ * `runAgentic` harness, which now bounds each model call to a token budget via
+ * `budgetMessages` (`lib/assistant/agentic.ts`) using the model context registry
+ * (`lib/models/context-windows.ts`). So the growing team transcript that a later
+ * node inherits — the exact thing that compounded past the 200k window and threw
+ * the LiteLLM 400 ContextWindowExceededError — is assembled down to a hard input
+ * ceiling before it ever reaches the gateway, and each request's `max_tokens` is
+ * capped at the model's reserved output. `handoffBudget()` exposes the ceiling
+ * used for the between-node hand-off.
  */
 
 // The set of software-MCP tool names — the only surface a team may drive live.
 const SOFTWARE_TOOL_NAMES = new Set(toolsForTab('software').map((t) => t.name));
+
+/**
+ * The input token ceiling for a team turn's between-node hand-off: the SMALLER of
+ * the two live model windows (the tools/exec tier and the reasoning tier), so the
+ * assembled context fits WHICHEVER model a given node runs on. Passed to the graph
+ * executor so each node's growing transcript is assembled down to this bound before
+ * it reaches the gateway.
+ */
+export function handoffBudget(): number {
+  return Math.min(inputBudget(roleModel('tools')), inputBudget(roleModel('reasoning')));
+}
 
 /**
  * A LangGraph system is runnable by the in-process agentic executor iff it is a
@@ -165,8 +187,14 @@ export async function runOsTeam(input: RunOsTeamInput): Promise<AgenticGraphResu
     callTool: grantedToolExecutor(input.user, sys, input.systemId, input.toolDeps),
     preamble: osPreamble(sys),
     reasoningModel: roleModel('reasoning'),
-    execModel: roleModel('standard'),
+    // ACT/tool-calling fallback model (a per-agent pin still wins). The `tools`
+    // role defaults to Qwen for clean OpenAI tool_calls; the harmony-format
+    // light default mangles tool names. Admin-overridable.
+    execModel: roleModel('tools'),
     maxIterations: input.maxIterations,
+    // Bound every node to the smaller live window; cap each node's own output.
+    budget: handoffBudget(),
+    maxOutputTokens: modelContext(roleModel('tools')).reservedOutput,
     disabled: input.disabledAgents,
   });
 }
@@ -217,7 +245,12 @@ export async function runPhaseTurn(input: RunPhaseTurnInput): Promise<PhaseTurnR
       callTool: tabToolExecutor(input.user, 'software'),
       preamble: preamble(),
       reasoningModel: roleModel('reasoning'),
-      execModel: roleModel('standard'),
+      // Tool-calling fallback model (per-agent pin still wins) — Qwen by default
+      // for clean OpenAI tool_calls, not the harmony-format light model.
+      execModel: roleModel('tools'),
+      // Bound this node to the smaller live window; cap its own output.
+      budget: handoffBudget(),
+      maxOutputTokens: modelContext(roleModel('tools')).reservedOutput,
     },
     { extraGuidance: phaseGuidance(phase, session.appId), onStep: input.onStep },
   );

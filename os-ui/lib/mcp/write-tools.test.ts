@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { CurrentUser } from '@/lib/auth';
+import type { CurrentUser } from '@/lib/core/auth';
 import { handleRpc, type JsonRpcResponse, type ToolError } from './server.ts';
 
 import { __resetStore as resetData } from '@/lib/data/store';
@@ -12,7 +12,7 @@ import { __resetStore as resetFiles } from '@/lib/files/store';
 import { __resetDashboards } from '@/lib/dashboards/store';
 import { __resetBets } from '@/lib/bigbets/store';
 import { __resetStore as resetAgents } from '@/lib/agents/store';
-import { __resetApprovals } from '@/lib/approvals';
+import { __resetApprovals } from '@/lib/governance/approvals';
 
 /**
  * The governed MCP WRITE tools: each must delegate to the SAME lib function the UI

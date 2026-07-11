@@ -2,8 +2,8 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { requireUser } from '@/lib/auth';
-import { createApp, listAppsForUser, APP_TEMPLATES, type AppTemplateKey } from '@/lib/apps';
+import { requireUser } from '@/lib/core/auth';
+import { createApp, listAppsForUser, APP_TEMPLATES, type AppTemplateKey } from '@/lib/software/apps';
 
 export const dynamic = 'force-dynamic';
 

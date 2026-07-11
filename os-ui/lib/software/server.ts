@@ -2,14 +2,14 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import { config } from '@/lib/config';
+import { config } from '@/lib/core/config';
 import {
   getAppByIdInternal,
   persistApp,
   templateFiles,
   withStatus,
   type App,
-} from '@/lib/apps';
+} from '@/lib/software/apps';
 import { generateAndCompile } from './auto-mcp.ts';
 import { parseAppManifest, parseOpenApi, detectSurface } from './metadata.ts';
 import type { PipelineBackend, AuthorInput, AuthorResult, FrontDoorKey } from './adapters.ts';

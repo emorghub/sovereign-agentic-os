@@ -9,14 +9,16 @@ import WorkflowTile from '@/components/knowledge/WorkflowTile';
 import WorkflowView from '@/components/knowledge/WorkflowView';
 import type { WorkflowSummary } from '@/lib/knowledge/store';
 import type { DomainKnowledge } from '@/lib/knowledge/schema';
-import { roleAtLeast, type Role } from '@/lib/session';
-import { useTabNavReset } from '@/lib/tab-nav';
-import { SCOPE_GROUPS, groupByScope, activeScopeCounts, type ScopeKey } from '@/lib/scopes';
+import { roleAtLeast, type Role } from '@/lib/core/session';
+import { useTabNavReset } from '@/lib/core/tab-nav';
+import { SCOPE_GROUPS, groupByScope, activeScopeCounts, type ScopeKey } from '@/lib/core/scopes';
 import type { PersonalKnowledgeSummary } from '@/lib/knowledge/personal-store';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import DomainTag from '@/components/DomainTag';
-import type { Visibility as LcVisibility } from '@/lib/lifecycle';
+import type { Visibility as LcVisibility } from '@/lib/core/lifecycle';
+import TalkTo from '@/components/talk/TalkTo';
+import { TALK_PRESENTATION } from '@/lib/talk/schema';
 
 /** Knowledge visibility (Personal/Shared/Marketplace) → OS-wide lifecycle visibility. */
 const lcVis = (v: 'Personal' | 'Shared' | 'Marketplace'): LcVisibility =>
@@ -347,7 +349,7 @@ export default function KnowledgePage() {
           <span className="k-section-label">{e.title}</span>
           <div className="row" style={{ gap: 6, alignItems: 'center' }}>
             {shared && <DomainTag domain={e.domain} />}
-            {e.visibility === 'Shared' && <span className="badge vis-shared">Shared</span>}
+            {e.visibility === 'Shared' && <span className="badge vis-shared">Shared in Domain</span>}
             {e.visibility === 'Marketplace' && <span className="badge vis-certified">Certified</span>}
             <button className="btn ghost sm" onClick={() => void (open ? setPkOpenId(null) : openPersonal(e.id))}>
               {open ? 'Close' : 'Open'}
@@ -432,7 +434,7 @@ export default function KnowledgePage() {
             className={view === 'overview' ? 'active' : ''}
             onClick={() => setView('overview')}
           >
-            Knowledge
+            General
           </button>
           <button
             className={view === 'workflows' || view === 'new' ? 'active' : ''}
@@ -457,7 +459,7 @@ export default function KnowledgePage() {
           <>
             <p className="lead" style={{ marginTop: 18 }}>
               General knowledge that grounds your agents. <strong>My knowledge</strong> is
-              personal context about how you work; <strong>Shared</strong> is the
+              personal context about how you work; <strong>Shared in Domain</strong> is the
               domain&rsquo;s operating manual; <strong>Marketplace</strong> is certified
               knowledge from across the org.
             </p>
@@ -522,7 +524,7 @@ export default function KnowledgePage() {
             {/* ── SHARED: the domain operating manual (four guided sections) ── */}
             {(kScope === 'all' || kScope === 'shared') && (
               <div style={{ marginTop: 20, order: 2 }}>
-                <div className="section-title">Shared · the domain operating manual</div>
+                <div className="section-title">Shared in Domain · the domain operating manual</div>
                 <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
                   Pinned as base context for every agent in this domain. Keep it short and current.
                 </p>
@@ -744,6 +746,17 @@ export default function KnowledgePage() {
             )}
           </>
         )}
+
+
+        {/* Talk to Knowledge — governed retrieval over workflows + knowledge entries. */}
+        {(() => {
+          const talk = TALK_PRESENTATION.knowledge;
+          return (
+            <div style={{ marginTop: 40 }}>
+              <TalkTo tab="knowledge" title={talk.title} blurb={talk.blurb} examples={talk.examples} />
+            </div>
+          );
+        })()}
       </div>
 
       <style>{KnowledgeStyles}</style>
