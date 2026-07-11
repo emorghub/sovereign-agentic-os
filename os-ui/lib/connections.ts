@@ -17,7 +17,12 @@ import {
   templateByKey,
   isPersonalConnectable,
 } from '@/lib/connection-model';
-import { putSecret, secretFingerprint, getSecretServerSide, isEgressAllowed } from '@/lib/secrets';
+import { putSecret, secretFingerprint, getSecretServerSide, isEgressAllowed, deleteSecret, hasSecret } from '@/lib/secrets';
+import { type ArtifactVersion, versionLog } from '@/lib/versioning';
+import {
+  type PhysicalDeleteReport,
+  purgeConnectionSecrets,
+} from '@/lib/connections-physical-delete';
 import {
   registerConnectionProfile,
   unregisterConnectionProfile,
@@ -38,6 +43,18 @@ import {
 } from '@/lib/governance';
 import { registerBronzeSource, indexToFiles } from '@/lib/data-handoff';
 import { logEgress } from '@/lib/egress-requests';
+import { providerForTemplate } from '@/lib/oauth/providers';
+import { storeTokens, readTokens, resolveAccessToken } from '@/lib/oauth/connection-token';
+import { isExpired, type TokenSet } from '@/lib/oauth/token-set';
+import {
+  refreshNotionToken,
+  listNotionMcpTools,
+  serializeClientReg,
+  parseClientReg,
+  type FetchFn,
+  type NotionClientReg,
+  type McpToolInfo,
+} from '@/lib/oauth/notion-mcp';
 
 /**
  * Connections registry — the home of record for every MANUALLY-credentialed
@@ -91,6 +108,14 @@ function withStatus(err: Error, status: number): Error {
 
 const mirror = osMirror({ index: 'os-connections' });
 
+// Durable, per-connection version history (the reused OS helper). The capability
+// profile (tools) is snapshotted before a meaningful edit so any prior profile is
+// restorable — the same discipline the other artifact stores use.
+const versions = versionLog('connection');
+function snapshotState(c: Connection): { tools: ConnectionTool[] } {
+  return { tools: c.tools };
+}
+
 function writeThrough(c: Connection): void {
   mirror.writeThrough(c.id, c);
 }
@@ -111,8 +136,8 @@ async function getCache(): Promise<Map<string, Connection>> {
   const s = connState();
   if (s.cache) return s.cache;
   const map = new Map<string, Connection>();
-  const docs = (await mirror.hydrate(500)) ?? []; // null → mirror down → in-memory only
-  for (const c of docs as Connection[]) {
+  const [docs] = await Promise.all([mirror.hydrate(500), versions.ensureHydrated()]);
+  for (const c of (docs ?? []) as Connection[]) { // null → mirror down → in-memory only
     map.set(c.id, c);
     compileProfile(c); // re-hydrate the OPA mirror after a restart
   }
@@ -128,10 +153,14 @@ function visibleToUser(c: Connection, user: CurrentUser): boolean {
   return true; // Certified (Marketplace) — discoverable across domains
 }
 
-export async function listConnectionsForUser(user: CurrentUser): Promise<Connection[]> {
+export async function listConnectionsForUser(
+  user: CurrentUser,
+  opts: { includeArchived?: boolean } = {},
+): Promise<Connection[]> {
   const map = await getCache();
   return [...map.values()]
     .filter((c) => visibleToUser(c, user))
+    .filter((c) => opts.includeArchived || !c.archived) // archived soft-hidden by default
     .sort((x, y) => y.updatedAt.localeCompare(x.updatedAt));
 }
 
@@ -261,6 +290,9 @@ export async function updateCapabilities(
   if (!roleAtLeast(user.role, 'builder')) {
     throw withStatus(new Error('Editing capabilities requires a Builder or Administrator'), 403);
   }
+
+  // Snapshot the PRIOR capability profile before overwriting it, so the edit is restorable.
+  versions.record(c.id, user.id, snapshotState(c), 'edit capabilities');
 
   for (const u of updates) {
     const tool = c.tools.find((t) => t.name === u.name);
@@ -672,22 +704,268 @@ function executeMock(c: Connection, tool: string, args: Record<string, unknown>,
   }
 }
 
-export async function deleteConnection(connId: string, user: CurrentUser): Promise<void> {
+// -------------------------------------------------------- OAuth token wiring ---
+
+/**
+ * OAuth CALLBACK sink: persist the real token set on a Drive connection's secret
+ * ref (overwriting the offline placeholder minted at create time). ONLY the
+ * connection owner may complete the OAuth flow for their personal connection.
+ * The token set is the credential — never returned, traced, or logged (we trace
+ * ONLY that a connection was authorized + its non-reversible fingerprint).
+ */
+export async function storeConnectionTokens(connId: string, userId: string, tokens: TokenSet): Promise<Connection> {
   const map = await getCache();
   const c = map.get(connId);
-  if (!c) return;
+  if (!c) throw withStatus(new Error('Connection not found'), 404);
+  if (c.owner !== userId) throw withStatus(new Error('Only the connection owner can complete its OAuth flow'), 403);
+  if (c.type !== 'Drive') throw withStatus(new Error('This connection is not an OAuth Drive connection'), 400);
+  storeTokens(c.secretRef, tokens); // raw token set → Secrets Manager only
+  c.secretSet = true;
+  c.secretFingerprint = secretFingerprint(c.secretRef);
+  c.health = 'healthy';
+  c.mode = 'live';
+  c.updatedAt = now();
+  map.set(c.id, c);
+  writeThrough(c);
+  void trace({
+    principal: c.principal,
+    tool: 'generate',
+    input: { action: 'oauth_connected', by: userId, provider: providerForTemplate(c.template) },
+    output: { connectionId: c.id, fingerprint: c.secretFingerprint }, // fingerprint, NEVER the token
+    decision: 'allow',
+  });
+  return c;
+}
+
+/**
+ * Resolve a live OAuth access token for a Drive connection so the Files sync can
+ * pull the REAL drive. GOVERNANCE: only the connection OWNER may sync it. Silently
+ * refreshes an expired token (and re-stores it); on a hard auth failure marks the
+ * connection `needs-reconnect` and returns null so the sync degrades to the mock
+ * client instead of throwing. The token is returned ONLY to the trusted server
+ * sync path — never to a client, trace, or log.
+ */
+export async function resolveConnectionAccessToken(connId: string, userId: string): Promise<string | null> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c) throw withStatus(new Error('Connection not found'), 404);
+  if (c.owner !== userId) throw withStatus(new Error('Only the connection owner can sync this connection'), 403);
+  const provider = c.type === 'Drive' ? providerForTemplate(c.template) : null;
+  if (!provider) return null; // not an OAuth drive connection → mock path
+  const res = await resolveAccessToken(c.secretRef, provider);
+  if (res.status === 'live') {
+    if (res.refreshed || c.health !== 'healthy') {
+      c.health = 'healthy';
+      c.updatedAt = now();
+      map.set(c.id, c);
+      writeThrough(c);
+    }
+    return res.accessToken;
+  }
+  if (res.status === 'needs-reconnect' && c.health !== 'needs-reconnect') {
+    c.health = 'needs-reconnect';
+    c.updatedAt = now();
+    map.set(c.id, c);
+    writeThrough(c);
+  }
+  return null; // 'none' (offline placeholder) or 'needs-reconnect' → mock fake-drive
+}
+
+// --------------------------------------------- Notion hosted-MCP OAuth wiring ---
+
+/** The vault ref for the connection's registered MCP client (parallel to the token ref). */
+function notionRegRef(c: Connection): { name: string; key: string } {
+  return { name: c.secretRef.name, key: 'mcp-client' };
+}
+
+function isNotionMcp(c: Connection): boolean {
+  return c.template === 'notion-mcp';
+}
+
+/**
+ * Notion MCP OAuth CALLBACK sink: persist the user's token set AND the registered
+ * client (both server-side, in Secrets Manager) on the connection, overwriting the
+ * placeholder minted at create time. Only the owner may complete their own flow.
+ * Neither the token nor any client secret is ever returned/traced — only the
+ * non-reversible fingerprint is surfaced.
+ */
+export async function storeNotionConnection(
+  connId: string,
+  userId: string,
+  tokens: TokenSet,
+  reg: NotionClientReg,
+): Promise<Connection> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c) throw withStatus(new Error('Connection not found'), 404);
+  if (c.owner !== userId) throw withStatus(new Error('Only the connection owner can complete its OAuth flow'), 403);
+  if (!isNotionMcp(c)) throw withStatus(new Error('This connection is not a Notion MCP connection'), 400);
+  storeTokens(c.secretRef, tokens); // token set → Secrets Manager only
+  const ref = notionRegRef(c);
+  putSecret(ref.name, ref.key, serializeClientReg(reg)); // client reg → vault only (never a record)
+  c.secretSet = true;
+  c.secretFingerprint = secretFingerprint(c.secretRef);
+  c.health = 'healthy';
+  c.mode = 'live';
+  c.updatedAt = now();
+  map.set(c.id, c);
+  writeThrough(c);
+  void trace({
+    principal: c.principal,
+    tool: 'generate',
+    input: { action: 'notion_mcp_connected', by: userId },
+    output: { connectionId: c.id, fingerprint: c.secretFingerprint }, // fingerprint, NEVER the token
+    decision: 'allow',
+  });
+  return c;
+}
+
+/** Read the stored Notion client registration (server-side only). */
+export function getNotionClientReg(c: Connection): NotionClientReg | null {
+  return parseClientReg(getSecretServerSide(notionRegRef(c)));
+}
+
+/**
+ * PROVE LIVENESS: resolve the stored token (silently refreshing when expired),
+ * then run a real MCP initialize + tools/list round-trip through the Notion hosted
+ * server and return its advertised tools. Owner-only. On a hard auth/transport
+ * failure the connection is marked needs-reconnect. `fetchImpl` is injectable so
+ * the whole path unit-tests against a fake; the token is used ONLY as the bearer
+ * server-side and is never returned to the client.
+ */
+export async function verifyNotionConnection(
+  connId: string,
+  userId: string,
+  opts: { fetchImpl?: FetchFn; now?: number } = {},
+): Promise<{ ok: boolean; tools: McpToolInfo[]; detail: string }> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c || c.owner !== userId) throw withStatus(new Error('Connection not found'), 404);
+  if (!isNotionMcp(c)) throw withStatus(new Error('This connection is not a Notion MCP connection'), 400);
+
+  const reg = getNotionClientReg(c);
+  const ts = readTokens(c.secretRef);
+  if (!reg || !ts) {
+    return { ok: false, tools: [], detail: 'Notion is not connected yet — click Connect Notion to authorize your workspace.' };
+  }
+
+  const nowSec = opts.now ?? Math.floor(Date.now() / 1000);
+  try {
+    let access = ts.accessToken;
+    if (isExpired(ts, nowSec)) {
+      const next = await refreshNotionToken(reg, ts, { fetchImpl: opts.fetchImpl, now: nowSec });
+      storeTokens(c.secretRef, next);
+      access = next.accessToken;
+    }
+    const tools = await listNotionMcpTools(reg, access, { fetchImpl: opts.fetchImpl });
+    c.health = 'healthy';
+    c.mode = 'live';
+    c.updatedAt = now();
+    map.set(c.id, c);
+    writeThrough(c);
+    void trace({
+      principal: c.principal,
+      tool: 'generate',
+      input: { action: 'notion_tools_list', by: userId },
+      output: { count: tools.length }, // tool count only — never the token
+      decision: 'allow',
+    });
+    return { ok: true, tools, detail: `Live — the Notion MCP server advertises ${tools.length} tool${tools.length === 1 ? '' : 's'} through your token.` };
+  } catch (e) {
+    c.health = 'needs-reconnect';
+    c.updatedAt = now();
+    map.set(c.id, c);
+    writeThrough(c);
+    return { ok: false, tools: [], detail: `Could not reach the Notion MCP server: ${(e as Error).message}. Try Reconnect.` };
+  }
+}
+
+/** The store's edit authority for archive/delete/restore: owner or a domain admin. */
+function requireConnEdit(c: Connection | undefined, user: CurrentUser): Connection {
+  if (!c) throw withStatus(new Error('Connection not found'), 404);
   const isOwner = c.owner === user.id;
   const isDomainAdmin = user.role === 'admin' && user.domains.includes(c.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to delete this connection'), 403);
+  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to modify this connection'), 403);
+  return c;
+}
+
+/**
+ * Archive / unarchive a connection: a reversible soft-hide (owner or domain admin). The
+ * vault secret + any OAuth token are KEPT — an archived connection reconnects with no
+ * re-auth. The OPA profile stays compiled so a restore is instant. Never purges physical.
+ */
+export async function setConnectionArchived(connId: string, user: CurrentUser, archived: boolean): Promise<Connection> {
+  const map = await getCache();
+  const c = requireConnEdit(map.get(connId), user);
+  c.archived = archived;
+  c.updatedAt = now();
+  writeThrough(c);
+  return c;
+}
+
+/** Version history for a connection's capability profile, newest first (edit-scoped). */
+export async function listConnectionVersions(connId: string, user: CurrentUser): Promise<ArtifactVersion[]> {
+  const map = await getCache();
+  requireConnEdit(map.get(connId), user);
+  return versions.list(connId);
+}
+
+/**
+ * Restore a prior capability profile. Auditable + reversible: the current profile is
+ * snapshotted first, THEN the chosen version is applied and re-compiled into the OPA
+ * mirror. Edit-scoped.
+ */
+export async function restoreConnectionVersion(connId: string, user: CurrentUser, version: number): Promise<Connection> {
+  const map = await getCache();
+  const c = requireConnEdit(map.get(connId), user);
+  const snap = versions.get(connId, version);
+  if (!snap) throw withStatus(new Error(`version ${version} not found`), 404);
+  const tools = (snap.state as { tools?: ConnectionTool[] }).tools;
+  if (!tools) throw withStatus(new Error(`version ${version} has no restorable profile`), 422);
+  versions.record(connId, user.id, snapshotState(c), `restore of v${version}`);
+  c.tools = tools;
+  c.updatedAt = now();
+  map.set(c.id, c);
+  compileProfile(c);
+  writeThrough(c);
+  return c;
+}
+
+/**
+ * Permanently delete a connection — registry record AND its VAULT secret (the credential
+ * plus any stored OAuth token/Notion MCP client, all under `secretRef`). A "deleted"
+ * connection whose credential still lives in Secrets Manager isn't deleted: the secret
+ * could still be injected. The record delete (profile unregister + registry forget) runs
+ * first, then the vault is purged best-effort AS the caller. A secret the vault couldn't
+ * forget is reported as `physical` ok:false — the delete stands, the leftover is never
+ * silent. Archive KEEPS every vault entry. Returns an honest report.
+ */
+export async function deleteConnection(connId: string, user: CurrentUser): Promise<PhysicalDeleteReport> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c) return { recordDeleted: false, physical: [] };
+  requireConnEdit(c, user);
   unregisterConnectionProfile(c.principal);
   map.delete(connId);
   mirror.deleteThrough(connId);
+  versions.purge(connId);
+  // Physical: purge the credential + OAuth token (+ Notion MCP client) from the vault.
+  const physical = purgeConnectionSecrets(c, hasSecret, deleteSecret);
+  void trace({
+    principal: c.principal,
+    tool: 'generate',
+    input: { action: 'delete_connection', by: user.id },
+    output: { connectionId: c.id, physical }, // secret refs only, never values
+    decision: 'allow',
+  });
+  return { recordDeleted: true, physical };
 }
 
 export function __resetConnections(): void {
   const s = connState();
   s.cache = null;
   mirror.__reset();
+  versions.__reset();
 }
 
 export type { Connection };

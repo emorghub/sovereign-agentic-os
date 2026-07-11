@@ -3,16 +3,33 @@
  */
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { CAPABILITY_MODES, type CapabilityMode } from '@/lib/connection-model';
+import { CAPABILITY_MODES, type CapabilityMode, type ConnectionTemplateKey } from '@/lib/connection-model';
 import { roleAtLeast, type Role } from '@/lib/session';
+import { SCOPE_GROUPS, groupByScope, groupsFromVisibility, scopeCounts, type ScopeKey } from '@/lib/scopes';
+import { providerForTemplate, providerConfig, type OAuthProvider } from '@/lib/oauth/providers';
+import { driveConnectionStatus, driveAuthorizePath } from '@/lib/oauth/drive-status';
+import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
+import LifecycleActions from '@/components/lifecycle/LifecycleActions';
+import type { Visibility } from '@/lib/lifecycle';
+import DomainTag from '@/components/DomainTag';
+import { CONNECTORS, CONNECTOR_CATEGORIES } from '@/lib/connectors';
+import { useApi } from '@/lib/useApi';
 
 /**
- * Governed Connections surface (Connections golden path). A Builder/Admin creates
- * a Connection (API/MCP/Database/SaaS) → endpoint + credential (to Secrets
- * Manager, never the record) → tests it → tunes the per-tool capability profile
- * (Off/Read/Write-approval/Write-bounded/Blocked + limits) → promotes it up the
- * Personal→Shared→Marketplace ladder. Participants see a read-only consume view.
+ * Governed Connections surface — ONE scroll, no sub-tabs.
+ *
+ * Layout (top → bottom):
+ *   1. Governed connections grouped All · My · Shared · Marketplace (scope switcher).
+ *   2. Create a new connection (OAuth templates + service connectors).
+ *   3. App MCP connections (auto-generated from Software tab).
+ *   4. Supported connector catalog.
+ *   5. Outbound access / egress allowlist (Builder/Admin only).
+ *
+ * Builder/Admin creates a Connection → endpoint + credential (to Secrets Manager,
+ * never the record) → tests it → tunes the per-tool capability profile → promotes it
+ * up the Personal→Shared→Marketplace ladder. Participants see a read-only consume view.
  */
 
 // ---- Types -----------------------------------------------------------------
@@ -39,6 +56,8 @@ type Conn = {
   owner: string;
   domain: string;
   visibility: 'Personal' | 'Shared' | 'Certified';
+  /** Soft-archived (retained, reversible). */
+  archived?: boolean;
   mode: string;
   secretRef: { name: string; key: string };
   secretSet: boolean;
@@ -55,12 +74,14 @@ type Template = {
   auth: 'oauth' | 'service';
   endpointHint: string;
 };
+type OAuthProviderStatus = { provider: OAuthProvider; label: string; configured: boolean };
 type Data = {
   user: { id: string; role: Role };
   connections: Conn[];
   templates: Template[];
   canCreate: boolean;
   canCreatePersonal: boolean;
+  oauthProviders?: OAuthProviderStatus[];
 };
 type ApprovalDiff = { field: string; before: unknown; after: unknown };
 type ApprovalPreview = {
@@ -71,6 +92,20 @@ type ApprovalPreview = {
   reason: string;
 };
 type EgressRequest = { id: string; host: string; reason: string; status: string; requestedBy?: string; at?: string };
+
+type AppTool = { name: string; description: string; write: boolean };
+type AppConn = {
+  id: string;
+  appId: string;
+  appSlug: string;
+  name: string;
+  principal: string;
+  owner: string;
+  domain: string;
+  visibility: 'Personal' | 'Shared' | 'Certified';
+  tools: AppTool[];
+};
+type AppConns = { connections: AppConn[] };
 
 // ---- Helpers ---------------------------------------------------------------
 
@@ -100,18 +135,24 @@ export default function GovernedConnections() {
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState('');
   const [open, setOpen] = useState<string>('');
+  const [scope, setScope] = useState<ScopeKey>('all');
+  const [showArchived, setShowArchived] = useState(false);
 
   const load = useCallback(async () => {
     setError('');
     try {
-      const res = await fetch('/api/connections', { cache: 'no-store' });
+      // ?archived=1 additionally returns soft-archived connections (their own toggle).
+      const res = await fetch(`/api/connections${showArchived ? '?archived=1' : ''}`, { cache: 'no-store' });
       const body = await res.json() as Data | { error: string };
       if (!res.ok) setError((body as { error: string }).error ?? 'Failed to load connections');
       else setData(body as Data);
     } catch (e) { setError((e as Error).message); }
-  }, []);
+  }, [showArchived]);
 
   useEffect(() => { load(); }, [load]);
+
+  // ---- App MCP connections (auto-generated from Software tab) ----
+  const { data: appConns } = useApi<AppConns>('/api/connections/apps');
 
   // ---- New connection form ----
   const [name, setName] = useState('');
@@ -157,7 +198,7 @@ export default function GovernedConnections() {
         const c = resp.connection;
         const ref = `${c.secretRef.name}/${c.secretRef.key}`;
         if (isOAuth) {
-          setCreateMsg(`✓ Created "${c.name}" — ${c.visibility}. Token stored as ref ${ref} (never the value).`);
+          setCreateMsg(`✓ Created "${c.name}" — ${c.visibility}. Now click Connect on its card below to sign in and authorize your own account. The token goes to Secrets Manager as ref ${ref} (never the value).`);
         } else {
           setCreateMsg(`✓ Created "${c.name}" — ${c.visibility}. Credential stored as ref ${ref} (never the value).`);
         }
@@ -173,16 +214,72 @@ export default function GovernedConnections() {
   const showOAuthForm = (canCreatePersonal || canCreate) && isOAuth && oauthTemplates.length > 0;
   const showServiceForm = canCreate && !isOAuth && serviceTemplates.length > 0;
 
+  if (!data && !error) return <div className="hint"><span className="spin" /> Loading connections…</div>;
+
   return (
-    <>
-      <div className="section-title">New connection</div>
+    <ConfirmProvider>
+
+      {/* ── 1. Governed connections (scope-grouped) ── */}
+      <div className="section-title">
+        Governed connections
+        <button
+          className="btn ghost"
+          style={{ marginLeft: 'auto', padding: '4px 12px', opacity: showArchived ? 1 : 0.7 }}
+          onClick={() => setShowArchived((v) => !v)}
+          title="Archived connections are hidden by default"
+        >
+          {showArchived ? 'Hide archived' : 'Show archived'}
+        </button>
+      </div>
+      {error ? <div className="error">{error}</div> : null}
+
+      {(() => {
+        if (!data) return null;
+        const groups = groupsFromVisibility(data.connections);
+        const scoped = groupByScope(groups, data.user.id);
+        const counts = scopeCounts(groups, data.user.id);
+        const visible = scoped[scope];
+        return (
+          <>
+            {/* Scope switcher — the OS-wide four groups: All · My · Shared · Marketplace. */}
+            <div className="seg" style={{ marginBottom: 14 }}>
+              {SCOPE_GROUPS.map((g) => (
+                <button key={g.key} type="button" className={scope === g.key ? 'on' : ''} onClick={() => setScope(g.key)}>
+                  {g.label('Connections')} ({counts[g.key]})
+                </button>
+              ))}
+            </div>
+            {visible.length === 0 ? (
+              <div className="stub-page">
+                {scope === 'mine' || scope === 'all'
+                  ? <>No governed connections yet{canCreate ? ' — create one below.' : '.'}</>
+                  : scope === 'shared' ? 'Nothing shared in your domain yet.' : 'Nothing in the marketplace yet.'}
+              </div>
+            ) : (
+              visible.map((c) => (
+                <ConnectionCard
+                  key={c.id}
+                  c={c}
+                  role={data.user.role}
+                  oauthProviders={data.oauthProviders ?? []}
+                  open={open === c.id}
+                  onToggle={() => setOpen(open === c.id ? '' : c.id)}
+                  onChange={load}
+                />
+              ))
+            )}
+          </>
+        );
+      })()}
+
+      {/* ── 2. Create a new connection ── */}
+      <div className="section-title" style={{ marginTop: 28 }}>New connection</div>
       {(canCreate || canCreatePersonal) ? (
         <>
           <p className="hint" style={{ marginTop: 0, marginBottom: 12 }}>
-            Pick a connection type. Personal connections (Drive, Slack) use OAuth — we complete the
-            flow server-side and store only a token reference. Shared connections (databases, APIs,
-            MCP servers) require a <strong>Builder</strong> or <strong>Administrator</strong> to
-            enter service credentials — these also go to <strong>Secrets Manager</strong>.
+            Pick a connector: <strong>Google Drive</strong>, <strong>OneDrive</strong> or
+            {' '}<strong>Notion</strong>. Each connects with your own account via OAuth — you sign in,
+            we complete the flow server-side and store only a token <em>reference</em> (never the token).
             All external endpoints are checked against the <strong>egress allowlist</strong>.
           </p>
 
@@ -190,7 +287,7 @@ export default function GovernedConnections() {
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Connection name (e.g. Alex&apos;s Google Drive, Salesforce Sales org)"
+            placeholder="Connection name (e.g. Alex's Google Drive, My Notion workspace)"
           />
 
           <div className="row" style={{ marginTop: 10 }}>
@@ -219,12 +316,14 @@ export default function GovernedConnections() {
           {showOAuthForm ? (
             <>
               <p className="hint" style={{ marginTop: 10, marginBottom: 6 }}>
-                We complete OAuth and store the token in Secrets Manager — never in the browser or
-                the record. This connection is private to you (<strong>Personal</strong>).
+                Add the drive, then click <strong>Connect</strong> on its card above to sign in through
+                {tpl ? ` ${tpl.label}` : ' the provider'} and authorize your own account. We complete OAuth
+                and store the token in Secrets Manager — never in the browser or the record. This
+                connection is private to you (<strong>Personal</strong>).
               </p>
               <div className="row" style={{ justifyContent: 'flex-end' }}>
                 <button className="btn" onClick={create} disabled={creating || !name.trim()}>
-                  {creating ? <span className="spin" /> : `Connect with ${tpl?.label ?? 'OAuth'}`}
+                  {creating ? <span className="spin" /> : `Add ${tpl?.label ?? 'drive'}`}
                 </button>
               </div>
             </>
@@ -279,24 +378,79 @@ export default function GovernedConnections() {
         </div>
       )}
 
-      <div className="section-title">Your governed connections</div>
-      {error ? <div className="error">{error}</div> : null}
-      {data && data.connections.length === 0 ? (
-        <div className="stub-page">No governed connections yet{canCreate ? ' — create one above.' : '.'}</div>
-      ) : null}
-      {data?.connections.map((c) => (
-        <ConnectionCard
-          key={c.id}
-          c={c}
-          role={data.user.role}
-          open={open === c.id}
-          onToggle={() => setOpen(open === c.id ? '' : c.id)}
-          onChange={load}
-        />
-      ))}
+      {/* ── 3. App MCP connections (auto-generated) ── */}
+      <div className="section-title" style={{ marginTop: 28 }}>App MCP connections</div>
+      <p className="hint" style={{ marginTop: 0, marginBottom: 14 }}>
+        Every app you build in the Software tab auto-generates an MCP, registered here as a
+        governed connection + agent tool. Building an app and creating a connection are one act.
+      </p>
+      {(appConns?.connections?.length ?? 0) === 0 ? (
+        <div className="stub-page">No app connections yet — build one in the Software tab.</div>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Connection</th><th>Principal</th><th>Tools</th><th>Visibility</th><th>App</th></tr>
+            </thead>
+            <tbody>
+              {appConns!.connections.map((c) => (
+                <tr key={c.id}>
+                  <td style={{ fontWeight: 600 }}>{c.name}</td>
+                  <td className="mono">{c.principal}</td>
+                  <td className="muted mono" style={{ fontSize: 11.5, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.tools.map((t) => t.name).join(', ')}>{c.tools.map((t) => t.name).join(', ')}</td>
+                  <td><span className={`badge vis-${c.visibility.toLowerCase()}`}>{c.visibility}</span></td>
+                  <td><Link className="btn ghost" href={`/software/${c.appId}`}>Open →</Link></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
+      {/* ── 4. Supported connector catalog ── */}
+      <div className="section-title" style={{ marginTop: 28 }}>Supported connectors</div>
+      <p className="hint" style={{ marginTop: 0, marginBottom: 14 }}>
+        These connectors are wired end-to-end: you sign in with your own account and only a
+        token <em>reference</em> is stored (never a raw secret). Connect any of them using
+        the <strong>New connection</strong> form above.
+      </p>
+      {CONNECTOR_CATEGORIES.map((cat) => {
+        const items = CONNECTORS.filter((c) => c.category === cat);
+        if (items.length === 0) return null;
+        return (
+          <div key={cat} style={{ marginBottom: 18 }}>
+            <div className="mono" style={{ color: 'var(--text-faint)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{cat}</div>
+            <div className="grid">
+              {items.map((c) => (
+                <div className="card" key={c.name}>
+                  <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h3 style={{ margin: 0 }}>{c.name}</h3>
+                    <span className="badge ok">available</span>
+                  </div>
+                  <div className="muted" style={{ marginTop: 8 }}>Auth: {c.auth}</div>
+                  <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+                    <button
+                      className="btn ghost"
+                      onClick={() => {
+                        // Scroll to the new connection form above (smooth UX).
+                        document.querySelector<HTMLElement>('input[placeholder*="Connection name"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        setTemplate(c.template);
+                      }}
+                    >
+                      Connect →
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* ── 5. Outbound access (Builder/Admin only) ── */}
       {canCreate ? <EgressSection /> : null}
-    </>
+
+    </ConfirmProvider>
   );
 }
 
@@ -341,7 +495,7 @@ function EgressSection() {
 
   return (
     <>
-      <div className="section-title">Outbound access</div>
+      <div className="section-title" style={{ marginTop: 28 }}>Outbound access</div>
       <p className="hint" style={{ marginTop: 0, marginBottom: 12 }}>
         External endpoints must be on the egress allowlist before a connection can reach them.
         Request access below — an Administrator approves in the Governance tab.
@@ -398,10 +552,14 @@ function EgressSection() {
 const AUTONOMOUS_PRESETS = ['read-only', 'read-propose', 'read-bounded', 'full-in-scope'] as const;
 type AutonomousPreset = typeof AUTONOMOUS_PRESETS[number];
 
+/** Connection visibility → the OS-wide lifecycle visibility (drives the delete gate). */
+const connVisibility = (v: Conn['visibility']): Visibility =>
+  v === 'Shared' ? 'shared' : v === 'Certified' ? 'certified' : 'personal';
+
 function ConnectionCard({
-  c, role, open, onToggle, onChange,
+  c, role, oauthProviders, open, onToggle, onChange,
 }: {
-  c: Conn; role: Role; open: boolean; onToggle: () => void; onChange: () => void;
+  c: Conn; role: Role; oauthProviders: OAuthProviderStatus[]; open: boolean; onToggle: () => void; onChange: () => void;
 }) {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
@@ -425,6 +583,79 @@ function ConnectionCard({
   const exposed = c.tools.filter((t) => t.mode === 'Read' || t.mode === 'Write-approval' || t.mode === 'Write-bounded');
   const isDrive = c.connector === 'drive' || c.type === 'Drive';
 
+  // Notion hosted-MCP connection: a per-user OAuth (DCR + PKCE) connect flow that
+  // proves liveness with a real MCP tools/list. Status derives from the same safe
+  // health field a Drive uses (untested → Not connected; healthy → Connected).
+  const isNotion = c.template === 'notion-mcp';
+  const notionStatus = driveConnectionStatus(c);
+  const [notionTools, setNotionTools] = useState<{ name: string; description?: string }[] | null>(null);
+  const [notionMsg, setNotionMsg] = useState('');
+
+  function connectNotion() {
+    window.location.href = `/api/connections/notion/authorize?connectionId=${encodeURIComponent(c.id)}`;
+  }
+
+  async function verifyNotion() {
+    setBusy('verify-notion');
+    setNotionMsg('');
+    try {
+      const r = await postJSON(`/api/connections/${c.id}/mcp-tools`);
+      const detail = (r.data.detail as string) ?? (r.data.error as string) ?? 'Verification failed';
+      setNotionMsg(`${r.data.ok ? '✓' : '✗'} ${detail}`);
+      setNotionTools((r.data.tools as { name: string; description?: string }[]) ?? []);
+      if (r.data.ok) onChange();
+    } catch (e) {
+      setNotionMsg(`✗ ${(e as Error).message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function disconnectNotion() {
+    if (typeof window !== 'undefined' && !window.confirm(`Disconnect "${c.name}"? This removes the connection and its stored token.`)) return;
+    setBusy('disconnect');
+    setNotionMsg('');
+    try {
+      const res = await fetch(`/api/connections/${c.id}`, { method: 'DELETE' });
+      if (res.ok) { onChange(); return; }
+      const d = await res.json() as { error?: string };
+      setNotionMsg(`✗ ${d.error ?? 'Could not disconnect'}`);
+    } catch (e) {
+      setNotionMsg(`✗ ${(e as Error).message}`);
+    } finally { setBusy(''); }
+  }
+
+  // Personal-drive OAuth wiring: which provider this drive federates to, whether an
+  // admin has registered its OAuth app, and the current connect status. A user
+  // connects their OWN drive via the provider consent screen (full-page navigation).
+  const driveProvider: OAuthProvider | null = isDrive && c.auth === 'oauth'
+    ? providerForTemplate(c.template as ConnectionTemplateKey)
+    : null;
+  const driveProviderStatus = driveProvider ? oauthProviders.find((p) => p.provider === driveProvider) : undefined;
+  const driveProviderConfigured = driveProviderStatus?.configured ?? false;
+  const driveProviderLabel = driveProvider ? providerConfig(driveProvider).label : '';
+  const driveStatus = driveConnectionStatus(c);
+
+  /** The "Connect"/"Reconnect" button navigates full-page — the route 302s to consent. */
+  function connectDrive() {
+    if (!driveProvider) return;
+    window.location.href = driveAuthorizePath(driveProvider, c.id);
+  }
+
+  async function disconnectDrive() {
+    if (typeof window !== 'undefined' && !window.confirm(`Disconnect "${c.name}"? This removes the connection and its stored token. You can reconnect by adding it again.`)) return;
+    setBusy('disconnect');
+    setMsg('');
+    try {
+      const res = await fetch(`/api/connections/${c.id}`, { method: 'DELETE' });
+      if (res.ok) { onChange(); return; }
+      const d = await res.json() as { error?: string };
+      setMsg(`✗ ${d.error ?? 'Could not disconnect'}`);
+    } catch (e) {
+      setMsg(`✗ ${(e as Error).message}`);
+    } finally { setBusy(''); }
+  }
+
   /** Card-level POST — tracks the global busy state so all buttons disable. */
   async function doPost(path: string, body?: unknown): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
     setBusy(path);
@@ -442,7 +673,11 @@ function ConnectionCard({
 
   async function test() {
     const r = await doPost(`/api/connections/${c.id}/test`);
-    setMsg(r.ok ? `✓ ${r.data.detail as string}` : `✗ ${r.data.error as string}`);
+    // Branch on the PAYLOAD's ok, not the HTTP status — the route always
+    // returns 200 even on credential/connectivity failure, with ok:false.
+    setMsg((r.data.ok as boolean)
+      ? `✓ ${r.data.detail as string}`
+      : `✗ ${(r.data.error as string) ?? (r.data.detail as string)}`);
   }
 
   async function promote() {
@@ -565,8 +800,10 @@ function ConnectionCard({
           </div>
         </div>
         <div className="row" style={{ gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
+          {c.archived ? <span className="badge muted">archived</span> : null}
           {dataUsage === 'bronze' && <span className="badge warn">Bronze source</span>}
           {dataUsage === 'files' && <span className="badge warn">Files index</span>}
+          {(c.visibility === 'Shared' || c.visibility === 'Certified') ? <DomainTag domain={c.domain} /> : null}
           <span className={badge(c.visibility)}>{c.visibility}</span>
         </div>
       </div>
@@ -603,9 +840,79 @@ function ConnectionCard({
         </div>
       ) : null}
 
+      {/* Personal-drive connect status + controls (own account, own consent). */}
+      {driveProvider ? (
+        <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {driveStatus === 'connected'
+            ? <span className="badge ok">Connected as {c.owner}</span>
+            : driveStatus === 'needs-reconnect'
+              ? <span className="badge err">Needs reconnect</span>
+              : <span className="badge muted">Not connected</span>}
+          {!driveProviderConfigured ? (
+            <span className="hint" style={{ fontSize: 12 }}>
+              An administrator must configure the {driveProviderLabel} OAuth app first.
+            </span>
+          ) : driveStatus === 'connected' ? (
+            <>
+              <button className="btn ghost" onClick={connectDrive} disabled={busy !== ''}>Reconnect</button>
+              <button className="btn ghost" onClick={disconnectDrive} disabled={busy !== ''}>Disconnect</button>
+            </>
+          ) : driveStatus === 'needs-reconnect' ? (
+            <>
+              <button className="btn" onClick={connectDrive} disabled={busy !== ''}>Reconnect</button>
+              <button className="btn ghost" onClick={disconnectDrive} disabled={busy !== ''}>Disconnect</button>
+            </>
+          ) : (
+            <button className="btn" onClick={connectDrive} disabled={busy !== ''}>Connect {driveProviderLabel}</button>
+          )}
+        </div>
+      ) : null}
+
+      {/* Notion hosted-MCP connect status + controls (own workspace, own consent). */}
+      {isNotion ? (
+        <div style={{ marginTop: 12 }}>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {notionStatus === 'connected'
+              ? <span className="badge ok">Connected as {c.owner}</span>
+              : notionStatus === 'needs-reconnect'
+                ? <span className="badge err">Needs reconnect</span>
+                : <span className="badge muted">Not connected</span>}
+            {notionStatus === 'connected' ? (
+              <>
+                <button className="btn ghost" onClick={verifyNotion} disabled={busy !== ''}>
+                  {busy === 'verify-notion' ? <span className="spin" /> : 'Verify · list tools'}
+                </button>
+                <button className="btn ghost" onClick={connectNotion} disabled={busy !== ''}>Reconnect</button>
+                <button className="btn ghost" onClick={disconnectNotion} disabled={busy !== ''}>Disconnect</button>
+              </>
+            ) : notionStatus === 'needs-reconnect' ? (
+              <>
+                <button className="btn" onClick={connectNotion} disabled={busy !== ''}>Reconnect</button>
+                <button className="btn ghost" onClick={disconnectNotion} disabled={busy !== ''}>Disconnect</button>
+              </>
+            ) : (
+              <button className="btn" onClick={connectNotion} disabled={busy !== ''}>Connect Notion</button>
+            )}
+          </div>
+          <p className="hint" style={{ marginTop: 6, marginBottom: 0, fontSize: 11.5 }}>
+            Connect signs you in to Notion and authorizes your own workspace via Notion&apos;s hosted MCP
+            (OAuth 2.1 · PKCE). Only a token <em>reference</em> is stored — never the token itself.
+            {' '}<strong>Verify · list tools</strong> runs a real MCP tools/list to prove the connection is live.
+          </p>
+          {notionMsg ? (
+            <div className={notionMsg.startsWith('✗') ? 'error' : 'answer'} style={{ marginTop: 8 }}>{notionMsg}</div>
+          ) : null}
+          {notionTools && notionTools.length > 0 ? (
+            <div className="muted mono" style={{ marginTop: 8, fontSize: 11.5 }}>
+              Live tools: {notionTools.map((t) => t.name).join(', ')}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* Action buttons */}
       <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
-        {c.health === 'needs-reconnect'
+        {driveProvider || isNotion ? null : c.health === 'needs-reconnect'
           ? <button className="btn ghost" onClick={test} disabled={busy !== ''}>Reconnect</button>
           : <button className="btn ghost" onClick={test} disabled={busy !== ''}>Test</button>}
         <button className="btn ghost" onClick={onToggle}>
@@ -678,6 +985,24 @@ function ConnectionCard({
       {/* Capabilities table + autonomous preset */}
       {open ? (
         <div style={{ marginTop: 12 }}>
+          {/* OS-wide rule: lifecycle lives inside the opened detail (the expanded
+              capabilities view) — live → Archive + Version; archived → Restore +
+              Delete + Version. `c.archived` carries the real state so Delete is
+              reachable only after archiving. */}
+          {canManage ? (
+            <div className="row" style={{ gap: 8, marginBottom: 12, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <LifecycleActions
+                id={c.id}
+                name={c.name}
+                kind="connection"
+                visibility={connVisibility(c.visibility)}
+                archived={!!c.archived}
+                api={`/api/connections/${c.id}`}
+                onChanged={onChange}
+                compact
+              />
+            </div>
+          ) : null}
           <div className="table-wrap">
             <table>
               <thead>

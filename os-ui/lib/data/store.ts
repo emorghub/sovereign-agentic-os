@@ -15,6 +15,7 @@ import {
   type ColumnDoc,
   type TrustLevel,
   type DatasetUpstream,
+  type DataCheck,
   DatasetError,
   canTransition,
   emptyVersions,
@@ -26,7 +27,7 @@ import {
 } from './dataset-schema.ts';
 import { transparencyGate, gateReason } from './transparency.ts';
 import { CUBE_ARTIFACT, EXPOSURE_ARTIFACT, scaffoldCubeYaml, scaffoldExposureYaml } from './metrics.ts';
-import { assetTarget, productTarget, personalSchema, slug } from './store-fqn.ts';
+import { assetTarget, productTarget, personalSchema, domainSchema, slug } from './store-fqn.ts';
 import { config } from '../config.ts';
 import { osMirror } from '../os-mirror.ts';
 
@@ -57,6 +58,8 @@ export type DatasetRecord = {
    *  The dataset.yaml spine points at these; both are Forgejo-versioned (dual-mode). */
   artifacts?: Record<string, string>;
   updatedAt: string;
+  /** Soft-archived: hidden from the working lists, reversible, retained. */
+  archived?: boolean;
 };
 
 export type DatasetSummary = {
@@ -72,9 +75,17 @@ export type DatasetSummary = {
   /** B/S/G dots for the tile. */
   dots: { bronze: boolean; silver: boolean; gold: boolean };
   storage: ReturnType<typeof storageFor>;
+  /** Soft-archived (retained, reversible). Absent/false = live. */
+  archived?: boolean;
 };
 
-type DataStoreState = { store: Map<string, DatasetRecord>; seeded: boolean; hydration: Promise<void> | null };
+type DataStoreState = {
+  store: Map<string, DatasetRecord>;
+  seeded: boolean;
+  hydration: Promise<void> | null;
+  /** Set when the last hydration found the mirror DOWN — gates the throttled retry. */
+  hydrateFailedAt?: number;
+};
 const DS_KEY = Symbol.for('soa.data.store');
 function ds(): DataStoreState {
   const g = globalThis as unknown as Record<symbol, DataStoreState | undefined>;
@@ -115,6 +126,7 @@ const mirror = osMirror({
         // would otherwise explode the mapping.
         yaml: { type: 'text', index: false },
         artifacts: { type: 'object', enabled: false },
+        archived: { type: 'boolean' },
       },
     },
   },
@@ -129,15 +141,33 @@ function writeThrough(rec: DatasetRecord): void {
  * at the server boundary (requirePrincipal) BEFORE any read, so a restarted os-ui
  * serves the persisted datasets. Idempotent + graceful (offline → in-memory only).
  */
+/** Retry a failed hydration at most this often (a down mirror must not add a
+ *  probe round-trip to EVERY request — mirrors os-mirror's write reprobe). */
+const HYDRATE_RETRY_MS = 60_000;
+
 export async function ensureHydrated(): Promise<void> {
   const s = ds();
-  if (!s.hydration) s.hydration = hydrate();
+  if (!s.hydration) {
+    // After a mirror-down hydration, retry (throttled) instead of staying pinned
+    // to an empty registry for the pod's lifetime — a transient OpenSearch blip
+    // at boot must not "lose" every mirrored dataset until the next deploy.
+    if (s.hydrateFailedAt && Date.now() - s.hydrateFailedAt < HYDRATE_RETRY_MS) return;
+    s.hydration = hydrate();
+  }
   return s.hydration;
 }
 
 async function hydrate(): Promise<void> {
   const s = ds();
-  const docs = (await mirror.hydrate(1000)) ?? []; // null → mirror down → in-memory only
+  const docs = await mirror.hydrate(1000);
+  if (docs === null) {
+    // Mirror down → stay un-hydrated and retry on a later read (never cache a
+    // FAILED hydration as done — the oauth store's rule).
+    s.hydrateFailedAt = Date.now();
+    s.hydration = null;
+    return;
+  }
+  s.hydrateFailedAt = undefined;
   for (const rec of docs as DatasetRecord[]) {
     // Don't clobber records created in-process before hydration completed.
     if (rec && rec.id && !s.store.has(rec.id)) s.store.set(rec.id, rec);
@@ -175,6 +205,7 @@ export function __resetStore(): void {
   s.store.clear();
   s.seeded = false;
   s.hydration = null;
+  s.hydrateFailedAt = undefined;
   mirror.__reset();
 }
 
@@ -236,7 +267,7 @@ function furthest(d: Dataset): { freshness: string | null; layer: Layer | null }
   return { freshness: null, layer: null };
 }
 
-function summarise(d: Dataset): DatasetSummary {
+function summarise(d: Dataset, archived = false): DatasetSummary {
   const f = furthest(d);
   const built = f.layer ? d.versions[f.layer] : null;
   return {
@@ -250,21 +281,30 @@ function summarise(d: Dataset): DatasetSummary {
     quality: built ? built.quality : 'unknown',
     dots: { bronze: d.versions.bronze.built, silver: d.versions.silver.built, gold: d.versions.gold.built },
     storage: storageFor(d.tier),
+    archived,
   };
 }
 
 export type DatasetGroups = { mine: DatasetSummary[]; domain: DatasetSummary[]; marketplace: DatasetSummary[] };
 
-export function listDatasets(user: Principal): DatasetGroups {
+export function listDatasets(user: Principal, opts: { includeArchived?: boolean } = {}): DatasetGroups {
   ensureSeeded();
   const mine: DatasetSummary[] = [];
   const domain: DatasetSummary[] = [];
   const marketplace: DatasetSummary[] = [];
   for (const rec of ds().store.values()) {
+    // Archived datasets are HIDDEN by default (soft archive) — the owner/Admin can
+    // list them explicitly via `includeArchived` to restore or delete. A shared/
+    // certified dataset, once archived, disappears from everyone's list too.
+    if (rec.archived && !opts.includeArchived) continue;
     const d = parseDataset(rec.yaml);
-    if (d.owner === user.id) mine.push(summarise(d));
-    else if (d.tier === 'product') marketplace.push(summarise(d));
-    else if (d.tier === 'asset' && canView(d, user)) domain.push(summarise(d));
+    if (!canView(d, user)) continue;
+    // Group by VISIBILITY (tier), not ownership: a promoted asset is domain data and
+    // belongs under Domain even when the caller authored it; a certified product under
+    // Marketplace; a private dataset (owner-only, via canView) under Personal.
+    if (d.tier === 'product') marketplace.push(summarise(d, rec.archived));
+    else if (d.tier === 'asset') domain.push(summarise(d, rec.archived));
+    else mine.push(summarise(d, rec.archived));
   }
   const byName = (a: DatasetSummary, b: DatasetSummary) => a.name.localeCompare(b.name);
   return { mine: mine.sort(byName), domain: domain.sort(byName), marketplace: marketplace.sort(byName) };
@@ -272,6 +312,38 @@ export function listDatasets(user: Principal): DatasetGroups {
 
 export function getDataset(id: string, user: Principal): Dataset {
   return viewOf(get(id), user);
+}
+
+/** Prove EDIT authority on a dataset (owner or domain admin) and return it. The metric
+ *  lifecycle uses this so archive/history stay edit-scoped — consistent with the other
+ *  artifact tabs — even for ops (archive/history) that don't themselves write the yaml. */
+export function requireDatasetEditable(id: string, user: Principal): Dataset {
+  return editOf(get(id), user);
+}
+
+/**
+ * The physical Trino FQN of a dataset's built medallion layer, resolved tier-aware:
+ * a private `dataset` lives in the caller's OWN `personal_<uid>` schema, a governed
+ * asset/product in its domain schema — the SAME resolution {@link listAskable} uses, so
+ * a governed row preview targets exactly the table the ask/query surface would. Returns
+ * null when the requested layer (or, absent one, the furthest built layer) isn't built —
+ * the caller then answers "not materialized yet" instead of building a doomed FQN.
+ */
+export function builtLayerFqn(
+  d: Dataset,
+  user: Principal,
+  layer?: Layer,
+): { layer: Layer; fqn: string; principal: string } | null {
+  const chosen = layer && d.versions[layer]?.built ? layer : furthest(d).layer;
+  if (!chosen) return null;
+  // A private `dataset` lives in the OWNER's personal lane and must be READ AS the
+  // owner (personal_<uid> ownership); a governed asset/product lives in its domain
+  // schema, read as the domain principal. domainSchema() keeps a hyphenated domain a
+  // VALID Trino identifier (raw `agentic-leader-q3-2026` is a SYNTAX_ERROR).
+  const personal = d.tier === 'dataset';
+  const schema = personal ? personalSchema(user.id) : domainSchema(d.domain);
+  const principal = personal ? user.id : (user.domains[0] ?? user.id);
+  return { layer: chosen, fqn: `iceberg.${schema}.${chosen}_${slug(d.name)}`, principal };
 }
 
 /**
@@ -344,7 +416,7 @@ export function listAskable(user: Principal): AskableDataset[] {
     if (!canView(d, user)) continue; // the hard visibility gate
     const f = furthest(d);
     if (!f.layer) continue; // nothing materialized — nothing to query
-    const schema = d.tier === 'dataset' ? personalSchema(user.id) : d.domain;
+    const schema = d.tier === 'dataset' ? personalSchema(user.id) : domainSchema(d.domain);
     out.push({
       id: d.id,
       name: d.name,
@@ -450,6 +522,54 @@ export function setDocs(
   return d;
 }
 
+/**
+ * Append a data-quality check to a dataset (visible + runnable in the detail view).
+ * A STRUCTURED rule (`rule` + `column` + args) is EXECUTABLE — compiled to a governed
+ * COUNT-of-violations SQL and run AS the owner to produce a real pass/fail (see
+ * `runQualityChecks`). A bare `name`/`description` is a legacy free-text intention.
+ * Editing is Creator+ on a dataset you can edit (owner or domain Admin).
+ */
+export function addCheck(
+  id: string,
+  user: Principal,
+  input: {
+    name?: string;
+    description?: string;
+    rule?: DataCheck['rule'];
+    column?: string;
+    values?: string[];
+    min?: number;
+    max?: number;
+  },
+): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  const check: DataCheck = {
+    id: `chk_${Math.random().toString(36).slice(2, 8)}`,
+    name: (input.name ?? '').trim() || 'Untitled check',
+    description: input.description ?? '',
+    createdBy: user.id,
+    createdAt: now(),
+    ...(input.rule ? { rule: input.rule } : {}),
+    ...(input.column ? { column: input.column.trim() } : {}),
+    ...(input.values ? { values: input.values } : {}),
+    ...(typeof input.min === 'number' ? { min: input.min } : {}),
+    ...(typeof input.max === 'number' ? { max: input.max } : {}),
+  };
+  d.checks = [...(d.checks ?? []), check];
+  persist(rec, d);
+  return d;
+}
+
+/** Remove one check by id (Creator+ on a dataset you can edit). */
+export function removeCheck(id: string, user: Principal, checkId: string): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  d.checks = (d.checks ?? []).filter((c) => c.id !== checkId);
+  persist(rec, d);
+  return d;
+}
+
 /** Pass-through carries the prior layer's quality forward unchanged. */
 function carryQuality(d: Dataset, layer: Layer): Quality {
   if (layer === 'silver') return d.versions.bronze.quality;
@@ -481,6 +601,36 @@ export function defineMeasure(id: string, user: Principal, measure: Measure): Da
   };
   persist(rec, d);
   return d;
+}
+
+/**
+ * PHYSICALLY de-register a metric (the delete side of the Metrics lifecycle): drop a
+ * defined measure from the Gold dataset. Because the Cube-models payload
+ * (`/api/cube/models`, `buildCubeModels`) is built from `d.measures`, removing the
+ * measure removes its Cube model member — the metric stops being queryable. Edit-scoped
+ * (owner or domain admin, via {@link editOf}). Regenerates the cube_dbt/exposure
+ * artifacts (or drops them when the last measure goes) so they always match the
+ * measures. Returns whether a measure was actually removed so the caller can report
+ * honestly. Archive (the reversible soft-hide) must NEVER call this.
+ */
+export function removeMeasure(id: string, user: Principal, measureName: string): { removed: boolean } {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  const before = d.measures.length;
+  d.measures = d.measures.filter((m) => m.name !== measureName);
+  if (d.measures.length === before) return { removed: false }; // nothing to drop
+  const artifacts = { ...(rec.artifacts ?? {}) };
+  if (d.measures.length > 0) {
+    artifacts[CUBE_ARTIFACT(d)] = scaffoldCubeYaml(d);
+    artifacts[EXPOSURE_ARTIFACT] = scaffoldExposureYaml(d);
+  } else {
+    // Last measure gone → the metric artifacts no longer exist for this dataset.
+    delete artifacts[CUBE_ARTIFACT(d)];
+    delete artifacts[EXPOSURE_ARTIFACT];
+  }
+  rec.artifacts = artifacts;
+  persist(rec, d);
+  return { removed: true };
 }
 
 // ------------------------------------------------------- lifecycle (role-gated) --
@@ -586,6 +736,11 @@ export function validatePromotion(req: PromotionRequest, approver: Principal): D
   if (!approver.domains.includes(d.domain)) fail('A promotion is approved by a Builder in the dataset’s domain', 403);
   const roleGate = canTransition(approver.role, 'dataset', 'promote');
   if (!roleGate.ok) fail(roleGate.reason ?? 'promotion requires a Builder', 403);
+  // Fail-closed on the approval side too: a BRONZE-only dataset is never shareable,
+  // regardless of what the queued request claimed. Refine to Silver/Gold first.
+  if (!d.versions.silver.built && !d.versions.gold.built) {
+    fail('Promote a Silver or Gold version — Bronze raw data is not shareable', 400);
+  }
   const gate = transparencyGate(d);
   if (!gate.ok) fail(`Promotion blocked — ${gateReason(gate)}`, 400);
   return d;
@@ -715,6 +870,51 @@ export function listImported(user: Principal): DatasetSummary[] {
     if (d.tier === 'product' && user.domains.some((dm) => d.imports?.includes(dm))) out.push(summarise(d));
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// ------------------------------------------------ archive / delete -----------
+
+/**
+ * Archive a dataset: a reversible soft-hide. Edit-scoped — only the owner or an
+ * in-domain Admin may archive (the same authz as editing). The record is retained;
+ * the dataset just leaves the working lists (and everyone's domain/marketplace
+ * lists) until unarchived.
+ */
+export function archiveDataset(id: string, user: Principal): DatasetSummary {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  rec.archived = true;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return summarise(d, true);
+}
+
+/** Restore an archived dataset back into the working lists (edit-scoped). */
+export function unarchiveDataset(id: string, user: Principal): DatasetSummary {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  rec.archived = false;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return summarise(d, false);
+}
+
+/**
+ * Permanently delete a dataset (edit-scoped, irreversible). A certified product
+ * that other domains import is refused — remove subscribers first — so a delete can
+ * never orphan a cross-domain dependency (mirrors the decertify lineage guard). The
+ * API route confirms intent; this is the hard delete once confirmed. Returns the
+ * deleted dataset so the route can drop its PHYSICAL tables (physical-delete.ts).
+ */
+export function deleteDataset(id: string, user: Principal): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  if ((d.imports?.length ?? 0) > 0) {
+    fail(`Cannot delete — ${d.imports!.length} domain(s) import this data product. Remove subscribers first.`, 409);
+  }
+  ds().store.delete(id);
+  mirror.deleteThrough(id);
+  return d;
 }
 
 // --------------------------------------------------------------------- files --

@@ -75,12 +75,13 @@ test('cardinal rule: cube apply ok but the metric does NOT resolve → ✗ (no f
   assert.equal(cube.status, 'fail');
 });
 
-test('om verify fails when the transparency gate is red (undocumented)', async () => {
-  const bare = gold({ description: '', columns: [] });
+test('om verify fails when the transparency gate is red (structural gap)', async () => {
+  // Docs are advisory now — the gate only reds on a STRUCTURAL gap (owner/domain/tier).
+  const bare = gold({ domain: '' });
   const r = await orchestrateStage('metric', ctxFor(bare), makeLiveAdapters(fakes()));
   const om = r.rows.find((x) => x.tool === 'om')!;
   assert.equal(om.status, 'fail');
-  assert.match(om.error ?? '', /transparency gate|description/);
+  assert.match(om.error ?? '', /transparency gate|domain/);
 });
 
 test('dashboard stage ✓ when the bundle imports and the dashboard loads', async () => {
@@ -100,6 +101,26 @@ test('offline-mock runs the SAME adapter logic and agrees with live (no drift)',
   const mock = await orchestrateStage('metric', ctxFor(gold()), makeMockAdapters(newMockBackends()));
   assert.equal(mock.ok, true);
   assert.deepEqual(mock.rows.map((x) => x.tool), ['cube', 'om']);
+});
+
+test('bronze dlt adapter normalizes a hyphenated domain to a valid Trino schema (dash->underscore)', async () => {
+  const seen: string[] = [];
+  const deps: DataLiveDeps = {
+    ...fakes(),
+    dlt: {
+      async load(table) { seen.push(table); },
+      async tableExists(table) { seen.push(table); return true; },
+    },
+  };
+  const d = gold({ domain: 'agentic-leader-q3-2026', name: 'Orders' });
+  const r = await orchestrateStage('bronze', ctxFor(d), makeLiveAdapters(deps));
+  assert.equal(r.ok, true);
+  // Both the load (apply) and existence probe (verify) must target the underscore schema.
+  assert.ok(seen.length >= 1, 'dlt adapter was invoked');
+  for (const table of seen) {
+    assert.equal(table, 'iceberg.agentic_leader_q3_2026.bronze_orders');
+    assert.ok(!table.includes('-'), 'no dash reaches Trino');
+  }
 });
 
 test('promote stage runs the full set (policy → dbt-trino → trino) and ✓', async () => {

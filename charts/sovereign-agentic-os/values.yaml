@@ -213,7 +213,7 @@ objectStorage:
     - langfuse                 # Langfuse v3 blob store (events/media)
     - lakehouse                # Iceberg warehouse (Polaris / Layer 3)
     - mlflow                   # MLflow artifact store (Layer 4 Science; only used when mlflow.enabled)
-    - sandbox                  # personal/sandbox lane — per-user private prefixes (DuckDB)
+    - sandbox                  # personal/sandbox lane — per-user private prefixes (Iceberg personal_<uid>.*)
   # MinIO is the local-kind S3 stand-in (reliable for Iceberg + Langfuse).
   # SeaweedFS is the air-gap/sovereign alternative but proved unreliable for
   # Iceberg writes on kind. MinIO is AGPL — local dev stand-in only, never bundled.
@@ -505,13 +505,11 @@ langfuse:
       secretKeyRef: { name: object-storage-credentials, key: AWS_SECRET_ACCESS_KEY }
 
 # -----------------------------------------------------------------------------
-# Mock model — local OpenAI-compatible stub. Since the self-hosted model-server
-# (Ministral 3 3B) became the DEFAULT CHAT backend, this is retained as the offline
-# EMBEDDINGS provider (`sovereign-embed`): deterministic 384-dim hash vectors that
-# match opensearch.knnDimension with zero download and no key. (Changing the embed
-# model would change the vector dimension and reindex the whole retrieval store —
-# out of scope here.) It still serves chat too, but LiteLLM no longer routes chat
-# to it. Disabled on STACKIT (managed embeddings there).
+# Mock model — local OpenAI-compatible stub for offline/kind deployments.
+# Serves as the offline EMBEDDINGS provider (`sovereign-embed`): deterministic
+# 384-dim hash vectors with zero download and no key. (Changing the embed model
+# would change the vector dimension and reindex the whole retrieval store —
+# out of scope here.) Disabled on STACKIT (managed embeddings there).
 # -----------------------------------------------------------------------------
 mockModel:
   enabled: true
@@ -524,6 +522,8 @@ mockModel:
     limits: { cpu: 250m, memory: 128Mi }
 
 # -----------------------------------------------------------------------------
+# EM: KEPT self-hosted model-server (upstream 0.1.68 DELETED this whole block — moved
+# to STACKIT managed models). This is our free-qwen path; see STACKIT_DEPLOY_RUNBOOK.md.
 # Model server — the DEFAULT self-hosted, OpenAI-compatible LLM (replaces the mock
 # LLM for chat). A CPU llama.cpp/Ollama runtime serving a small permissively-
 # licensed model (Ministral 3 3B, Q4, Apache-2.0) FULLY OFFLINE — no provider key,
@@ -707,18 +707,16 @@ litellmAgentKey:
   # auto-resets and returns a graceful budget error (429) once exhausted.
   budgetDuration: ""
   models:                 # only these models are callable with this key
-    - sovereign-default   # Ministral 3 3B (self-hosted default chat)
-    - sovereign-mock      # back-compat alias -> same self-hosted default
-    - sovereign-reasoning # self-hosted Magistral 24B (local reasoning, free)
-    - sovereign-reasoning-fast # STACKIT Qwen (fast reasoning + fallback, capped)
+    - sovereign-default   # standard/worker tier (STACKIT gpt-oss-20b)
+    - sovereign-mock      # back-compat alias -> same standard/worker tier
+    - sovereign-reasoning # reasoning tier (STACKIT Qwen3-VL-235B)
+    - sovereign-reasoning-fast # fast reasoning + fallback (STACKIT Qwen3-VL)
     - sovereign-embed     # offline embeddings (mock-model)
     - sovereign-vision    # vision route -> STACKIT Qwen3-VL
     - sovereign-premium   # last-resort fallback -> STACKIT Qwen3-VL
   # HARD COST GUARDRAIL: a dedicated per-model USD cap for the pay-per-token
-  # STACKIT routes (self-hosted models are free, so no cap needed there). LiteLLM
-  # blocks calls to a model once its cap is hit — independent of the overall cap.
-  # NOTE: sovereign-reasoning (local Magistral) is intentionally absent — it is
-  # self-hosted and free; only the pay-per-token STACKIT routes are capped.
+  # STACKIT routes. LiteLLM blocks calls to a model once its cap is hit —
+  # independent of the overall cap.
   modelMaxBudget:
     sovereign-premium: 2
     sovereign-vision: 2
@@ -867,6 +865,17 @@ litellm:
   masterkeySecretKey: masterkey
   environmentSecrets:
     - litellm-credentials
+  # SERVER_ROOT_PATH lets LiteLLM serve its UI + emit redirects under a path
+  # prefix. The read-only Model Hub is embedded in the OS "LLM Gateway" tab via
+  # the same-origin proxy at /tools/litellm (lib/tool-proxy.ts), so its Next.js
+  # assets must load under that prefix. This is a FastAPI root_path: it only
+  # changes generated URLs (UI base, redirect Location) — it does NOT change
+  # route matching, so agents calling the gateway directly at
+  # http://agentic-os-litellm:4000/v1/... are unaffected. (Direct port-forward to
+  # the admin UI now lives at /tools/litellm/ui.) The public Model Hub itself is
+  # turned on by an admin, once: UI → Model Hub → "Select Models to Make Public".
+  envVars:
+    SERVER_ROOT_PATH: "/tools/litellm"
   # Middleware tier — wave 1. deploymentAnnotations lands on the Deployment
   # metadata (Argo ordering). NOTE: litellm-helm exposes NO priorityClassName
   # value, so this pod runs at the cluster-default priority (0) — already below
@@ -882,14 +891,12 @@ litellm:
   proxy_config:
     model_list:
       # --- Self-hosted DEFAULT (qwen2.5:3b, Apache-2.0, offline, no key) --------
-      # `sovereign-default` is the cheap-first light tier. The k8s Service in front
-      # of the model-server Deployment round-robins across its `replicas` pods, so
-      # this single entry already load-balances; LiteLLM adds retries/fallbacks on
-      # top. `sovereign-mock` is a back-compat ALIAS (existing agents/UI default to
-      # that name) pointing at the SAME self-hosted default.
+      # EM: KEPT self-hosted (upstream 0.1.68 repointed these to STACKIT gpt-oss-20b,
+      # pay-per-token). `sovereign-default` is the cheap-first light tier. The k8s
+      # Service in front of the model-server Deployment round-robins across its
+      # `replicas` pods; `sovereign-mock` is a back-compat ALIAS -> SAME self-hosted default.
       # NOTE: proxy_config is static config (the LiteLLM subchart consumes it as-is,
-      # in its OWN value context), so these are LITERALS — keep `model` and the
-      # api_base port in sync with modelServer.model / modelServer.port above.
+      # in its OWN value context), so these are LITERALS.
       - model_name: sovereign-default
         litellm_params:
           model: openai/qwen2.5:3b            # == modelServer.model
@@ -913,20 +920,17 @@ litellm:
           model: openai/qwen3:14b            # == the Mac's Ollama model tag
           api_base: http://wireguard-ollama:11434/v1   # NAT forwarder -> 10.10.0.2:11434
           api_key: "sk-local-unused"         # self-hosted; ignored, not a secret
-      # --- Self-hosted REASONING (Magistral Small 24B, Apache-2.0, in-box) -----
-      # `sovereign-reasoning` is the SOVEREIGN reasoning default (the routing.ts
-      # reasoning tier points here). Served by the llama.cpp `magistral-reasoning`
-      # Deployment (core-capped, RESIDENT). Intentionally SLOW on CPU, so it gets a
-      # generous per-model timeout (~300 s) — but a *connection* failure (pod down/
-      # overloaded) still trips the router breaker (allowed_fails) and fails over to
-      # `sovereign-reasoning-fast`. Free (self-hosted) — no spend cap on the key.
-      # NOTE: keep `api_base` port in sync with modelServer.reasoning.port above.
+      # --- Reasoning tier (STACKIT Qwen3-VL-235B, pay-per-token) ---------------
+      # `sovereign-reasoning` is the reasoning default (the routing.ts reasoning
+      # tier points here). STACKIT-routed; the key is empty unless stackitPremium
+      # is configured. A *connection* failure still trips the router breaker
+      # (allowed_fails) and fails over to `sovereign-reasoning-fast`.
       - model_name: sovereign-reasoning
         litellm_params:
-          model: openai/magistral-small-24b   # llama-server ignores the id (single model)
-          api_base: http://magistral-reasoning:8081/v1   # == modelServer.reasoning.port
-          api_key: "sk-local-unused"          # self-hosted; ignored, not a secret
-          timeout: 300                        # generous: CPU reasoning is slow by design
+          model: openai/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8   # == stackitPremium.chatModelId
+          api_base: os.environ/STACKIT_API_BASE
+          api_key: os.environ/STACKIT_API_KEY
+          timeout: 300                        # generous: reasoning generations are long
       # --- Fast reasoning + fallback (STACKIT Qwen, pay-per-token, capped) ------
       # `sovereign-reasoning-fast` is the explicit FAST alternative AND the LiteLLM
       # fallback for `sovereign-reasoning`. Pay-per-token, so it carries a hard
@@ -959,14 +963,11 @@ litellm:
           api_key: os.environ/STACKIT_API_KEY
     # ------------------------------------------------------------------------
     # Router — fallback chain, retries, timeouts, circuit-breaking, load-balancing.
-    # Chain: self-hosted Ministral 3 replicas -> STACKIT (last resort). To insert the
-    # OPTIONAL bigger self-host (modelServer.big.enabled) BEFORE STACKIT, add a
-    # `sovereign-big` model_list entry (api_base http://model-server-big:8000/v1)
-    # and change the fallbacks below to ["sovereign-big","sovereign-premium"].
-    # STACKIT fires ONLY if all self-hosted fail, OR when the caller selects the
-    # vision route. Escalation (failed verifier / low confidence / high-stakes) is
-    # the agent choosing a heavier model_name; LiteLLM logs model + cost per call
-    # to Langfuse so the tier and spend are visible in Monitoring.
+    # STACKIT managed three-tier set: reasoning (Qwen3-VL-235B) · standard/worker
+    # (gpt-oss-20b) · embeddings (Qwen3-VL-Embedding-8B). Escalation (failed
+    # verifier / low confidence / high-stakes) is the agent choosing a heavier
+    # model_name; LiteLLM logs model + cost per call to Langfuse so the tier and
+    # spend are visible in Monitoring.
     # ------------------------------------------------------------------------
     router_settings:
       routing_strategy: simple-shuffle        # load-balance across healthy deployments
@@ -975,13 +976,10 @@ litellm:
       allowed_fails: 3                        # circuit-breaking: trip after N fails...
       cooldown_time: 60                       # ...then cool the deployment down (s)
       fallbacks:
-        # Two local Mistral models only (STACKIT off for now). If local reasoning
-        # (Magistral / sovereign-reasoning) trips the breaker, fail over to the in-box
-        # light model (Ministral / sovereign-default) — fully sovereign, nothing leaves
-        # the box. The light model has no external fallback. The STACKIT model_list
-        # entries (sovereign-reasoning-fast / -vision / -premium) stay DEFINED but out
-        # of the active chain until STACKIT is switched on.
-        - sovereign-reasoning: ["sovereign-default"]
+        # If the reasoning tier (sovereign-reasoning) trips the breaker, fail over
+        # to the fast reasoning route (sovereign-reasoning-fast). Both resolve to
+        # STACKIT; the fast route carries the per-model spend cap on the agent key.
+        - sovereign-reasoning: ["sovereign-reasoning-fast"]
     litellm_settings:
       success_callback: ["langfuse"]          # gateway-level tracing to Langfuse
       drop_params: true
@@ -1067,7 +1065,9 @@ osdashboards:
     limits: { cpu: "1", memory: 1Gi }
 
 # Shared retrieval settings (consumed by the sample agent's index bootstrap).
-# Dimension MUST match mockModel.embedDim.
+# Dimension MUST match the active embedding model. Chart default = the in-cluster
+# mock-model (384-dim). STACKIT overrides this to 4096 (Qwen3-VL-Embedding-8B) in
+# values.stackit-selfhosted.yaml.
 retrieval:
   indexName: knowledge
   knnDimension: 384
@@ -1119,9 +1119,8 @@ agentRuntime:
   chatModel: sovereign-mock
   # Two-tier model strategy (stack-decisions): EVERY agent PLANS with the reasoning
   # tier, then HANDS OFF execution to the execution tier. These are LiteLLM
-  # model_names — self-hosted by default (reasoning=Magistral, execution=Ministral);
-  # values.private.yaml repoints those same names to STACKIT (reasoning=Qwen3-VL,
-  # execution=Qwen3.6-27B) on the live deploy without touching the OSS default here.
+  # model_names routed to the STACKIT managed set (reasoning=Qwen3-VL-235B,
+  # execution=gpt-oss-20b). Admin can re-point each role in Platform Settings.
   reasoningModel: sovereign-reasoning   # PLAN phase of every agent
   executionModel: sovereign-default     # EXECUTE phase of every agent
   # Shared runtime <-> OS UI token. Local dev throwaway; on STACKIT it comes from
@@ -1238,6 +1237,19 @@ opa:
       - llm_generate
       - query
       - web_fetch
+    # DOMAIN principals — the governed data tools authorize as `user.domains[0]`
+    # (the domain), so a domain must be granted the read tools its members + agents
+    # use. Row/column scoping is still enforced by package `trino` (data.governance),
+    # so a `query` grant does NOT bypass row filters — it only lets the domain OPEN
+    # the governed query door; it then sees only rows its governance entitles.
+    agentic-leader-q3-2026:     # the live Q3-2026 cohort domain (36 students)
+      - query                    # governed Trino lakehouse read (query_data)
+      - metrics                  # Cube semantic layer (query_metric)
+      - retrieve                 # governed RAG over domain knowledge (search_knowledge)
+    test:                       # the internal test/admin domain
+      - query
+      - metrics
+      - retrieve
     sales-assistant:            # Agent golden-path slice — scoped LiteLLM key
       - metrics                  # Cube semantic layer (same metric as the BI)
       - retrieve                 # governed RAG over contract + discount policy
@@ -1285,8 +1297,11 @@ opa:
       # filter by domain: an out-of-domain principal reads ZERO rows.
       iceberg.sales.gold_northpeak_commerce:
         domain: sales
-        visibility: domain
-        shared_with: []
+        # SHARED with the Q3-2026 cohort: the Northpeak campaign is THEIR case-study
+        # dataset, so their domain principal must pass the row filter (else a granted
+        # `query` still returns zero rows). Owning `sales` still sees it too.
+        visibility: shared
+        shared_with: ["agentic-leader-q3-2026"]
         sensitive_columns: {}
       # The Sales mart (dbt-trino Iceberg) — row filter by domain.
       iceberg.sales.daily_revenue:
@@ -1325,6 +1340,20 @@ opa:
       northpeak-marts:              # gold-mart seed Job (marts.trino.user)
         domains: [sales]
         clearances: []
+      # DOMAIN principals — the governed query tools run AS `user.domains[0]` (the
+      # DOMAIN name is the Trino session user), so each domain MUST map to itself here
+      # or the row filter resolves its membership to [] and returns ZERO rows — an
+      # authenticated user reads nothing from their OWN / shared marts (the bug behind
+      # the empty campaign scorecard).
+      sales:                        # the Sales worked-example domain
+        domains: [sales]
+        clearances: [pii]
+      agentic-leader-q3-2026:       # the live Q3-2026 cohort domain
+        domains: [agentic-leader-q3-2026]
+        clearances: []
+      test:                         # the internal test/admin domain
+        domains: [test]
+        clearances: [pii]
 
 # -----------------------------------------------------------------------------
 # Sales Assistant — the Agent golden-path vertical slice. Ships AGENT.md +
@@ -1439,7 +1468,7 @@ dagster:
 # dbt (dbt-trino) — the SINGLE governed transform path. staging -> marts build as
 # Iceberg tables via the central Trino engine (Polaris REST catalog). Runs as a
 # post-install hook Job; Cube + Superset + the agent query tool read the marts
-# THROUGH Trino. No dbt-duckdb / dbt-postgres on the governed path.
+# THROUGH Trino. dbt-trino is the only adapter — one engine, one SQL dialect.
 # -----------------------------------------------------------------------------
 dbt:
   enabled: true
@@ -1597,6 +1626,11 @@ egressProxy:
     - notion.com               # Connections slice — Notion MCP endpoints
     - mcp.notion.com
     - api.notion.com
+    # Personal connected-drive OAuth (Connections tab) — mirrors lib/secrets.ts.
+    - googleapis.com           # Google Drive (www.googleapis.com) + token (oauth2.googleapis.com)
+    - accounts.google.com      # Google OAuth consent/authorize
+    - graph.microsoft.com      # OneDrive via Microsoft Graph
+    - login.microsoftonline.com # Microsoft OAuth authorize + token
   resources:
     requests: { cpu: 25m, memory: 32Mi }
     limits: { cpu: 250m, memory: 96Mi }
@@ -1611,6 +1645,24 @@ webFetch:
   resources:
     requests: { cpu: 25m, memory: 32Mi }
     limits: { cpu: 250m, memory: 128Mi }
+
+# -----------------------------------------------------------------------------
+# Software live-app runner (Software tab). When ON, the os-ui provisions a real
+# Deployment+Service+Ingress per built app into `namespace` (RBAC:
+# templates/os-ui/apps-runner.yaml) and drives its status from the live pod.
+# OFF here so kind/base helm-template stays minimal; the STACKIT overlay enables
+# it. Reachable per-app URLs additionally need a `*.<appsDomain>` wildcard DNS
+# record → the ingress LB (see the operator note in apps-runner.yaml).
+# -----------------------------------------------------------------------------
+softwareRunner:
+  enabled: false
+  namespace: agentic-apps
+  appsDomain: "apps.local"
+  # Teaching default served when a built app has no image of its own. A real built
+  # app overrides this with its CI-published image (apps.ts `runImage`).
+  runnerImage: "traefik/whoami:latest"
+  ingressClass: ""        # falls back to ingress.className
+  tlsIssuer: ""           # falls back to ingress.tlsIssuer
 
 # -----------------------------------------------------------------------------
 # Connections golden path — manually-credentialed Connections (API/MCP/Database/
@@ -1707,8 +1759,8 @@ polaris:
 # -----------------------------------------------------------------------------
 # Governed `query` MCP tool — read-only SQL THROUGH central Trino over the Iceberg
 # marts. OPA gates tool ACCESS at the gateway; Trino enforces ROW/COLUMN governance
-# on every read. No embedded DuckDB (that is the personal/sandbox lane — see the
-# sandbox section). (Pre-2026-06-29 this was a DuckDB engine; now Trino-backed.)
+# on every read. Single engine: Trino is the only query engine for both shared
+# marts and personal schemas (personal_<uid>.*). Trino-backed since 2026-06-29.
 # -----------------------------------------------------------------------------
 queryTool:
   enabled: true
@@ -1738,8 +1790,8 @@ queryTool:
 
 # -----------------------------------------------------------------------------
 # data-runner — the REAL ingest service. os-ui streams an uploaded file to MinIO
-# under uploads/<uid>/<file>, then POST /ingest here; DuckDB infers the schema and
-# PyIceberg writes a PHYSICAL Iceberg Bronze table `lakehouse.personal_<uid>.bronze_<slug>`
+# under uploads/<uid>/<file>, then POST /ingest here; schema inference + PyIceberg
+# writes a PHYSICAL Iceberg Bronze table `lakehouse.personal_<uid>.bronze_<slug>`
 # THROUGH the Polaris REST catalog. M1 = personal lane ONLY (target schema derived
 # from the caller's principal, never the body). M2 = dlt connector sources (Postgres/
 # API) using the platform Connections secrets — same Iceberg landing. Built locally +
@@ -1771,21 +1823,10 @@ dataRunner:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: "1", memory: 1Gi }
 
-# -----------------------------------------------------------------------------
-# Sandbox DuckDB — the PERSONAL/SANDBOX lane engine (behind Trino's governance).
-# Ephemeral DuckDB scoped to the user's PRIVATE PREFIX only (uploads + a
-# Trino-authorized, already-masked extract). It has NO Polaris/Iceberg-catalog
-# credentials, so by construction it can never read governed marts — the invariant.
-# -----------------------------------------------------------------------------
-sandbox:
-  enabled: true
-  image:
-    repository: sovereign-os/sandbox-duckdb   # built locally, loaded into kind
-    tag: "0.1.0"
-  bucket: sandbox                             # the per-user private-prefix bucket
-  resources:
-    requests: { cpu: 50m, memory: 128Mi }
-    limits: { cpu: 500m, memory: 512Mi }
+# NOTE (2026-06-29): The personal-query sandbox engine was removed. Personal data
+# now lives as a physical Iceberg table in `iceberg.personal_<uid>.*` and is queried
+# THROUGH the same governed Trino path as shared marts (owner-principal). The
+# terminal/Hermes code-execution sandbox (`terminal:` / `hermes:`) is unaffected.
 
 # -----------------------------------------------------------------------------
 # Trino — the CENTRAL GOVERNED query engine for all shared marts (decided
@@ -1916,6 +1957,54 @@ superset:
       DATA_CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache"}
       FILTER_STATE_CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache"}
       EXPLORE_FORM_DATA_CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache"}
+    # ------------------------------------------------------------------------
+    # OS single sign-on. The os-ui reverse proxy (/tools/superset) injects the
+    # trusted X-Forwarded-User + X-Forwarded-Roles headers for the already-
+    # authenticated, role-gated OS user (lib/tool-proxy.ts). This before_request
+    # hook auto-provisions + logs that user in, so NO Superset login is shown.
+    # We deliberately KEEP AUTH_TYPE = AUTH_DB (the default) so the in-cluster
+    # bootstrap Job's admin API login (provider: db) still works — the hook is a
+    # no-op for any request that lacks the trusted header (health probes, the
+    # bootstrap Job, direct in-cluster calls). The headers are ONLY reachable via
+    # the os-ui proxy, which strips any client-supplied copies, so they cannot be
+    # spoofed from a browser. Role map (X-Forwarded-Roles): Admin / Alpha /
+    # Gamma; most OS users land on Gamma (read-only).
+    # ------------------------------------------------------------------------
+    remote_user_sso: |
+      from flask import request
+      from flask_login import current_user, login_user
+
+      SSO_USER_HEADER = "X-Forwarded-User"
+      SSO_ROLES_HEADER = "X-Forwarded-Roles"
+      SSO_DEFAULT_ROLE = "Gamma"
+
+      def _sso_login():
+          username = request.headers.get(SSO_USER_HEADER)
+          if not username:
+              return  # no trusted header -> leave AUTH_DB untouched
+          try:
+              if getattr(current_user, "is_authenticated", False) and \
+                      getattr(current_user, "username", None) == username:
+                  return  # already the right session
+              from superset import security_manager as sm
+              role_name = request.headers.get(SSO_ROLES_HEADER) or SSO_DEFAULT_ROLE
+              role = sm.find_role(role_name) or sm.find_role(SSO_DEFAULT_ROLE)
+              user = sm.find_user(username=username)
+              if user is None:
+                  user = sm.add_user(
+                      username, username, "SSO",
+                      "%s@sso.local" % username, role,
+                  )
+              elif role is not None and role not in user.roles:
+                  user.roles = [role]  # keep the OS-mapped role authoritative
+                  sm.update_user(user)
+              if user:
+                  login_user(user)
+          except Exception:  # never 500 the console on an SSO hiccup
+              pass
+
+      def FLASK_APP_MUTATOR(app):
+          app.before_request(_sso_login)
 
 # -----------------------------------------------------------------------------
 # Forgejo — self-hosted git (Layer 3 software delivery). Lean local: sqlite,
@@ -2331,7 +2420,7 @@ terminal:
 # =============================================================================
 # Domain-Builder Workbench — a PERSISTENT, DOMAIN-SCOPED code-server (VS Code in
 # the browser) per builder. EXTENDS the terminal sandbox model from an ephemeral
-# PTY to a long-lived editor (git + python + duckdb + the governed `dq` CLI) where
+# PTY to a long-lived editor (git + python + the governed `dq` CLI) where
 # a `builder` builds/edits/administers ALL of THEIR domain's artifacts — software,
 # agents, data, knowledge — in one place. Default OFF (more access than the
 # terminal: persistence + domain creds + git, so it is opt-in, pending sign-off).

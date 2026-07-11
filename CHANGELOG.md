@@ -15,6 +15,128 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 _Nothing yet._
 
+## [os-ui 0.1.68] — 2026-07-09
+
+### Agents / Governance (durability fix)
+- **Fix (agent `query_data` flip-flop):** an agent-run's tool grants (`os-<systemId>` principal) lived only in an **in-memory registry** set at build time, so every os-ui pod restart (any redeploy) wiped them and the agent lost `query_data`/`query` until it was rebuilt — the recurring "works today, denied tomorrow" OPA-deny. The governed-tool endpoint (`/api/agents/tool`) now **lazily rehydrates a principal's grants from the persisted agent record** (the durable `os-agent-systems` mirror) on the first cold-start request, reproducing the exact Build grant vocabulary. **Fail-closed:** a missing/corrupt record grants nothing and falls through to OPA-deny; rehydration never broadens a grant. (App-MCP `app-<slug>` principals already self-healed via `rehydrateConnection`.) *(6 new fail-closed tests.)*
+
+### Connections
+- **Consolidated the three Connections sub-tabs into one screen** (matching Data/Metrics): existing connections grouped **All · My · Shared · Marketplace** at the top (with counts + source-domain tags), the **new-connection** flow below, then App-MCP connections, the connector catalog, and outbound access. Tile Open-only lifecycle preserved.
+
+### LLM Gateway (STACKIT)
+- **Fix (`sovereign-default` 404):** STACKIT's model id keeps its org prefix (`openai/gpt-oss-20b`); LiteLLM strips the first path segment as the provider, so it was sending bare `gpt-oss-20b` upstream → STACKIT 404 ("no fallback model group"). Model refs now doubled to `openai/openai/gpt-oss-20b`. *(Live-verified: `sovereign-default` + `sovereign-reasoning` return 200 through the gateway.)*
+
+## [os-ui 0.1.67] — 2026-07-09
+
+### Metrics / Cube
+- **Fix (Cube 500):** generated Cube **view names contained spaces** (invalid Cube identifier) → the whole schema failed to compile and the Metrics tab 500'd. `cubeViewName` now emits a valid identifier; the gold→Cube scaffold also **skips a dimension whose name collides with a measure** ("defined more than once"). *(Live-verified: cube `/meta` returns 200.)*
+- Removed a leftover demo **"Query" panel hardcoded to `daily_revenue`** (the phantom metric users never defined); the governed metric registry is the metric surface. `daily_revenue` stays in Cube (Superset + sales-agent depend on it).
+
+### Nav
+- **Marketplace** moved to the top entry row (after Cockpit), out of the Context section.
+
+## [os-ui 0.1.63–0.1.66 · query-tool 0.4.1] — 2026-07-09
+
+### Data
+- Radically simplified **Bronze→Silver→Gold** refinement: two guided CTAs ("Turn into clean Silver Dataset" / "Turn into a harmonized Gold dataset"), key **auto-match + adapt** (text-normalize / cast reconcile), a **visual join graph**, and Bronze can no longer be promoted to Shared. Dataset preview auto-loads on detail open. **DuckDB removed** from the stack (Trino-only; docs + PDF updated).
+- **Fix (query_data):** the `query_data` handler ran Trino as the caller's *first domain*, so a user was denied on their own `personal_<uid>` schema — now uses the uid for the owner's personal lane (cross-user isolation intact). *(os-ui 0.1.66; live-verified: owner reads own rows, others denied.)*
+- **Fix (promotion):** the query-tool write guard compared the underscore schema to the dash domain → 403 on hyphenated-domain mart writes — now `sanitize_ident`s the domain. *(query-tool 0.4.1.)*
+
+### Metrics
+- Guided **Cube.js metric editor** (count/count-distinct[-approx]/sum/avg/min/max, ratio/derived, filtered measures, rolling/running windows, format, drill members, time granularity) with **live preview**.
+
+### Nav / UX
+- **5-section sidebar** (Plan · Context · Build · Monitor · Admin; Governance→Admin, Admin-first); standalone Settings tab removed. Shared-count badge counts promoted items.
+- **Fix:** knowledge workflow detail crashed (`useConfirm` outside `ConfirmProvider`) — `WorkflowView` now self-wraps. *(os-ui 0.1.66.)*
+
+### Admin / platform
+- Domains **rename** control; dead **Spark toggle removed** (ML kept). Components status fixes; Sample-RAG entry + Seed-demo-queue button removed.
+- Software: app creation now seeds a **real build→push CI workflow** + `REGISTRY_PASS` (fixes the app-image / UI-button pipeline for new apps).
+- **Langfuse** ClickHouse schema migrated — traces persist. LiteLLM restored to the STACKIT 3-tier runtime (`sovereign-default` → gpt-oss-20b).
+
+### MCP + Ask-the-OS
+- MCP `build_gold_join` key-adapt + `define_metric` rich measures; guides/prompts + Ask-the-OS context brought to UI parity.
+
+## [os-ui 0.1.62] — 2026-07-08
+
+The deployed **os-ui image** carries its own version line (`osUI.image.tag` in
+`values.stackit-selfhosted.yaml`). 0.1.62 is the STACKIT three-tier models +
+embeddings migration + OS-wide lifecycle UX + Data/Metrics consolidation release,
+live on the STACKIT tenant.
+
+### Models & inference
+
+- **STACKIT three-tier model set, admin-configurable.** All in-cluster Mistral
+  model workloads (**Ministral** and **Magistral**) and the **model-server**
+  component are **deleted** — all inference is STACKIT-managed, so no local model
+  weights sit on the node disk.
+  - **Standard / worker** — `openai/gpt-oss-20b` (`sovereign-default`)
+  - **Reasoning** — `Qwen/Qwen3-VL-235B-A22B-Instruct-FP8` (`sovereign-reasoning`)
+  - **Embeddings** — `Qwen/Qwen3-VL-Embedding-8B` (`sovereign-embed`), **4096-dim**
+- **Models & Providers admin page** unified to a single live-sourced store. Each
+  role (standard / reasoning / embeddings) is independently configurable by an
+  Administrator; the catalog is sourced live from the LiteLLM gateway (generic /
+  open-source — operators register their own models; the three above are helm
+  defaults). Replaces the former split "Models" + "Providers" pages.
+- **Agent builder** now offers only **Auto / Standard / Reasoning** — the
+  embeddings tier is infrastructure-only, not a user-facing model choice.
+
+### Embeddings migration
+
+- **4096-dim embeddings** replace the prior 384-dim mock. OpenSearch knowledge
+  and files indices recreated; `KNOWLEDGE_EMBED_DIM` and `FILES_EMBED_DIM` are
+  wired from `retrieval.knnDimension` in the chart.
+
+### OS-wide lifecycle UX
+
+- **Artifact tiles show only "Open".** Archive / Restore and Version history live
+  inside the opened detail view. **Delete** is surfaced only on already-archived
+  items. Applied consistently across every tab.
+- **Show-archived** reveals archived items in each tab's detail lists so Delete
+  remains reachable without cluttering the working view.
+
+### Data + Metrics tabs
+
+- **Collapsed to a single screen** — subtabs removed; the query sandbox sits below
+  the dataset / metric tiles on one page.
+- **Dataset detail** gained a governed **"Preview first 50 rows"** section
+  (DLS-filtered; never fabricated).
+
+### Knowledge tab
+
+- Prominent **"New knowledge"** action and My-knowledge focal view.
+- **Full Personal → Domain → Marketplace promotion** via the governance ladder.
+- **Git-backed versioning** for personal knowledge items.
+
+### Provenance tags
+
+- **Source-domain tags** appear on every artifact shown in Shared or Marketplace
+  scope (all tabs), making same-named artifacts from different domains unambiguous.
+
+### Sidebar restructured
+
+- **5 named sections:** Plan / Context / Build / Monitor / Admin (was a flat
+  business-tabs list + a Platform group).
+
+### Components tab & Governance
+
+- **Postgres** now detected via StatefulSet fallback (fixes false-negative status).
+- **dbt** status shows `"on-demand"` (was incorrectly red).
+- **Sample RAG agent** removed from the component registry.
+- **"Seed demo queue"** button removed from the Governance page.
+
+### Software delivery pipeline
+
+- **`appImageRef`** now serves the real CI-published image (was the whoami
+  placeholder).
+- **`ci-runner` pod** gains `fsGroup: 1000` so it can register its runner,
+  fixing the `CrashLoopBackOff` that blocked pipeline runs.
+
+### User & Access
+
+- Edit path regression-tested — **6 new route tests** covering the User & Access
+  edit flow.
+
 ## [os-ui 0.1.32] — 2026-07-05
 
 The deployed **os-ui image** carries its own version line (`osUI.image.tag` in

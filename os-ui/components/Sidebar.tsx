@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { TAB_GROUPS, filterTabGroups, type Tab } from '@/lib/tabs';
 import { useUser } from '@/lib/useUser';
+import { emitTabNav } from '@/lib/tab-nav';
 // Static import so the brand mark is emitted into .next/static (served in the
 // standalone container, where public/ is not copied).
 import lotus from './lotus.svg';
@@ -42,6 +43,9 @@ export default function Sidebar() {
         href={tab.href}
         className={`nav-item${active ? ' active' : ''}`}
         title={tab.role}
+        // Broadcast the nav so a tab already showing a detail sub-view resets back
+        // to its list — client-navigating to the same route wouldn't re-mount it.
+        onClick={() => emitTabNav(tab.href!)}
       >
         <span className="ico">{tab.icon}</span>
         {tab.label}
@@ -70,10 +74,18 @@ export default function Sidebar() {
 
       <nav className="nav">
         {visibleGroups.map((group, i) => (
-          <div key={group.heading ?? `group-${i}`} className="nav-group">
-            {group.heading ? <div className="nav-heading">{group.heading}</div> : null}
-            {group.tabs.map(renderTab)}
-          </div>
+          group.heading ? (
+            <details key={group.heading} className="nav-group nav-section" open>
+              <summary className="nav-heading nav-heading-toggle">
+                {group.heading}
+              </summary>
+              {group.tabs.map(renderTab)}
+            </details>
+          ) : (
+            <div key={`group-${i}`} className="nav-group nav-entry">
+              {group.tabs.map(renderTab)}
+            </div>
+          )
         ))}
       </nav>
 

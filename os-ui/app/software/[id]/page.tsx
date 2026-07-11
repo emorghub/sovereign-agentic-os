@@ -7,12 +7,14 @@ import { useEffect, useState } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import PageHeader from '@/components/PageHeader';
-import AgentChat from '@/components/AgentChat';
 import CodePanel from '@/components/CodePanel';
+import LifecycleActions from '@/components/lifecycle/LifecycleActions';
+import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import { useToolWindow } from '@/components/ToolWindowProvider';
 import { useApi } from '@/lib/useApi';
 import { getUrlParam, patchUrl } from '@/lib/url-params';
 import { roleAtLeast, type Role as SessionRole } from '@/lib/session';
+import DomainTag from '@/components/DomainTag';
 
 type Visibility = 'Personal' | 'Shared' | 'Certified';
 type Tool = { name: string; description: string; write: boolean };
@@ -91,21 +93,18 @@ export default function AppPage() {
   const [busy, setBusy] = useState(false);
   const [deployMsg, setDeployMsg] = useState('');
   const [showApi, setShowApi] = useState(false);
-  const [buildTab, setBuildTab] = useState<'chat' | 'code'>(search?.get('build') === 'code' ? 'code' : 'chat');
   const [manage, setManage] = useState(false);
 
-  // Persist which surface is open (Edit mode + Chat/Code tab) in the URL so a
-  // reload restores the open build assistant instead of the default Monitor view.
+  // Persist whether Edit mode is open in the URL so a reload restores the editor
+  // instead of the default Monitor view.
   useEffect(() => {
     patchUrl({
       mode: mode === 'edit' ? 'edit' : null,
-      build: mode === 'edit' && buildTab === 'code' ? 'code' : null,
     });
-  }, [mode, buildTab]);
+  }, [mode]);
   useEffect(() => {
     const sync = () => {
       setMode(getUrlParam('mode') === 'edit' ? 'edit' : 'monitor');
-      setBuildTab(getUrlParam('build') === 'code' ? 'code' : 'chat');
     };
     window.addEventListener('popstate', sync);
     return () => window.removeEventListener('popstate', sync);
@@ -127,7 +126,9 @@ export default function AppPage() {
       if (!res.ok) setDeployMsg(`✗ ${body.error}`);
       else if (action === 'preview')
         setDeployMsg(
-          '✓ Preview requested — your commits are real. The served preview URL is pending the in-cluster runner (next release).',
+          body.app?.deploy?.previewUrl
+            ? '✓ Preview running — open the app UI above.'
+            : '✓ Preview requested — the in-cluster runner is provisioning; the URL appears once the pod is ready (or stays pending if no cluster is reachable).',
         );
       else if (body.kind === 'review') setDeployMsg('✓ Sent to a Builder for review (see Deploy reviews).');
       else setDeployMsg('✓ Routine update — published within the approved envelope.');
@@ -235,12 +236,13 @@ export default function AppPage() {
   const publishLabel = inReview ? 'Awaiting review' : app.deploy.releases > 0 ? 'Publish next release' : 'Publish release';
 
   return (
-    <>
+    <ConfirmProvider>
       <PageHeader title={app.name} crumb={`Software · ${app.slug}`} />
       <div className="content sw">
         <div className="sw-app-head">
           <div className="sw-app-head-meta">
             <span className={visBadge(app.visibility)}>{app.visibility}</span>
+            {(app.visibility === 'Shared' || app.visibility === 'Certified') ? <DomainTag domain={app.domain} /> : null}
             <span className={dep.cls}>{dep.label}</span>
             <span className="badge muted">{version}</span>
             {app.mode === 'offline' ? <span className="badge muted">git not ready</span> : null}
@@ -269,17 +271,20 @@ export default function AppPage() {
                 </div>
                 <div className="row" style={{ gap: 8, alignItems: 'center', flexShrink: 0 }}>
                   {surface.ui ? (
-                    <button
-                      className="btn"
-                      disabled
-                      title={
-                        app.deploy.state === 'live'
-                          ? 'Deploy approved — the in-cluster runner that serves this app ships in the next release.'
-                          : 'Publish a release to go live'
-                      }
-                    >
-                      Open app UI ↗
-                    </button>
+                    app.deploy.previewUrl ? (
+                      <a
+                        href={app.deploy.previewUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn"
+                      >
+                        Open app UI ↗
+                      </a>
+                    ) : (
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        App runner pending — provisioning, or no cluster reachable
+                      </span>
+                    )
                   ) : null}
                   {surface.api ? (
                     <button className={surface.ui ? 'btn ghost' : 'btn'} onClick={() => setShowApi((v) => !v)}>
@@ -407,12 +412,21 @@ export default function AppPage() {
                   <button className="btn ghost" onClick={() => lifecycle('use-as-data')} disabled={busy || app.usedAsData}>
                     {app.usedAsData ? 'Used as Data ✓' : 'Use as Data'}
                   </button>
-                  {app.status === 'archived' ? (
-                    <button className="btn ghost" onClick={() => lifecycle('unarchive')} disabled={busy}>Restore</button>
-                  ) : (
-                    <button className="btn ghost" onClick={() => lifecycle('archive')} disabled={busy}>Archive</button>
-                  )}
-                  <button className="btn ghost" onClick={() => lifecycle('delete')} disabled={busy}>Delete</button>
+                  {/* OS-wide rule: live → Archive; only an ARCHIVED app exposes Delete.
+                      Real archived state drives which actions show. */}
+                  <LifecycleActions
+                    id={app.id}
+                    name={app.name}
+                    kind="app"
+                    visibility={app.visibility === 'Shared' ? 'shared' : app.visibility === 'Certified' ? 'certified' : 'personal'}
+                    archived={app.status === 'archived'}
+                    handlers={{
+                      onArchive: () => lifecycle('archive'),
+                      onRestore: () => lifecycle('unarchive'),
+                      onDelete: () => lifecycle('delete'),
+                    }}
+                    showVersions={false}
+                  />
                   <span className={`badge ${app.status === 'active' ? 'ok' : 'muted'}`}>{app.status}</span>
                 </div>
                 {msg ? <div className={msg.startsWith('✓') ? 'answer' : 'error'} style={{ marginTop: 12 }}>{msg}</div> : null}
@@ -420,38 +434,31 @@ export default function AppPage() {
             ) : null}
           </>
         ) : (
-          /* ---- Edit mode: the chat is the centerpiece, with a code toggle. ---- */
+          /* ---- Edit mode: edit the code directly; use the global “Ask the OS”
+                 assistant (top-right) for conversational, agent-driven changes. ---- */
           <div className="sw-edit">
             <div className="sw-edit-bar">
-              {canEditCode ? (
-                <div className="sw-modeswitch sw-modeswitch-sm">
-                  <button className={buildTab === 'chat' ? 'active' : ''} onClick={() => setBuildTab('chat')}>Chat</button>
-                  <button className={buildTab === 'code' ? 'active' : ''} onClick={() => setBuildTab('code')}>Code</button>
-                </div>
-              ) : <span className="sw-edit-hint">Tell the agent what to build. It writes code, commits to Forgejo, and you publish a release.</span>}
+              <span className="sw-edit-hint">
+                {canEditCode
+                  ? 'Edit the code directly below, or ask the “Ask the OS” assistant (top-right) to build changes for you.'
+                  : 'Ask the “Ask the OS” assistant (top-right) to describe the changes you want — it writes code, commits to Forgejo, and prepares a release.'}
+              </span>
               <button className="btn" onClick={() => deployAction()} disabled={publishDisabled} title={inReview ? 'A deploy is awaiting a Builder in Deploy reviews' : undefined}>
                 {publishLabel}
               </button>
             </div>
 
-            {canEditCode && buildTab === 'code' ? (
+            {canEditCode ? (
               <CodePanel appId={app.id} repoFullName={app.repo.fullName} />
             ) : (
-              <AgentChat
-                agent="software-app"
-                variant="claude"
-                label="build assistant"
-                minHeight={360}
-                endpoint={`/api/apps/${app.id}/chat`}
-                initialMessages={app.chat.map((m) => ({ role: m.role, content: m.content }))}
-                placeholder={`Message the ${app.name} build assistant…  (e.g. add a status filter and a CSV export)`}
-                starters={['Add a renewals list sorted by renews_on.', 'Add an export-to-CSV action.']}
-              />
+              <div className="stub-page">
+                Use the “Ask the OS” assistant (top-right) to describe what you want changed.
+              </div>
             )}
             {deployMsg ? <div className={deployMsg.startsWith('✓') ? 'answer' : 'error'} style={{ marginTop: 12 }}>{deployMsg}</div> : null}
           </div>
         )}
       </div>
-    </>
+    </ConfirmProvider>
   );
 }

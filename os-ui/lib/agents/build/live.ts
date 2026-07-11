@@ -36,7 +36,7 @@ import {
  *                merged into requires_approval); verify probes allow/deny/approval.
  *   • litellm  — idempotent /key/generate (alias os-<id>, routed models, budget +
  *                per-model caps, rpm/tpm); verify /key/info + routing resolves
- *                light→Ministral, reasoning→Qwen.
+ *                light→Standard, reasoning→Reasoning.
  *   • langgraph— compile()→IR→runtime /reload; verify runtime /run reaches END with
  *                every tool call governed and no granted tool denied.
  *   • langfuse — ensure the project; verify a trace landed for the test invocation.
@@ -44,10 +44,27 @@ import {
 
 // ----------------------------------------------------------------- clients -------
 
+/** One commit in a repo's history (Gitea/Forgejo commits API), newest first. */
+export type ForgejoCommit = { sha: string; message: string; author: string; date: string };
+/** A path→content map of a repo's whitelisted files AT a given commit. */
+export type ForgejoCommitFiles = Record<string, string>;
+
 export interface ForgejoClient {
   ensureRepo(repo: string): Promise<void>;
   readFile(repo: string, path: string): Promise<{ content: string; sha: string } | null>;
-  writeFile(repo: string, path: string, content: string, sha?: string): Promise<{ sha: string }>;
+  writeFile(repo: string, path: string, content: string, sha?: string, message?: string): Promise<{ sha: string }>;
+  /** PHYSICALLY delete the system's repo (DELETE path only). Returns whether the
+   *  repo is gone; throws only on a real failure (unreachable / rejected) so the
+   *  caller reports an orphan honestly. A missing repo (404) resolves cleanly. */
+  deleteRepo(repo: string): Promise<{ deleted: boolean }>;
+  /** The repo's commit history on `main`, NEWEST first. Returns `null` when the
+   *  repo has no git history yet OR Forgejo is unreachable, so the caller can fall
+   *  back to snapshot versioning honestly rather than fabricate an empty history. */
+  listCommits(repo: string, opts?: { limit?: number }): Promise<ForgejoCommit[] | null>;
+  /** The system's whitelisted files (system.yaml + agents/*) AS THEY WERE at `sha`,
+   *  read via the contents-at-ref API. Returns `null` when unreachable so restore
+   *  fails loudly rather than clobbering HEAD with empty content. */
+  getCommitFiles(repo: string, sha: string): Promise<ForgejoCommitFiles | null>;
 }
 
 export interface OpaClient {
@@ -131,6 +148,20 @@ function routedModels(sys: System, table: RoutingTable): string[] {
   return [...set];
 }
 
+/**
+ * The tool vocabulary granted to a system's principal in OPA / LiteLLM: the RAW
+ * grant names (kept so the runtime's raw-IR tool calls stay authorized) UNIONED
+ * with their RESOLVED MCP registry names (so a legacy `retrieve` grant ALSO
+ * authorizes `search_knowledge`, matching the sanctioned MCP vocabulary the Run
+ * path resolves to), plus the enabled connection tools. Resolved via a dynamic
+ * import so this module has no eager dependency on the (heavier) os-tools chain.
+ */
+async function grantVocabulary(sys: System, connections: string[]): Promise<string[]> {
+  const { resolveGrantedTools } = await import('./os-tools.ts');
+  const resolved = resolveGrantedTools(sys).mcpNames;
+  return [...new Set([...sys.grants.tools, ...resolved, ...connections])];
+}
+
 /** connection_<id> tool names for enabled connections; and the write-held subset. */
 function connectionTools(sys: System): { all: string[]; held: string[] } {
   const all: string[] = [];
@@ -197,7 +228,7 @@ export function makeLiveAdapters(deps: LiveDeps): BuildAdapter[] {
     async apply(ctx) {
       const principal = principalFor(ctx.systemId ?? 'sys');
       const { all, held } = connectionTools(ctx.system);
-      const tools = [...ctx.system.grants.tools, ...all];
+      const tools = await grantVocabulary(ctx.system, all);
       await deps.opa.putGrants(principal, tools);
       if (held.length > 0) await deps.opa.mergeRequiresApproval(held);
       return ok(`granted ${tools.length} tool(s) to ${principal}${held.length ? `; ${held.length} held for approval` : ''}`);
@@ -245,7 +276,7 @@ export function makeLiveAdapters(deps: LiveDeps): BuildAdapter[] {
         modelMaxBudget,
         rpmLimit: caps.rpmLimit,
         tpmLimit: caps.tpmLimit,
-        allowedTools: [...ctx.system.grants.tools, ...all],
+        allowedTools: await grantVocabulary(ctx.system, all),
       });
       return ok(`registered scoped key '${alias}' (${models.length} model(s), budget ${caps.maxBudget})`);
     },

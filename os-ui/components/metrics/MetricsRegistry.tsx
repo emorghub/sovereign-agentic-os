@@ -3,8 +3,10 @@
  */
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useUser } from '@/lib/useUser';
+import { SCOPE_GROUPS, groupByScope, scopeCounts, type ScopeKey } from '@/lib/scopes';
+import DomainTag from '@/components/DomainTag';
 import {
   type MetricGroups,
   type MetricSummary,
@@ -13,145 +15,143 @@ import {
 } from './shared';
 
 /**
- * The governed metric registry — every measure the user can see, grouped Mine / Domain /
- * Marketplace. Each tile shows the one canonical `member` (the single definition of the
- * number), the owner, a tier badge, and the aggregation. Clicking a tile selects it; the
- * selected tile reveals jump-actions into Explore / Govern.
+ * The governed metric registry — every measure the user can see, grouped All · My · Shared ·
+ * Marketplace via the OS-wide scope helper. Each tile shows the one canonical `member` (the
+ * single definition of the number), the owner, a tier badge, and the aggregation. Clicking a
+ * tile OPENS its detail, where explore / govern / alert fold in. The parent owns the fetch so
+ * the same grouped payload warms the alert palette.
  */
-function MetricCard({
-  m,
-  selected,
-  onSelect,
-  onExplore,
-  onGovern,
-}: {
-  m: MetricSummary;
-  selected: boolean;
-  onSelect: (m: MetricSummary) => void;
-  onExplore: (m: MetricSummary) => void;
-  onGovern: (m: MetricSummary) => void;
-}) {
+function MetricCard({ m, onOpen, scope }: { m: MetricSummary; onOpen: (m: MetricSummary) => void; scope: ScopeKey }) {
+  const showDomain = scope === 'shared' || scope === 'marketplace' || scope === 'all';
   return (
-    <div
-      className={`card tile${selected ? ' sel' : ''}`}
-      style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 132, ...(selected ? { borderColor: 'var(--gold)' } : {}) }}
+    <button
+      type="button"
+      onClick={() => onOpen(m)}
+      className="card tile"
+      style={{ all: 'unset', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 12, minHeight: 120, boxSizing: 'border-box' }}
+      title="Open this metric — explore, govern, or set an alert"
     >
-      <button
-        type="button"
-        onClick={() => onSelect(m)}
-        style={{ all: 'unset', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 12, flex: 1 }}
-        title="Select this metric for Explore / Govern"
-      >
-        <div className="tile-top">
-          <span className="tile-name">{m.name}</span>
+      <div className="tile-top">
+        <span className="tile-name">{m.name}</span>
+        <div className="row" style={{ gap: 4, alignItems: 'center' }}>
+          {showDomain ? <DomainTag domain={m.domain} /> : null}
           <span className={`badge ${TIER_BADGE[m.tier]}`}>{TIER_WORD[m.tier]}</span>
         </div>
-        <div className="muted mono" style={{ fontSize: 12 }}>{m.member}</div>
-        <div className="tile-meta">
-          <span className="muted">{m.owner}</span>
-          <span className="dot-sep">·</span>
-          <span className="muted">{m.datasetName}</span>
-          <span className="dot-sep">·</span>
-          <span className="badge muted">{m.type}</span>
-        </div>
-      </button>
-      {selected ? (
-        <div className="row" style={{ gap: 8, marginTop: 'auto', paddingTop: 4 }}>
-          <button className="btn ghost sm" onClick={() => onExplore(m)}>Explore →</button>
-          <button className="btn ghost sm" onClick={() => onGovern(m)}>Govern →</button>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function Group({
-  title,
-  metrics,
-  selectedId,
-  onSelect,
-  onExplore,
-  onGovern,
-}: {
-  title: string;
-  metrics: MetricSummary[];
-  selectedId: string | null;
-  onSelect: (m: MetricSummary) => void;
-  onExplore: (m: MetricSummary) => void;
-  onGovern: (m: MetricSummary) => void;
-}) {
-  if (metrics.length === 0) return null;
-  return (
-    <>
-      <div className="section-title">{title}<span className="count-pill">{metrics.length}</span></div>
-      <div className="tile-grid">
-        {metrics.map((m) => (
-          <MetricCard
-            key={m.id}
-            m={m}
-            selected={m.id === selectedId}
-            onSelect={onSelect}
-            onExplore={onExplore}
-            onGovern={onGovern}
-          />
-        ))}
       </div>
-    </>
+      <div className="muted mono" style={{ fontSize: 12 }}>{m.member}</div>
+      <div className="tile-meta" style={{ marginTop: 'auto' }}>
+        <span className="muted">{m.owner}</span>
+        <span className="dot-sep">·</span>
+        <span className="muted">{m.datasetName}</span>
+        <span className="dot-sep">·</span>
+        <span className="badge muted">{m.type}</span>
+      </div>
+    </button>
   );
 }
 
 export default function MetricsRegistry({
-  selectedId,
-  onSelect,
-  onExplore,
-  onGovern,
+  groups,
+  loading,
+  error,
+  onOpen,
+  onDefine,
+  showArchived = false,
+  onToggleArchived,
 }: {
-  selectedId: string | null;
-  onSelect: (m: MetricSummary) => void;
-  onExplore: (m: MetricSummary) => void;
-  onGovern: (m: MetricSummary) => void;
+  groups: MetricGroups | null;
+  loading: boolean;
+  error: string;
+  onOpen: (m: MetricSummary) => void;
+  onDefine: () => void;
+  showArchived?: boolean;
+  onToggleArchived?: () => void;
 }) {
   const { user } = useUser();
-  const domainLabel = user?.domains[0] ? `${user.domains[0]} domain` : 'your domain';
-  const [groups, setGroups] = useState<MetricGroups | null>(null);
-  const [err, setErr] = useState('');
+  const [scope, setScope] = useState<ScopeKey>('all');
 
-  const refresh = useCallback(async () => {
-    setErr('');
-    try {
-      const res = await fetch('/api/metrics', { cache: 'no-store' });
-      const data = await res.json();
-      if (!res.ok) { setErr(data.error ?? 'Failed to load metrics'); return; }
-      setGroups(data);
-    } catch (e) { setErr((e as Error).message); }
-  }, []);
-  useEffect(() => { refresh(); }, [refresh]);
-
-  const empty = groups && groups.mine.length === 0 && groups.domain.length === 0 && groups.marketplace.length === 0;
+  const uid = user?.id ?? '';
+  const scoped = groups ? groupByScope(groups, uid) : null;
+  const counts = groups ? scopeCounts(groups, uid) : null;
+  // The scoped slice can include soft-archived metrics (when ?archived=1) — split them
+  // so the working grid stays live-only and archived get their own openable section.
+  const scopedAll = scoped ? scoped[scope] : [];
+  const visible = scopedAll.filter((m) => !m.archived);
+  const archived = scopedAll.filter((m) => m.archived);
 
   return (
     <>
-      <p className="lead" style={{ marginTop: 4 }}>
-        Every business metric, defined once. Each card carries its single canonical
-        definition — the Cube <strong>member</strong> the explorer, dashboards and the agent
-        all resolve. Select one to explore it under your own identity, or govern its tier.
-      </p>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+        <p className="lead" style={{ marginTop: 4, flex: 1, minWidth: 280 }}>
+          Every business metric, defined once. Each card carries its single canonical
+          definition — the Cube <strong>member</strong> the explorer, dashboards and the agent
+          all resolve. Open one to explore it under your own identity, govern its tier, or set an alert.
+        </p>
+        <div className="row" style={{ gap: 8, marginTop: 4 }}>
+          {onToggleArchived ? (
+            <button
+              className="btn ghost"
+              style={{ opacity: showArchived ? 1 : 0.7 }}
+              onClick={onToggleArchived}
+              title="Archived metrics are hidden by default"
+            >
+              {showArchived ? 'Hide archived' : 'Show archived'}
+            </button>
+          ) : null}
+          <button className="btn" onClick={onDefine}>＋ Define metric</button>
+        </div>
+      </div>
 
-      {err ? <div className="error" style={{ marginTop: 14 }}>{err}</div> : null}
+      {/* Scope switcher — the OS-wide four groups: All · My · Shared · Marketplace. */}
+      <div className="seg" style={{ marginTop: 14 }}>
+        {SCOPE_GROUPS.map((g) => (
+          <button key={g.key} type="button" className={scope === g.key ? 'on' : ''} onClick={() => setScope(g.key)}>
+            {g.label('Metrics')}{counts ? ` (${counts[g.key]})` : ''}
+          </button>
+        ))}
+      </div>
 
-      {empty ? (
+      {error ? <div className="error" style={{ marginTop: 14 }}>{error}</div> : null}
+
+      {groups && visible.length === 0 ? (
         <div className="stub-page" style={{ marginTop: 20 }}>
-          No metrics yet. <strong>Define</strong> one on a governed Gold dataset to see it here.
+          {scope === 'mine' || scope === 'all'
+            ? <>No metrics yet. <strong>Define</strong> one on a governed Gold dataset to see it here.</>
+            : scope === 'shared'
+              ? 'Nothing shared in your domain yet — promote a metric to share it.'
+              : 'Nothing in the marketplace yet.'}
         </div>
       ) : null}
 
-      {groups ? (
-        <>
-          <Group title="Personal" metrics={groups.mine} selectedId={selectedId} onSelect={onSelect} onExplore={onExplore} onGovern={onGovern} />
-          <Group title={`Shared in ${domainLabel}`} metrics={groups.domain} selectedId={selectedId} onSelect={onSelect} onExplore={onExplore} onGovern={onGovern} />
-          <Group title="Marketplace" metrics={groups.marketplace} selectedId={selectedId} onSelect={onSelect} onExplore={onExplore} onGovern={onGovern} />
-        </>
-      ) : !err ? <div className="stub-page" style={{ marginTop: 20 }}>Loading metrics…</div> : null}
+      {scoped ? (
+        visible.length > 0 ? (
+          <div className="tile-grid" style={{ marginTop: 16 }}>
+            {visible.map((m) => (
+              <MetricCard key={m.id} m={m} onOpen={onOpen} scope={scope} />
+            ))}
+          </div>
+        ) : null
+      ) : loading && !error ? <div className="stub-page" style={{ marginTop: 20 }}>Loading metrics…</div> : null}
+
+      {/* Archived — openable tiles; the opened detail exposes Restore + Delete. */}
+      {showArchived ? (
+        archived.length > 0 ? (
+          <>
+            <div className="section-title" style={{ marginTop: 24 }}>
+              Archived<span className="count-pill">{archived.length}</span>
+            </div>
+            <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
+              Archived metrics are hidden from the working registry (their definitions are retained).
+              Open one to Restore it, or Delete it permanently.
+            </p>
+            <div className="tile-grid">
+              {archived.map((m) => <MetricCard key={m.id} m={m} onOpen={onOpen} scope={scope} />)}
+            </div>
+          </>
+        ) : (
+          <div className="hint" style={{ marginTop: 16 }}>No archived metrics.</div>
+        )
+      ) : null}
     </>
   );
 }

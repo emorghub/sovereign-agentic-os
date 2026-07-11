@@ -2,9 +2,10 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { config } from '@/lib/config';
+import { roleModel } from '@/lib/models/roles';
 import { requirePrincipal, errorResponse } from '@/lib/data/server';
 import { listAskable } from '@/lib/data/store';
+import { readPrincipalFor } from '@/lib/data/store-fqn';
 import { queryRun, trace } from '@/lib/governed';
 import { liteLlmCaller } from '@/lib/assistant/runtime';
 import { runAsk, type AskMessage } from '@/lib/data/ask';
@@ -40,10 +41,6 @@ export async function POST(req: Request) {
     // The ONLY schema context the model sees: canView-scoped registry docs.
     const datasets = listAskable(user);
 
-    // The principal Trino's OPA plugin governs row/column on — the caller's domain
-    // (or their id). NEVER trusted from the request body. Same as /api/query.
-    const principal = user.domains[0] ?? user.id;
-
     const call = liteLlmCaller();
     const result = await runAsk({
       question,
@@ -51,11 +48,19 @@ export async function POST(req: Request) {
       llm: async (messages: AskMessage[], model: string) =>
         (await call({ model, messages, temperature: 0 })).content,
       models: {
-        generate: config.litellmReasoningModel, // SQL needs the deep model
-        summarize: config.litellmExecModel, // the grounded summary is light work
+        generate: roleModel('reasoning'), // SQL needs the deep model
+        summarize: roleModel('standard'), // the grounded summary is light work
       },
-      query: (sql) => queryRun(sql, principal),
+      // Owner-aware principal, resolved per generated SQL: a read of the caller's OWN
+      // `personal_<uid>` lane runs AS the owner (that schema is owner-only under OPA
+      // `is_owned_personal`, so the domain principal is denied); a governed asset/product
+      // read runs as the caller's domain. Derived SERVER-SIDE — never from the body.
+      query: (sql) => queryRun(sql, readPrincipalFor(sql, user)),
     });
+
+    // The principal the executed SQL actually ran as (owner for a personal-lane read,
+    // else the domain) — recorded on the audit trace so Monitoring reflects the truth.
+    const principal = readPrincipalFor(result.sql ?? '', user);
 
     // Audit the turn (best-effort, same pattern as the metrics/query tools).
     const traced = await trace({
@@ -68,9 +73,15 @@ export async function POST(req: Request) {
     });
 
     if (!result.ok) {
-      // Honest failure states: no accessible dataset is a calm 200 answer (not an
-      // error); invalid SQL (rejected, never executed) 422; a Trino/OPA refusal 502.
-      const status = result.kind === 'no_dataset' ? 200 : result.kind === 'invalid_sql' ? 422 : 502;
+      // Honest failure states: no accessible dataset — or a dataset that simply isn't
+      // materialized yet — is a calm 200 answer (not an error); invalid SQL (rejected,
+      // never executed) 422; a Trino/OPA refusal 502.
+      const status =
+        result.kind === 'no_dataset' || result.kind === 'not_materialized'
+          ? 200
+          : result.kind === 'invalid_sql'
+            ? 422
+            : 502;
       return NextResponse.json(
         { ok: false, kind: result.kind, error: result.message, sql: result.sql ?? null, traced },
         { status },

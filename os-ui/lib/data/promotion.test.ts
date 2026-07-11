@@ -41,11 +41,13 @@ test('Creator requests promotion of their OWN documented dataset', () => {
   assert.match(req.target, /^iceberg\.sales\.silver_orders$/);
 });
 
-test('promotion request is blocked when the transparency gate is red', () => {
+test('promotion is NO LONGER blocked by missing docs (transparency gate relaxed)', () => {
   const d = createDataset(amir, { name: 'Bare' });
   buildVersion(d.id, amir, 'bronze', { quality: 'passing', artifact: 'b' });
   buildVersion(d.id, amir, 'silver', { artifact: 's' }); // built, but no docs
-  assert.throws(() => requestPromotion(d.id, amir), /transparency gate|documentation/i);
+  // owner/domain/tier are set at creation; documentation is advisory now → promotes.
+  const req = requestPromotion(d.id, amir);
+  assert.ok(req?.target);
 });
 
 test('Bronze-only data is not shareable', () => {
@@ -83,6 +85,27 @@ test('cross-domain Builder/Admin cannot approve another domain’s promotion', (
   const req = requestPromotion(id, amir);
   assert.throws(() => applyApprovedPromotion(req, maria), (e: DatasetError) => e.status === 403); // finance admin
   assert.throws(() => applyApprovedPromotion(req, kenji), (e: DatasetError) => e.status === 403);
+});
+
+test('approval fails closed on a BRONZE-only dataset even if a request slips through', () => {
+  // A Bronze-only dataset can never be requested via requestPromotion (the request
+  // path blocks it). Forge the request object directly to prove the APPROVAL path
+  // also refuses it — fail-closed, so a stale/forged queue entry can't share raw data.
+  const d = createDataset(amir, { name: 'RawOnly2' });
+  buildVersion(d.id, amir, 'bronze', { quality: 'passing', artifact: 'b' });
+  setDocs(d.id, amir, { description: 'x', columns: [{ name: 'c', description: 'd' }] });
+  const forged = {
+    datasetId: d.id,
+    datasetName: 'RawOnly2',
+    domain: 'sales',
+    owner: amir.id,
+    visibility: 'domain' as const,
+    grants: [],
+    target: assetTarget(getDataset(d.id, amir)),
+  };
+  assert.throws(() => applyApprovedPromotion(forged, bea), /Silver or Gold/i);
+  // and the tier is untouched — still a private dataset
+  assert.equal(getDataset(d.id, amir).tier, 'dataset');
 });
 
 test('double-apply is rejected once the dataset is already an asset', () => {

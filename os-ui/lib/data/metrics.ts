@@ -2,6 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import type { Dataset, Measure, ColumnDoc } from './dataset-schema.ts';
+import { domainSchema } from './store-fqn.ts';
 
 /**
  * The Metric handover to Cube (data-ui-ux.md §"Define a metric — the Cube handover",
@@ -16,7 +17,7 @@ import type { Dataset, Measure, ColumnDoc } from './dataset-schema.ts';
  * (Phase 6) all generate exactly the same YAML.
  */
 
-export const MEASURE_TYPES = ['count', 'count_distinct', 'sum', 'avg', 'min', 'max', 'number'] as const;
+export const MEASURE_TYPES = ['count', 'count_distinct', 'count_distinct_approx', 'sum', 'avg', 'min', 'max', 'number'] as const;
 export type MeasureType = (typeof MEASURE_TYPES)[number];
 export type CubeDimType = 'string' | 'number' | 'time' | 'boolean';
 
@@ -28,14 +29,16 @@ export function cubeName(d: Dataset): string {
   return slug(d.name);
 }
 
-/** The user-facing Cube VIEW name dashboards + the agent metrics tool resolve. */
+/** The Cube VIEW name dashboards + the agent metrics tool resolve. MUST be a valid
+ *  Cube identifier — letters/digits/underscore, no spaces — or the WHOLE Cube schema
+ *  fails to compile ("fails to match the identifier pattern"). Underscores, readable case. */
 export function cubeViewName(d: Dataset): string {
-  return d.name.replace(/[^A-Za-z0-9]+/g, ' ').trim() || 'View';
+  return d.name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'View';
 }
 
 /** The Gold mart FQN the cube binds to via `sql_table` (the handover contract). */
 export function goldMartFqn(d: Dataset): string {
-  return `iceberg.${d.domain}.gold_${slug(d.name)}`;
+  return `iceberg.${domainSchema(d.domain)}.gold_${slug(d.name)}`;
 }
 
 /** cube_dbt's dbt data_type → Cube dimension type. We have no live manifest in kind,
@@ -54,21 +57,47 @@ function primaryKeyColumn(columns: ColumnDoc[]): string | null {
   return idCol ? idCol.name : columns[0]?.name ?? null;
 }
 
+/** One measure's YAML block — the base (`name`/`type`/`sql`) plus, only when present,
+ *  the richer Cube fields (filters / rolling_window / format / drill_members). A plain
+ *  `{name,type,sql}` measure emits BYTE-FOR-BYTE what it did before these fields existed,
+ *  so the live Cube auto-registration and every existing test are unchanged. */
+function measureYaml(m: Measure): string {
+  const out = [`      - name: ${m.name}`, `        type: ${m.type}`];
+  if (m.sql && m.type !== 'count') out.push(`        sql: ${m.sql}`);
+  if (m.filters && m.filters.length > 0) {
+    out.push('        filters:');
+    for (const f of m.filters) out.push(`          - sql: "${f.sql.replace(/"/g, '\\"')}"`);
+  }
+  if (m.rollingWindow && (m.rollingWindow.trailing || m.rollingWindow.leading || m.rollingWindow.offset)) {
+    out.push('        rolling_window:');
+    if (m.rollingWindow.trailing) out.push(`          trailing: ${m.rollingWindow.trailing}`);
+    if (m.rollingWindow.leading) out.push(`          leading: ${m.rollingWindow.leading}`);
+    if (m.rollingWindow.offset) out.push(`          offset: ${m.rollingWindow.offset}`);
+  }
+  if (m.format) out.push(`        format: ${m.format}`);
+  if (m.drillMembers && m.drillMembers.length > 0) {
+    out.push(`        drill_members: [${m.drillMembers.join(', ')}]`);
+  }
+  return out.join('\n');
+}
+
 /** Build the Cube model YAML (cube + view) from the Gold columns + named measures —
  *  the file the Metric step would hand-write only the `measures:` block of. */
 export function scaffoldCubeYaml(d: Dataset): string {
   const cube = cubeName(d);
   const pk = primaryKeyColumn(d.columns);
-  const dims = d.columns.map((c) => {
+  // A measure and a dimension may NOT share a name in a Cube (Cube rejects it with
+  // "defined more than once" → the whole schema 500s). When a gold column is also a
+  // measure name, the measure wins — skip the colliding dimension (keep the pk).
+  const measureNames = new Set(d.measures.map((m) => m.name));
+  const dimCols = d.columns.filter((c) => c.name === pk || !measureNames.has(c.name));
+  const dims = dimCols.map((c) => {
     const type = c.name === pk ? 'number' : inferDimType(c.name);
     const pkLine = c.name === pk ? '\n        primary_key: true' : '';
     return `      - name: ${c.name}\n        sql: ${c.name}\n        type: ${type}${pkLine}`;
   });
-  const measures = (d.measures.length ? d.measures : [{ name: 'count', type: 'count', sql: '' } as Measure]).map((m) => {
-    const sqlLine = m.sql && m.type !== 'count' ? `\n        sql: ${m.sql}` : '';
-    return `      - name: ${m.name}\n        type: ${m.type}${sqlLine}`;
-  });
-  const includes = [...d.measures.map((m) => m.name), ...d.columns.filter((c) => c.name !== pk).map((c) => c.name)];
+  const measures = (d.measures.length ? d.measures : [{ name: 'count', type: 'count', sql: '' } as Measure]).map(measureYaml);
+  const includes = [...d.measures.map((m) => m.name), ...dimCols.filter((c) => c.name !== pk).map((c) => c.name)];
   return [
     'cubes:',
     `  - name: ${cube}`,

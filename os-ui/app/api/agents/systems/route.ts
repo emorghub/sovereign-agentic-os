@@ -3,8 +3,9 @@
  */
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/auth';
-import { listSystems, createSystem, ensureHydrated } from '@/lib/agents/store';
+import { listSystems, createSystem, ensureHydrated, markPendingShares } from '@/lib/agents/store';
 import { isTemplateKey } from '@/lib/agents/templates';
+import { listApprovals } from '@/lib/approvals';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,12 +14,27 @@ function fail(e: unknown) {
   return NextResponse.json({ error: (e as Error).message }, { status });
 }
 
-/** GET → the caller's systems grouped Mine / My domain / Marketplace. */
-export async function GET() {
+/** The ids of agent systems with a Personal→Shared promotion pending in the queue
+ *  (owner filed `request_promotion`; a Builder/Admin has not yet approved). Used to
+ *  honestly badge those systems as "pending share approval" in the list. */
+function pendingShareIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const a of listApprovals({ status: 'pending' })) {
+    if (a.kind === 'artifact_promote' && a.payload?.artifactKind === 'agent_system' && typeof a.payload?.id === 'string') {
+      ids.add(a.payload.id);
+    }
+  }
+  return ids;
+}
+
+/** GET → the caller's systems grouped Mine / My domain / Marketplace.
+ *  `?archived=1` includes soft-archived systems (for the Archived view). */
+export async function GET(req: Request) {
   try {
     await ensureHydrated();
     const user = await requireUser();
-    return NextResponse.json(listSystems(user));
+    const includeArchived = new URL(req.url).searchParams.get('archived') === '1';
+    return NextResponse.json(markPendingShares(listSystems(user, { includeArchived }), pendingShareIds()));
   } catch (e) {
     return fail(e);
   }

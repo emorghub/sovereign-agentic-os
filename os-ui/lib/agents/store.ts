@@ -8,10 +8,12 @@ import {
   SystemError,
   parseSystem,
   serializeSystem,
+  assertGrantsWithinRole,
 } from './system-schema.ts';
 import { canPromote, roleAtLeast } from '../session.ts';
 import { type TemplateKey, templateYaml } from './templates.ts';
 import { osMirror } from '../os-mirror.ts';
+import { type ArtifactVersion, versionLog } from '../versioning.ts';
 
 /**
  * The agent-system store — the MOCK Forgejo repo behind the Agents tab (kind-only,
@@ -33,6 +35,19 @@ import { osMirror } from '../os-mirror.ts';
 export type Role = import('../session.ts').Role;
 export type Principal = { id: string; domains: string[]; role: Role };
 
+/** One row in the per-tool build report (mirrors BuildRow from lib/agents/build/adapter.ts). */
+export type LastBuildRow = {
+  tool: string;
+  applied: boolean;
+  verified: boolean;
+  status: 'ok' | 'fail';
+  detail: string;
+  error?: string;
+};
+
+/** The last build outcome persisted server-side so it survives tab-switches + reloads. */
+export type LastBuild = { ok: boolean; at: number; rows: LastBuildRow[] };
+
 export type SystemRecord = {
   id: string;
   name: string;
@@ -49,6 +64,10 @@ export type SystemRecord = {
   yaml: string;
   updatedAt: string;
   lastActivity: string | null;
+  /** Last build outcome. Absent on records created before this field was added. */
+  lastBuild?: LastBuild;
+  /** Soft-archived: hidden from the working lists, reversible, retained. */
+  archived?: boolean;
 };
 
 export type SystemSummary = {
@@ -62,6 +81,15 @@ export type SystemSummary = {
   scheduled: boolean;
   agentCount: number;
   lastActivity: string | null;
+  /**
+   * True when a Personal system has a pending Personal→Shared promotion filed
+   * (owner filed `request_promotion`, a Builder/Admin has not yet approved). Left
+   * undefined by the store; the API route decorates it from the approvals queue so
+   * the list can honestly show "pending share approval" instead of looking inert.
+   */
+  pendingShare?: boolean;
+  /** Soft-archived (retained, reversible). Absent/false = live. */
+  archived?: boolean;
 };
 
 export type RepoFile = { path: string; content: string; sha: string };
@@ -105,18 +133,29 @@ const mirror = osMirror({
         yaml: { type: 'text', index: false },
         schedule: { type: 'object', enabled: false },
         disabledAgents: { type: 'keyword' },
+        lastBuild: { type: 'object', enabled: false },
+        archived: { type: 'boolean' },
       },
     },
   },
 });
 
+// Durable, per-artifact version history (reused across the OS). A system's
+// canonical `yaml` is snapshotted here on every meaningful edit + on restore.
+const versions = versionLog('agent-system');
+
 function writeThrough(rec: SystemRecord): void {
   mirror.writeThrough(rec.id, rec);
 }
 
+/** The versioned slice of a system record — the single source (system.yaml). */
+function snapshotState(rec: SystemRecord): { yaml: string } {
+  return { yaml: rec.yaml };
+}
+
 export async function ensureHydrated(): Promise<void> {
   const s = state();
-  if (!s.hydration) s.hydration = hydrate();
+  if (!s.hydration) s.hydration = Promise.all([hydrate(), versions.ensureHydrated()]).then(() => {});
   return s.hydration;
 }
 
@@ -160,7 +199,7 @@ function starterYaml(name: string, domain: string, visibility: Visibility): stri
     safetyPreset: 'read-only',
     entrypoint: 'assistant',
     state: { channels: { messages: 'add_messages' } },
-    grants: { data: [], knowledge: [], tools: ['search_knowledge'], connections: [] },
+    grants: { data: [], knowledge: [], metrics: [], tools: ['search_knowledge'], connections: [] },
     routing: { overrides: {} },
     agents: [
       {
@@ -203,6 +242,7 @@ export function __resetStore(): void {
   s.seeded = false;
   s.hydration = null;
   mirror.__reset();
+  versions.__reset();
 }
 
 // ------------------------------------------------------------------- scoping --
@@ -258,23 +298,48 @@ function summarise(rec: SystemRecord): SystemSummary {
     scheduled: rec.schedule.kind !== 'manual',
     agentCount,
     lastActivity: rec.lastActivity,
+    archived: rec.archived ?? false,
   };
 }
 
 export type SystemGroups = { mine: SystemSummary[]; domain: SystemSummary[]; marketplace: SystemSummary[] };
 
-export function listSystems(user: Principal): SystemGroups {
+/**
+ * The caller's systems, grouped. Archived systems are HIDDEN by default (soft
+ * archive) — the owner/Admin can list them explicitly via `includeArchived` to
+ * restore or delete. A shared/marketplace system, once archived by its owner,
+ * disappears from everyone's domain/marketplace list too.
+ */
+export function listSystems(user: Principal, opts: { includeArchived?: boolean } = {}): SystemGroups {
   ensureSeeded();
   const mine: SystemSummary[] = [];
   const domain: SystemSummary[] = [];
   const marketplace: SystemSummary[] = [];
   for (const rec of state().store.values()) {
+    if (rec.archived && !opts.includeArchived) continue;
     if (rec.owner === user.id) mine.push(summarise(rec));
     else if (rec.visibility === 'Shared' && user.domains.includes(rec.domain)) domain.push(summarise(rec));
     else if (rec.visibility === 'Marketplace') marketplace.push(summarise(rec));
   }
   const byName = (a: SystemSummary, b: SystemSummary) => a.name.localeCompare(b.name);
   return { mine: mine.sort(byName), domain: domain.sort(byName), marketplace: marketplace.sort(byName) };
+}
+
+/**
+ * Decorate the caller's groups with `pendingShare` for any Personal system that has
+ * a promotion request in flight (the ids come from the approvals queue, resolved in
+ * the API route — this stays pure/store-only). Pure + non-mutating so it is unit
+ * testable without the server-only approvals module.
+ */
+export function markPendingShares(groups: SystemGroups, pendingIds: ReadonlySet<string>): SystemGroups {
+  if (pendingIds.size === 0) return groups;
+  const mark = (s: SystemSummary): SystemSummary =>
+    s.visibility === 'Personal' && pendingIds.has(s.id) ? { ...s, pendingShare: true } : s;
+  return {
+    mine: groups.mine.map(mark),
+    domain: groups.domain.map(mark),
+    marketplace: groups.marketplace.map(mark),
+  };
 }
 
 export type SystemView = SystemRecord & { system: System };
@@ -450,11 +515,25 @@ export function writeFile(
   if (input.sha && input.sha !== sha(current)) {
     fail('The file changed since you opened it (stale sha) — reload and re-apply', 409);
   }
+  if (content === current) return { path, content, sha: sha(content) }; // no-op edit → no version churn
+
+  // Snapshot the PRIOR canonical source before overwriting it, so every
+  // meaningful edit is restorable from the version history.
+  versions.record(rec.id, user.id, snapshotState(rec), `edit ${path}`);
 
   if (path === 'system.yaml') {
     // Reject syntactically/structurally invalid YAML so the store never holds
     // garbage; semantic graph errors are surfaced later by Build.
-    parseSystem(content); // throws SystemError on bad shape
+    const parsed = parseSystem(content); // throws SystemError on bad shape
+    // Governance escalation guard: a direct-write (Write-bounded) grant on any
+    // artifact is builder-only. Enforced here at the ONE save chokepoint so a
+    // crafted client payload can't grant an agent direct write when its owner is
+    // only a creator. The editor is the owner (self-edit) or a same-domain admin
+    // (builder+) — either way the saver's role is the authority for the grant.
+    // Only the DELTA vs the currently-stored system is checked: a pre-existing
+    // direct-write grant never blocks an unrelated edit — it is instead
+    // neutralised at run time by downgradeGrantsForRole.
+    assertGrantsWithinRole(parsed, user.role, parseSystem(current));
     rec.yaml = content;
   } else {
     const m = /^agents\/([^/]+)\/(AGENT|MEMORY)\.md$/.exec(path);
@@ -509,6 +588,102 @@ export function recordActivity(systemId: string): void {
   const rec = state().store.get(systemId);
   if (rec) rec.lastActivity = now();
   if (rec) writeThrough(rec);
+}
+
+export function setLastBuild(systemId: string, user: Principal, build: LastBuild): SystemRecord {
+  const rec = requireEdit(systemId, user);
+  rec.lastBuild = build;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return rec;
+}
+
+// ------------------------------------------------ archive / delete / versions --
+
+/**
+ * Archive a system: a reversible soft-hide that also STOPS it (an archived
+ * agent must not keep running). Edit-scoped — only the owner or an in-domain
+ * Admin may archive, exactly like editing it. The record + its history are
+ * retained; the system just leaves the working lists until unarchived.
+ */
+export function archiveSystem(systemId: string, user: Principal): SystemRecord {
+  const rec = requireEdit(systemId, user);
+  rec.archived = true;
+  rec.running = false;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return rec;
+}
+
+/** Restore an archived system back into the working lists (edit-scoped). */
+export function unarchiveSystem(systemId: string, user: Principal): SystemRecord {
+  const rec = requireEdit(systemId, user);
+  rec.archived = false;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return rec;
+}
+
+/**
+ * Permanently delete a system + its version history (edit-scoped, irreversible).
+ * The API route confirms intent; this is the hard delete once confirmed. Returns the
+ * deleted record so the route can PHYSICALLY purge its backing resources (its Forgejo
+ * repo + any schedule CronJob) via physical-delete.ts — a "deleted" system whose repo
+ * or CronJob still exists isn't deleted. Archive (above) never purges either.
+ */
+export function deleteSystem(systemId: string, user: Principal): SystemRecord {
+  const rec = requireEdit(systemId, user);
+  state().store.delete(rec.id);
+  mirror.deleteThrough(rec.id);
+  versions.purge(rec.id);
+  return rec;
+}
+
+/** Version history for a system, newest first (view-scoped). */
+export function listSystemVersions(systemId: string, user: Principal): ArtifactVersion[] {
+  requireView(systemId, user);
+  return versions.list(systemId);
+}
+
+/**
+ * Restore a prior version of a system's canonical source. Restore is itself
+ * auditable + reversible: the CURRENT state is snapshotted as a new version
+ * first, THEN the chosen version's yaml is applied. Edit-scoped. The restored
+ * yaml is re-validated (never trust stored garbage) before it goes live.
+ */
+export function restoreSystemVersion(systemId: string, user: Principal, version: number): SystemRecord {
+  const rec = requireEdit(systemId, user);
+  const snap = versions.get(systemId, version);
+  if (!snap) fail(`Version ${version} not found`, 404);
+  const restored = (snap.state as { yaml?: string }).yaml;
+  if (typeof restored !== 'string') fail(`Version ${version} has no restorable source`, 422);
+  parseSystem(restored); // reject a corrupt snapshot rather than go live with it
+  // Snapshot the live state first so the restore can itself be undone.
+  versions.record(systemId, user.id, snapshotState(rec), `restore of v${version}`);
+  rec.yaml = restored;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return rec;
+}
+
+/**
+ * Apply a yaml restored from an EXTERNAL source of truth (a Forgejo commit, via
+ * git-versioning) onto the live record. Edit-scoped + validated (never trust an
+ * externally-supplied yaml) + snapshotted first (so the git restore is ALSO undoable
+ * from the snapshot log). This is the store hook the git-backed versions route calls
+ * after re-committing a prior build's files, so the in-process record + the durable
+ * mirror reflect the restored source and the next Run/Build picks it up.
+ */
+export function applyRestoredYaml(systemId: string, user: Principal, yaml: string, summary: string): SystemRecord {
+  const rec = requireEdit(systemId, user);
+  parseSystem(yaml); // reject corrupt restored source rather than go live with it
+  if (yaml !== rec.yaml) {
+    versions.record(systemId, user.id, snapshotState(rec), summary);
+    rec.yaml = yaml;
+    rec.updatedAt = now();
+    writeThrough(rec);
+  }
+  return rec;
 }
 
 /**

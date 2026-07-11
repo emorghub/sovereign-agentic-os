@@ -9,7 +9,6 @@ import { useApi } from '@/lib/useApi';
 import AgentEditor from './AgentEditor';
 import GrantsRouting from './GrantsRouting';
 import BuildRunPanel from './BuildRunPanel';
-import HelperChat from './HelperChat';
 import MonacoFile from './MonacoFile';
 import RuntimeSelector from './RuntimeSelector';
 import { commitSystem } from './commitSystem';
@@ -17,6 +16,10 @@ import { addAgent, addHandoffEdge, addSuperviseEdge, removeAgent, removeEdge, se
 import type { Schedule, System } from '@/lib/agents/system-schema';
 import type { ModelInfo } from '@/lib/agents/routing';
 import { roleAtLeast, type Role } from '@/lib/session';
+import LifecycleActions from '@/components/lifecycle/LifecycleActions';
+import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
+import type { Visibility } from '@/lib/lifecycle';
+import DomainTag from '@/components/DomainTag';
 
 // React Flow + Monaco are heavy, client-only, and SSR-tolerant only when lazy —
 // load the canvas ssr:false (same pattern as MonacoFile) so the standalone build
@@ -34,6 +37,9 @@ const GraphCanvas = dynamic(() => import('./GraphCanvas'), {
  * supervise, otherwise handoff) and committed as a system.yaml diff.
  */
 
+type LastBuildRow = { tool: string; applied: boolean; verified: boolean; status: 'ok' | 'fail'; detail: string; error?: string };
+type LastBuild = { ok: boolean; at: number; rows: LastBuildRow[] };
+
 type SystemViewData = {
   id: string;
   name: string;
@@ -45,20 +51,27 @@ type SystemViewData = {
   schedule: Schedule;
   disabledAgents: string[];
   lastActivity: string | null;
+  lastBuild: LastBuild | null;
   system: System;
   ir: unknown;
   compileError: string | null;
   canEdit: boolean;
   role: Role;
   hermesEnabled: boolean;
+  /** Soft-archived (retained, reversible). Absent/false = live. */
+  archived?: boolean;
 };
 
-type ModelsData = { models: ModelInfo[]; source: 'litellm' | 'offline' };
+type ModelsData = { models: ModelInfo[]; source: 'litellm' | 'offline'; roles?: { reasoning: string; standard: string; embeddings: string } };
 type RoutingData = { activities: string[]; tiers: Record<string, string>; table: Record<string, { tier: string; model: string }> };
 
-type Panel = 'yaml' | 'grants' | 'build' | 'helper';
+type Panel = 'yaml' | 'grants' | 'build';
 
 const visClass = (v: string) => (v === 'Shared' ? 'vis-shared' : v === 'Marketplace' ? 'vis-certified' : 'vis-personal');
+
+/** Systems visibility → the OS-wide lifecycle visibility (drives the delete gate). */
+const lcVis = (v: SystemViewData['visibility']): Visibility =>
+  v === 'Shared' ? 'shared' : v === 'Marketplace' ? 'certified' : 'personal';
 
 export default function SystemView({ systemId, onBack }: { systemId: string; onBack: () => void }) {
   const { data, loading, error, reload } = useApi<SystemViewData>(`/api/agents/systems/${systemId}`);
@@ -209,11 +222,13 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
   };
 
   return (
+    <ConfirmProvider>
     <div className="system-view">
       <div className="system-head">
         <button className="btn ghost sm" onClick={onBack}>← All systems</button>
         <div className="system-title-block">
           <span className="system-title">{data.name}</span>
+          {(data.visibility === 'Shared' || data.visibility === 'Marketplace') ? <DomainTag domain={data.domain} /> : null}
           <span className={`badge ${visClass(data.visibility)}`}>{data.visibility}</span>
           {data.origin === 'forked' ? <span className="badge muted">forked copy</span> : null}
           <span className={`badge ${data.running ? 'ok' : 'muted'}`}>{data.running ? 'running' : 'stopped'}</span>
@@ -227,11 +242,26 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
           ) : (
             <button className="btn sm" onClick={() => post('run', { prompt: 'Test invocation' })} disabled={!data.canEdit || acting}>Run</button>
           )}
-          <ScheduleControl schedule={data.schedule} canEdit={data.canEdit && !acting} onSet={(s) => post('schedule', s)} />
+          <ScheduleControl systemId={systemId} schedule={data.schedule} canEdit={data.canEdit && !acting} onSaved={reloadAll} />
           {canPromote ? (
             <button className="btn ghost sm" onClick={() => post('promote')} disabled={acting} title={`Governed publish step — ${promoteLabel}`}>
               {promoteLabel}
             </button>
+          ) : null}
+          {/* OS-wide rule: live → Archive; only an ARCHIVED system exposes Delete.
+              Real archived state drives which actions show. */}
+          {data.canEdit ? (
+            <LifecycleActions
+              id={data.id}
+              name={data.name}
+              kind="agent"
+              visibility={lcVis(data.visibility)}
+              archived={!!data.archived}
+              api={`/api/agents/systems/${systemId}`}
+              onChanged={() => { if (data.archived) onBack(); else void reloadAll(); }}
+              showVersions={false}
+              compact
+            />
           ) : null}
         </div>
       </div>
@@ -300,7 +330,6 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
         <button className={panel === 'yaml' ? 'active' : ''} onClick={() => setPanel('yaml')}>system.yaml</button>
         <button className={panel === 'grants' ? 'active' : ''} onClick={() => setPanel('grants')}>Grants &amp; routing</button>
         <button className={panel === 'build' ? 'active' : ''} onClick={() => setPanel('build')}>Build &amp; run</button>
-        <button className={panel === 'helper' ? 'active' : ''} onClick={() => setPanel('helper')}>Agent-system helper</button>
       </div>
 
       <div style={{ marginTop: 14 }}>
@@ -308,13 +337,10 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
           <MonacoFile systemId={systemId} path="system.yaml" canEdit={data.canEdit} height={420} reloadSignal={reloadKey} onSaved={reloadAll} />
         ) : null}
         {panel === 'grants' ? (
-          <GrantsRouting systemId={systemId} system={sys} canEdit={data.canEdit} models={models} routing={routingData} onChanged={reloadAll} />
+          <GrantsRouting systemId={systemId} system={sys} canEdit={data.canEdit} canDirectWrite={roleAtLeast(data.role, 'builder')} models={models} routing={routingData} onChanged={reloadAll} />
         ) : null}
         {panel === 'build' ? (
-          <BuildRunPanel systemId={systemId} running={data.running} canEdit={data.canEdit} onStateChange={reloadAll} />
-        ) : null}
-        {panel === 'helper' ? (
-          <HelperChat systemId={systemId} canEdit={data.canEdit} onApplied={reloadAll} />
+          <BuildRunPanel systemId={systemId} running={data.running} canEdit={data.canEdit} lastBuild={data.lastBuild} onStateChange={reloadAll} />
         ) : null}
       </div>
 
@@ -327,8 +353,10 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
               system={sys}
               agentId={selectedAgent}
               canEdit={data.canEdit}
-              models={models}
-              modelsSource={modelsData?.source ?? null}
+              roles={{
+                reasoning: modelsData?.roles?.reasoning || 'sovereign-reasoning',
+                standard: modelsData?.roles?.standard || 'sovereign-default',
+              }}
               isEntrypoint={selectedAgent === sys.entrypoint}
               onSetEntrypoint={editable ? () => void commit(setEntrypoint(sys, selectedAgent), { snapshot: sys }) : undefined}
               onChanged={reloadAll}
@@ -338,6 +366,7 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
         </div>
       ) : null}
     </div>
+    </ConfirmProvider>
   );
 }
 
@@ -369,34 +398,74 @@ function BuildChecklist({ system, compileError, disabledAgents }: { system: Syst
   );
 }
 
-function ScheduleControl({ schedule, canEdit, onSet }: { schedule: Schedule; canEdit: boolean; onSet: (s: Schedule) => void }) {
+type CronStatus = { ok: boolean; live: boolean; action: string; detail: string; name: string };
+
+function ScheduleControl({ systemId, schedule, canEdit, onSaved }: { systemId: string; schedule: Schedule; canEdit: boolean; onSaved: () => void | Promise<void> }) {
   // Local optimistic mirrors of the server-owned schedule so the dropdown reflects
   // the choice immediately (no snap-back during the round-trip) and the cron field
   // re-syncs when the persisted value changes.
   const [kind, setKind] = useState<Schedule['kind']>(schedule.kind);
   const [cron, setCron] = useState(schedule.cron ?? '0 9 * * 1');
+  const [busy, setBusy] = useState(false);
+  // The CronJob reconcile status (honest): a cron schedule only fires once a real
+  // CronJob is provisioned — surface when it was NOT (e.g. cluster unreachable).
+  const [cronStatus, setCronStatus] = useState<CronStatus | null>(null);
+  const [err, setErr] = useState('');
   useEffect(() => { setKind(schedule.kind); }, [schedule.kind]);
   useEffect(() => { if (schedule.cron) setCron(schedule.cron); }, [schedule.cron]);
+
+  const save = async (next: Schedule) => {
+    setBusy(true);
+    setErr('');
+    setCronStatus(null);
+    try {
+      const res = await fetch(`/api/agents/systems/${systemId}/schedule`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(next),
+      });
+      const b = await res.json();
+      if (!res.ok) throw new Error(b.error ?? 'Schedule update failed');
+      if (b.cron) setCronStatus(b.cron as CronStatus);
+      await onSaved();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className="row" style={{ gap: 6, alignItems: 'center' }}>
-      <select
-        value={kind}
-        disabled={!canEdit}
-        onChange={(e) => {
-          const next = e.target.value as Schedule['kind'];
-          setKind(next);
-          onSet(next === 'cron' ? { kind: next, cron } : next === 'event' ? { kind: next, event: 'on_demand' } : { kind: next });
-        }}
-        title="Schedule"
-      >
-        <option value="manual">manual</option>
-        <option value="cron">cron</option>
-        <option value="event">event</option>
-      </select>
-      {kind === 'cron' ? (
-        <form onSubmit={(e) => { e.preventDefault(); onSet({ kind: 'cron', cron }); }}>
-          <input type="text" value={cron} onChange={(e) => setCron(e.target.value)} disabled={!canEdit} style={{ width: 120 }} className="mono" />
-        </form>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+      <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+        <select
+          value={kind}
+          disabled={!canEdit || busy}
+          onChange={(e) => {
+            const next = e.target.value as Schedule['kind'];
+            setKind(next);
+            void save(next === 'cron' ? { kind: next, cron } : next === 'event' ? { kind: next, event: 'on_demand' } : { kind: next });
+          }}
+          title="Schedule"
+        >
+          <option value="manual">manual</option>
+          <option value="cron">cron</option>
+          <option value="event">event</option>
+        </select>
+        {kind === 'cron' ? (
+          <form onSubmit={(e) => { e.preventDefault(); void save({ kind: 'cron', cron }); }}>
+            <input type="text" value={cron} onChange={(e) => setCron(e.target.value)} disabled={!canEdit || busy} style={{ width: 120 }} className="mono" />
+          </form>
+        ) : null}
+      </div>
+      {err ? <span className="muted" style={{ fontSize: 11, color: 'var(--danger, #c0392b)' }}>{err}</span> : null}
+      {cronStatus && kind === 'cron' && !cronStatus.ok ? (
+        <span className="muted" style={{ fontSize: 11, color: 'var(--warn, #b7791f)' }} title={cronStatus.detail}>
+          ⚠ schedule saved but not scheduled — {cronStatus.detail}
+        </span>
+      ) : null}
+      {cronStatus && kind === 'cron' && cronStatus.ok && cronStatus.live ? (
+        <span className="muted" style={{ fontSize: 11 }}>✓ CronJob {cronStatus.action} — runs on schedule</span>
       ) : null}
     </div>
   );

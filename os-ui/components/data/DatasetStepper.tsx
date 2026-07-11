@@ -12,6 +12,7 @@ import CertifyPanel from './CertifyPanel';
 import MetricsPanel from './MetricsPanel';
 import LineagePanel from './LineagePanel';
 import ExplorePanel from './ExplorePanel';
+import PreviewPanel from './PreviewPanel';
 
 type Layer = 'bronze' | 'silver' | 'gold';
 type Stage = {
@@ -125,7 +126,7 @@ export default function DatasetStepper({ datasetId, onBack }: { datasetId: strin
 
   const onCommitted = useCallback((next: Stage[]) => { setStages(next); setOpenStage(null); load(); }, [load]);
 
-  if (err) return <><button className="btn ghost" onClick={onBack}>← All datasets</button><div className="error" style={{ marginTop: 14 }}>{err}</div></>;
+  if (err) return <><button className="btn ghost" onClick={onBack}>← Back to dataset</button><div className="error" style={{ marginTop: 14 }}>{err}</div></>;
   if (!dataset) return <div className="stub-page">Opening dataset…</div>;
 
   const active = openStage ? stages.find((s) => s.layer === openStage) ?? null : null;
@@ -133,7 +134,7 @@ export default function DatasetStepper({ datasetId, onBack }: { datasetId: strin
   return (
     <>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-        <button className="btn ghost" onClick={onBack}>← All datasets</button>
+        <button className="btn ghost" onClick={onBack}>← Back to dataset</button>
         <button className={`btn ghost${showCode ? ' on' : ''}`} onClick={() => setShowCode((v) => !v)}>
           {showCode ? 'Hide the code' : '‹ › Show the code'}
         </button>
@@ -195,11 +196,20 @@ export default function DatasetStepper({ datasetId, onBack }: { datasetId: strin
         </div>
       ) : null}
 
+      {/* Preview — scan a subset of the actual rows (governed read: masked to the viewer). */}
+      {stages.some((s) => s.built) ? (
+        <>
+          <div className="section-title" style={{ marginTop: 22 }}>Preview data</div>
+          <PreviewPanel datasetId={dataset.id} builtLayers={stages.filter((s) => s.built).map((s) => s.layer)} />
+        </>
+      ) : null}
+
       {/* Explore — profile the built versions (governed reads: masked to the viewer). */}
       {stages.some((s) => s.built) ? (
         <>
           <div className="section-title" style={{ marginTop: 22 }}>Explore</div>
-          <ExplorePanel datasetId={dataset.id} builtLayers={stages.filter((s) => s.built).map((s) => s.layer)} />
+          {/* Preview rows are shown once by PreviewPanel above; Explore shows profile only. */}
+          <ExplorePanel datasetId={dataset.id} builtLayers={stages.filter((s) => s.built).map((s) => s.layer)} showPreview={false} />
         </>
       ) : null}
 
@@ -213,6 +223,9 @@ export default function DatasetStepper({ datasetId, onBack }: { datasetId: strin
           tier={dataset.tier}
           initialDescription={dataset.description}
           initialColumns={dataset.columns}
+          // A Bronze-only dataset is not shareable — hide the promote control (server
+          // fail-closes too). Silver or Gold built ⇒ refined.
+          refined={stages.some((s) => (s.layer === 'silver' || s.layer === 'gold') && s.built)}
           onChanged={load}
         />
       ) : (

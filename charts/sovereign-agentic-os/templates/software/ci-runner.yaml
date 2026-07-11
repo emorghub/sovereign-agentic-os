@@ -148,6 +148,12 @@ spec:
       securityContext:
         seccompProfile:
           type: {{ .Values.global.podSecurity.seccompProfile }}
+        # act_runner runs as the non-root "act" user (UID/GID 1000) under the global
+        # runAsNonRoot baseline. Without fsGroup the runner-data PVC mount (/data) is
+        # root-owned, so writing the `.runner` registration file fails ("permission
+        # denied" -> "registration file not found" crashloop). fsGroup makes /data
+        # group-writable for the runner. Matches the chart's fsGroup:1000 convention.
+        fsGroup: 1000
       containers:
         # Docker-in-Docker — the build daemon (privileged; trusts the Forgejo registry).
         - name: dind
@@ -341,7 +347,12 @@ metadata:
     {{- include "soa.labels" . | nindent 4 }}
     {{- include "soa.selectorLabels" (dict "ctx" . "component" "ci-runner") | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    # post-install ONLY: this one-shot DinD builder-image publish is idempotent
+    # (overwrites the tag) and only needed to seed the image once. Re-running it on
+    # every helm upgrade (a slow DinD build that can crashloop / hang) was FAILING the
+    # release ("Job/ci-builder-publish not ready"). Re-run manually if the builder
+    # image ever needs a rebuild.
+    "helm.sh/hook": post-install
     "helm.sh/hook-weight": "24"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:

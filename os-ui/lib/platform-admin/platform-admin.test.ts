@@ -7,9 +7,9 @@ import assert from 'node:assert/strict';
 import { assertTenantAccess, currentTenantId, getTenant, updateTenant } from './tenant.ts';
 import { assertGuarded, confirmationPhrase, GuardError } from './guard.ts';
 import { compile, type CompileInput } from './policy-compiler.ts';
-import { _reset as resetDomains, createDomain, setLayer, setArchived, listDomains, compilerView, ensureHydrated as ensureDomainsHydrated, hydrateDomains } from './domains.ts';
+import { _reset as resetDomains, createDomain, setLayer, setArchived, listDomains, compilerView, activeDomainIds, ensureHydrated as ensureDomainsHydrated, hydrateDomains } from './domains.ts';
 import { _reset as resetSec, addAllowlist, removeAllowlist, decideRequest, listRequests, listAllowlist } from './security.ts';
-import { _reset as resetModels, registerProviderKey, listProviderKeys, setEnabled, setDefault, setCap, getDefaults } from './models.ts';
+import { _reset as resetModels, registerProviderKey, listProviderKeys, setEnabled, setCap, getDefaults } from './models.ts';
 import { billingView, offlineSpend } from './billing.ts';
 import { _reset as resetBackups, restore, restorePhrase } from './backups.ts';
 import { _resetAudit as resetAudit, listAudit } from './audit.ts';
@@ -48,7 +48,7 @@ test('policy compiler: role + active-user + domain-layer → OPA grants', () => 
       { id: 'amir', role: 'creator', domains: ['sales'] },
       { id: 'ghost', role: 'builder', domains: ['sales'], active: false },
     ],
-    domains: [{ id: 'sales', layers: { ml: true, spark: false } }],
+    domains: [{ id: 'sales', layers: { ml: true } }],
     egressAllowlist: ['Github.com', 'github.com', 'api.example.com'],
   };
   const out = compile(input);
@@ -68,7 +68,7 @@ test('policy compiler: role + active-user + domain-layer → OPA grants', () => 
 test('policy compiler: archived domain drops its grants', () => {
   const out = compile({
     tenant: 't', users: [{ id: 'u', role: 'creator', domains: ['old'] }],
-    domains: [{ id: 'old', archived: true, layers: { ml: true, spark: false } }],
+    domains: [{ id: 'old', archived: true, layers: { ml: true } }],
     egressAllowlist: [],
   });
   assert.equal(out.grants['domain:old'], undefined);
@@ -81,12 +81,22 @@ test('domains: create from template, toggle a layer, archive guards layers', () 
   const d = createDomain({ name: 'Marketing', owner: 'sara', template: 'science' });
   assert.equal(d.id, 'marketing');
   assert.equal(d.layers.ml, true); // science template enables ML
-  setLayer('marketing', 'spark', true);
-  assert.equal(listDomains().find((x) => x.id === 'marketing')?.layers.spark, true);
+  setLayer('marketing', 'ml', false);
+  assert.equal(listDomains().find((x) => x.id === 'marketing')?.layers.ml, false);
   setArchived('marketing', true);
   assert.throws(() => setLayer('marketing', 'ml', false), (e: { status?: number }) => e.status === 409);
   // compiler view reflects archived + layers
   assert.equal(compilerView().find((x) => x.id === 'marketing')?.archived, true);
+});
+
+test('domains: activeDomainIds drops archived, keeps active + unknown scopes', () => {
+  resetDomains();
+  createDomain({ name: 'Test', owner: 'sara' });
+  createDomain({ name: 'Ops', owner: 'sara' });
+  setArchived('test', true);
+  // A member listing [test(archived), ops(active), platform(unknown/synthetic)]:
+  const active = activeDomainIds(['test', 'ops', 'platform']);
+  assert.deepEqual(active, ['ops', 'platform']); // archived 'test' removed; unknown 'platform' kept
 });
 
 test('domains: duplicate create is 409', () => {
@@ -207,14 +217,15 @@ test('models: provider keys hold ONLY a ref + fingerprint — never a raw value'
   assert.equal((pk as Record<string, unknown>).value, undefined);
 });
 
-test('models: cannot disable a default; cannot default a disabled/mismatched model', () => {
+test('models: cannot disable a current role default; caps + defaults projection', () => {
   resetModels();
-  assert.throws(() => setEnabled('ministral-8b', false), (e: { status?: number }) => e.status === 409); // it is the chat default
-  assert.throws(() => setDefault('embedding', 'ministral-8b'), (e: { status?: number }) => e.status === 400);
-  setCap('stackit-llama-70b', 150);
-  setEnabled('stackit-llama-70b', true);
-  setDefault('chat', 'stackit-llama-70b');
-  assert.equal(getDefaults().chat, 'stackit-llama-70b');
+  // sovereign-default is the STANDARD role default out of the box → cannot disable.
+  assert.throws(() => setEnabled('sovereign-default', false), (e: { status?: number }) => e.status === 409);
+  // Per-model cap works on a live alias.
+  setCap('sovereign-premium', 150);
+  // getDefaults projects the ONE role store (unset → baselines).
+  assert.equal(getDefaults().chat, 'sovereign-default');
+  assert.equal(getDefaults().embedding, 'sovereign-embed');
 });
 
 // ------------------------------------------------------------------ billing --

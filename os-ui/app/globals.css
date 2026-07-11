@@ -632,6 +632,9 @@ input[type='text']:focus {
   border-radius: 999px;
   padding: 4px 11px;
 }
+.chip.ok { background: rgba(31, 143, 136, 0.12); border-color: rgba(31, 143, 136, 0.32); color: var(--teal-dim); }
+.join-row { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); }
+.refine-cta { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
 /* ---- Reusable agent chat window ---- */
 .chat {
@@ -945,10 +948,22 @@ tbody tr:hover {
 }
 
 /* ---- Sidebar groups ---- */
-.nav-group + .nav-group {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
+/* Ungrouped entry-points (Home + Cockpit) — no separator above the first */
+.nav-entry + .nav-section {
+  margin-top: 4px;
+  padding-top: 4px;
+}
+
+/* Between sections: a hair-thin line for rhythm, not weight */
+.nav-section + .nav-section {
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Collapsible section wrapper */
+.nav-section {
+  /* Suppress <details> default marker on some browsers */
 }
 
 .nav-heading {
@@ -959,6 +974,46 @@ tbody tr:hover {
   font-weight: 600;
   color: var(--text-faint);
   padding: 10px 11px 5px;
+}
+
+/* Toggle-capable heading (used on <summary> inside <details>) */
+.nav-heading-toggle {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+  border-radius: 5px;
+  transition: color 0.14s;
+}
+
+/* Remove default triangle in WebKit/Blink */
+.nav-heading-toggle::-webkit-details-marker { display: none; }
+.nav-heading-toggle::marker { display: none; }
+
+/* Subtle chevron via ::after */
+.nav-heading-toggle::after {
+  content: '›';
+  margin-left: auto;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-faint);
+  opacity: 0.5;
+  transition: transform 0.16s ease, opacity 0.14s;
+}
+
+details[open] > .nav-heading-toggle::after {
+  transform: rotate(90deg);
+  opacity: 0.7;
+}
+
+.nav-heading-toggle:hover {
+  color: var(--text-muted);
+}
+
+.nav-heading-toggle:hover::after {
+  opacity: 0.8;
 }
 
 /* ---- Stack status strip ---- */
@@ -1433,6 +1488,40 @@ code {
   border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--bg-elevated);
 }
+/* ---- Gold JOIN graph (Data tab) — a calm read-only view of the join ---- */
+.jg-wrap {
+  position: relative;
+  height: clamp(220px, 34vh, 360px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel);
+  margin-top: 10px;
+}
+.jg-wrap.jg-empty { display: flex; align-items: center; justify-content: center; padding: 20px; text-align: center; }
+.jg-wrap .react-flow { background: transparent; }
+.jg-wrap .react-flow__attribution { display: none; }
+.jg-wrap .react-flow__handle { width: 7px; height: 7px; background: var(--panel); border: 1.5px solid var(--gold); }
+.jg-bg { opacity: 0.5; }
+.jg-node {
+  position: relative;
+  min-width: 160px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: 0 1px 4px -2px rgba(0,0,0,0.25);
+}
+.jg-node.is-base { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold-line); }
+.jg-node-head { display: flex; align-items: center; gap: 8px; }
+.jg-node-name { font-weight: 600; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.jg-tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--gold-text); background: var(--gold-soft); padding: 1px 6px; border-radius: 999px; }
+.jg-node-meta { margin-top: 3px; font-size: 11.5px; color: var(--text-muted); }
+.jg-edge-label { display: flex; flex-direction: column; align-items: center; gap: 1px; pointer-events: none; }
+.jg-edge-key { font-size: 11px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; color: var(--text); }
+.jg-edge-type { font-size: 10px; color: var(--text-faint); }
+.jg-legend { pointer-events: none; }
+
 .gc-wrap {
   position: relative;
   height: clamp(420px, 56vh, 620px);
@@ -2635,6 +2724,9 @@ button.card.tile:hover .tile-action { opacity: 1; }
   max-height: 240px; overflow: auto; background: var(--bg-elevated);
   border: 1px solid var(--border); border-radius: var(--radius); padding: 12px;
 }
+/* "Show all" removes the clamp so the full extracted text is revealed, not just
+   scrolled inside the 240px box. */
+.preview-text.expanded { max-height: none; }
 .preview-meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12.5px; }
 .preview-meta dt { color: var(--text-faint); }
 .preview-meta dd { margin: 0; color: var(--text); word-break: break-word; }
@@ -3120,6 +3212,15 @@ button.card.tile:hover .tile-action { opacity: 1; }
   flex: 1;
   min-width: 0;
 }
+/* Flex child of .cm-item-main: must be allowed to shrink below content width
+   (min-width:0) or the label's ellipsis never engages and long artifact names
+   overflow the card. */
+.cm-item-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
 .cm-item-label {
   display: block;
   font-size: 13px;
@@ -3134,6 +3235,9 @@ button.card.tile:hover .tile-action { opacity: 1; }
   font-size: 11.5px;
   color: var(--text-muted);
   margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .cm-dot {
   width: 8px;
@@ -3674,15 +3778,16 @@ button.card.tile:hover .tile-action { opacity: 1; }
   transform: translateY(-3px);
   box-shadow: 0 12px 30px rgba(12, 11, 13, 0.12);
 }
-.launch-art {
+/* Scope these to .launch-card so they don't override the .launch-tile rules above */
+.launch-card .launch-art {
   display: flex;
   justify-content: flex-start;
   margin-bottom: 10px;
 }
-.launch-title { font-family: var(--font-head); font-size: 19px; margin: 0 0 4px; }
+.launch-card .launch-title { font-family: var(--font-head); font-size: 19px; margin: 0 0 4px; }
 .launch-line { margin: 0 0 16px; color: var(--text-muted); font-size: 13.5px; line-height: 1.5; flex: 1; }
-.launch-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.launch-go {
+.launch-card .launch-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.launch-card .launch-go {
   font-weight: 600;
   font-size: 13.5px;
   color: var(--gold-text);
@@ -3690,7 +3795,7 @@ button.card.tile:hover .tile-action { opacity: 1; }
   border-bottom: 1.5px solid transparent;
   transition: border-color 0.15s ease;
 }
-.launch-go:hover { border-color: var(--gold); }
+.launch-card .launch-go:hover { border-color: var(--gold); }
 
 /* ---- tutorials: polish pass (focus-visible + reduced motion) ---- */
 .tut-link:focus-visible,
@@ -4017,6 +4122,62 @@ button.card.tile:hover .tile-action { opacity: 1; }
   .home-cockpit-cta:hover { transform: none; }
 }
 
+/* ---- MCP connect CTA banner (reused on Home + Cockpit) ---- */
+.mcp-cta-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 20px;
+  border: 1px solid var(--gold-line);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(480px 120px at 100% 0%, var(--gold-soft), transparent 70%),
+    var(--panel);
+  margin-bottom: 20px;
+}
+.mcp-cta-banner-text { flex: 1; min-width: 0; }
+.mcp-cta-banner-kicker {
+  font-family: var(--font-head);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--gold-text);
+  margin: 0 0 3px;
+}
+.mcp-cta-banner-line {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0;
+}
+.mcp-cta-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 18px;
+  border: 1px solid var(--gold-line);
+  border-radius: 999px;
+  background: var(--gold-soft);
+  color: var(--gold-text);
+  font-family: var(--font-head);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+.mcp-cta-btn:hover {
+  background: rgba(200, 162, 74, 0.2);
+  border-color: var(--gold);
+}
+.mcp-cta-btn .tut-link-spark { color: var(--teal); font-size: 11px; }
+@media (max-width: 640px) {
+  .mcp-cta-banner { flex-direction: column; align-items: flex-start; }
+}
+
 /* ============================================================ Strategy ====== */
 /* Pillars are the centerpiece — tall, distinct columns that read as real
    "pillars". Brand palette + a single gold accent; generous space; calm. */
@@ -4083,6 +4244,10 @@ button.card.tile:hover .tile-action { opacity: 1; }
   letter-spacing: -0.01em;
   line-height: 1.15;
   text-wrap: balance;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 .strat-pillar-desc {
   margin: 0;
@@ -4638,6 +4803,11 @@ button.card.tile:hover .tile-action { opacity: 1; }
 .sw-app-ver { font-family: var(--font-head); font-size: 11.5px; letter-spacing: 0.4px; color: var(--text-muted); }
 .sw-app-open { margin-left: auto; font-family: var(--font-head); font-size: 12px; font-weight: 600; color: var(--gold-text); }
 [data-theme='dark'] .sw-app-open { color: var(--gold-light); }
+/* An app tile + its lifecycle action row (the OS-wide Archive/Restore · Delete · History). */
+.sw-app-cell { display: flex; flex-direction: column; gap: 6px; }
+.sw-app-cell .sw-app { flex: 1; }
+.sw-app-actions { display: flex; gap: 6px; justify-content: flex-end; opacity: 0.7; transition: opacity 0.14s; }
+.sw-app-cell:hover .sw-app-actions { opacity: 1; }
 
 /* ---- Per-app header + mode switch ---- */
 .sw-app-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
@@ -5078,3 +5248,177 @@ button.card.tile:hover .tile-action { opacity: 1; }
 [data-drag-source='true'] {
   opacity: 0.5;
 }
+
+/* ==== Sovereign OS Assistant — the one overarching, tab-aware assistant ====
+   A global launcher + chat drawer mounted in the app shell (components/
+   OsAssistant.tsx). Styling reuses the OS's dark/gold language; it is NOT a
+   generic floating chat bubble. Scoped under `.osa-` to avoid any collision. */
+.osa-launcher {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 25;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 18px;
+  font-family: var(--font-head);
+  font-size: 12.5px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #f4f0e7;
+  background: linear-gradient(135deg, #14120f 0%, #201b12 100%);
+  border: 1px solid var(--gold-line);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.osa-launcher:hover {
+  transform: translateY(-1px);
+  border-color: var(--gold-light);
+  box-shadow: 0 14px 34px -12px rgba(0, 0, 0, 0.75), 0 0 22px -6px var(--gold-soft);
+}
+.osa-spark {
+  color: var(--gold-light);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.osa-drawer {
+  width: min(520px, 96vw);
+}
+.osa-body {
+  padding: 16px 20px 22px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.osa-body .chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.osa-log {
+  flex: 1;
+  min-height: 0;
+}
+.osa-context {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-muted);
+  letter-spacing: 0.2px;
+}
+.osa-context strong {
+  color: var(--gold-text);
+}
+.osa-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--gold-light);
+  box-shadow: 0 0 0 3px var(--gold-soft);
+  vertical-align: middle;
+}
+
+/* Governed-tool trace under each answer — transparency, not decoration. */
+.osa-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.chip.osa-tool {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+  padding: 2px 8px;
+  border-color: var(--gold-line);
+  color: var(--gold-text);
+  background: var(--gold-soft);
+}
+.chip.osa-tool.blocked {
+  border-color: rgba(190, 60, 60, 0.4);
+  color: #b23b3b;
+  background: rgba(190, 60, 60, 0.08);
+}
+
+/* =====================================================================
+   LIFECYCLE UX — shared archive / delete / restore / version controls
+   (components/lifecycle/*). One control cluster + one danger-styled
+   Delete + one version panel, identical across every artifact tab.
+   Reuses the .pa-confirm popup chrome for the confirm dialog.
+   ===================================================================== */
+
+/* Delete reads as destructive without shouting on a card: a quiet red ghost
+   that deepens on hover. The confirm popup carries the real weight. */
+.btn.ghost.lc-delete {
+  color: var(--danger);
+  border-color: rgba(192, 57, 43, 0.35);
+}
+.btn.ghost.lc-delete:hover {
+  color: #fff;
+  background: var(--danger);
+  border-color: var(--danger);
+}
+[data-theme='dark'] .btn.ghost.lc-delete,
+.drawer-head .btn.ghost.lc-delete {
+  color: #e88b82;
+  border-color: rgba(192, 57, 43, 0.4);
+}
+[data-theme='dark'] .btn.ghost.lc-delete:hover {
+  color: #fff;
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* The version-history popover under the actions cluster — a calm bordered
+   panel, no card-in-card. */
+.lc-history-panel {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.lc-version-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lc-version-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: 'meta action' 'summary action';
+  gap: 2px 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.lc-version-row:last-child { border-bottom: none; }
+.lc-version-meta {
+  grid-area: meta;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lc-version-num {
+  font-family: var(--font-head);
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--gold-text);
+}
+.lc-version-summary {
+  grid-area: summary;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.lc-version-row .btn { grid-area: action; }

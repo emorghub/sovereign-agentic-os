@@ -67,9 +67,33 @@ export type Grant = {
   action: 'read';
 };
 
+/** A conditional filter applied to a measure's aggregation (Cube `filters:`). The
+ *  `sql` is a boolean predicate on the cube, e.g. `{CUBE}.status = 'completed'`. */
+export type MeasureFilter = { sql: string };
+
+/** A moving time window for a measure (Cube `rolling_window:`). `trailing`/`leading`
+ *  are durations like `7 day`, `1 month`, or `unbounded`; `offset` anchors the window
+ *  (`start`|`end`). A cumulative/running total is `{ trailing: 'unbounded' }`. */
+export type RollingWindow = { trailing?: string; leading?: string; offset?: 'start' | 'end' };
+
 /** A metric defined on the GOLD version — the Cube handover. The user only names
- *  the measure; `cube_dbt` scaffolds dimensions from the gold manifest. */
-export type Measure = { name: string; type: string; sql: string };
+ *  the measure; `cube_dbt` scaffolds dimensions from the gold manifest. The four
+ *  optional fields expose the richer Cube measure model (filters / rolling windows /
+ *  display format / drill-down members); they are ABSENT on a plain measure so every
+ *  existing consumer (parse, serialize, scaffoldCubeYaml, sameMeasure) is unchanged. */
+export type Measure = {
+  name: string;
+  type: string;
+  sql: string;
+  /** Conditional filters narrowing what the aggregation counts (Cube `filters:`). */
+  filters?: MeasureFilter[];
+  /** A moving time window — trailing/leading/running total (Cube `rolling_window:`). */
+  rollingWindow?: RollingWindow;
+  /** Display format — `percent`, `currency`, `number`, … (Cube `format:`). */
+  format?: string;
+  /** Drill-down members exposed for exploration (Cube `drill_members:`). */
+  drillMembers?: string[];
+};
 
 /** A documented column (the documentation form). At least one with a non-empty
  *  description is required by the transparency gate before a dataset can promote. */
@@ -88,6 +112,39 @@ export const TRUST_LEVELS: TrustLevel[] = ['bronze', 'silver', 'gold'];
  *  graph renders. `fqn` is the physical table the join read; `datasetId` links back to
  *  the registry entry (a governed asset/product the builder could see). */
 export type DatasetUpstream = { datasetId: string; name: string; fqn: string; joinType: 'inner' | 'left' };
+
+/** The dropdown-driven data-quality rule kinds the DQ editor offers. Each compiles
+ *  to a COUNT-of-violations SQL check run through the governed query path (see
+ *  `lib/data/dq.ts`). `range` uses `min`/`max`; `accepted_values` uses `values`. */
+export type DataCheckRule =
+  | 'not_null'
+  | 'not_blank'
+  | 'unique'
+  | 'accepted_values'
+  | 'range';
+
+export const DATA_CHECK_RULES: DataCheckRule[] = ['not_null', 'not_blank', 'unique', 'accepted_values', 'range'];
+
+/** A data-quality check on the dataset. A STRUCTURED rule (`rule` + `column` + args)
+ *  is EXECUTABLE — compiled to a governed COUNT-of-violations SQL and run AS the owner
+ *  to produce a real pass/fail. A check with no `rule` is a legacy free-text intention
+ *  (kept for back-compat) and is reported as "not run". */
+export type DataCheck = {
+  id: string;
+  name: string;
+  description: string;
+  createdBy: string;
+  createdAt: string;
+  /** The executable rule kind (absent ⇒ a legacy free-text intention). */
+  rule?: DataCheckRule;
+  /** The column the rule applies to (required for every executable rule). */
+  column?: string;
+  /** `accepted_values`: the allowed value set. */
+  values?: string[];
+  /** `range`: inclusive numeric bounds (either may be omitted for a one-sided range). */
+  min?: number;
+  max?: number;
+};
 
 export type Dataset = {
   version: string;
@@ -110,6 +167,8 @@ export type Dataset = {
   imports?: string[];
   /** Additional datasets joined into the Gold version (multi-upstream lineage). */
   upstreams?: DatasetUpstream[];
+  /** Manually-authored data-quality check intentions (not auto-executed). */
+  checks?: DataCheck[];
 };
 
 export class DatasetError extends Error {
@@ -123,15 +182,18 @@ export class DatasetError extends Error {
 
 // ----------------------------------------------------------- hard storage line --
 
-export type Storage = 'duckdb-sandbox' | 'trino-iceberg';
+export type Storage = 'personal-iceberg' | 'trino-iceberg';
 
 /**
  * THE HARD STORAGE LINE (data-architecture-model.md): private datasets live in the
- * per-user DuckDB sandbox; only promoted assets and certified products live in
- * Trino/Iceberg. This single function is the one place that line is drawn.
+ * per-user PERSONAL Iceberg schema (`iceberg.personal_<uid>.*`), read AS the owner
+ * through governed Trino; only promoted assets and certified products live in the
+ * shared domain Trino/Iceberg schema. SINGLE-ENGINE: both are Trino/Iceberg — the tier
+ * decides the schema + owning principal, not the engine. This is the one place that
+ * line is drawn.
  */
 export function storageFor(tier: Tier): Storage {
-  return tier === 'dataset' ? 'duckdb-sandbox' : 'trino-iceberg';
+  return tier === 'dataset' ? 'personal-iceberg' : 'trino-iceberg';
 }
 
 // --------------------------------------------------------- role-gated lifecycle --
@@ -248,7 +310,34 @@ function parseMeasure(raw: unknown, i: number): Measure {
   if (!isRecord(raw) || typeof raw.name !== 'string') {
     throw new DatasetError(`dataset.yaml: measures[${i}] needs a string 'name'`);
   }
-  return { name: raw.name, type: typeof raw.type === 'string' ? raw.type : 'count', sql: typeof raw.sql === 'string' ? raw.sql : '' };
+  const m: Measure = {
+    name: raw.name,
+    type: typeof raw.type === 'string' ? raw.type : 'count',
+    sql: typeof raw.sql === 'string' ? raw.sql : '',
+  };
+  // Cube's richer measure model — accept both camelCase (our TS) and snake_case (Cube YAML).
+  const filtersRaw = (raw.filters ?? (raw as Record<string, unknown>).filters) as unknown;
+  if (Array.isArray(filtersRaw)) {
+    const filters = filtersRaw
+      .map((f) => (isRecord(f) && typeof f.sql === 'string' ? { sql: f.sql } : null))
+      .filter((f): f is MeasureFilter => f !== null);
+    if (filters.length > 0) m.filters = filters;
+  }
+  const rw = (raw.rollingWindow ?? (raw as Record<string, unknown>).rolling_window) as unknown;
+  if (isRecord(rw)) {
+    const win: RollingWindow = {};
+    if (typeof rw.trailing === 'string') win.trailing = rw.trailing;
+    if (typeof rw.leading === 'string') win.leading = rw.leading;
+    if (rw.offset === 'start' || rw.offset === 'end') win.offset = rw.offset;
+    if (win.trailing || win.leading || win.offset) m.rollingWindow = win;
+  }
+  if (typeof raw.format === 'string' && raw.format) m.format = raw.format;
+  const dm = (raw.drillMembers ?? (raw as Record<string, unknown>).drill_members) as unknown;
+  if (Array.isArray(dm)) {
+    const members = dm.map((x) => String(x)).filter(Boolean);
+    if (members.length > 0) m.drillMembers = members;
+  }
+  return m;
 }
 
 function parseColumn(raw: unknown, i: number): ColumnDoc {
@@ -268,6 +357,26 @@ function parseUpstream(raw: unknown, i: number): DatasetUpstream {
     fqn: raw.fqn,
     joinType: raw.joinType === 'left' ? 'left' : 'inner',
   };
+}
+
+function parseCheck(raw: unknown, i: number): DataCheck {
+  if (!isRecord(raw)) throw new DatasetError(`dataset.yaml: checks[${i}] must be a mapping`);
+  const base: DataCheck = {
+    id: typeof raw.id === 'string' ? raw.id : `chk_${i}`,
+    name: typeof raw.name === 'string' ? raw.name : 'Untitled check',
+    description: typeof raw.description === 'string' ? raw.description : '',
+    createdBy: typeof raw.createdBy === 'string' ? raw.createdBy : '',
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
+  };
+  const rule = raw.rule;
+  if (typeof rule === 'string' && (DATA_CHECK_RULES as string[]).includes(rule)) {
+    base.rule = rule as DataCheckRule;
+    if (typeof raw.column === 'string') base.column = raw.column;
+    if (Array.isArray(raw.values)) base.values = raw.values.map((x) => String(x));
+    if (typeof raw.min === 'number') base.min = raw.min;
+    if (typeof raw.max === 'number') base.max = raw.max;
+  }
+  return base;
 }
 
 export function parseDataset(input: string | Record<string, unknown>): Dataset {
@@ -293,6 +402,7 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
   const grantsRaw = Array.isArray(doc.grants) ? doc.grants : [];
   const measuresRaw = Array.isArray(doc.measures) ? doc.measures : [];
   const columnsRaw = Array.isArray(doc.columns) ? doc.columns : [];
+  const checksRaw = Array.isArray(doc.checks) ? doc.checks : [];
 
   let certification: Certification | undefined;
   if (isRecord(doc.certification) && TRUST_LEVELS.includes(doc.certification.level as TrustLevel)) {
@@ -301,6 +411,7 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
   }
   const imports = Array.isArray(doc.imports) ? doc.imports.map((x) => String(x)) : undefined;
   const upstreams = Array.isArray(doc.upstreams) ? doc.upstreams.map(parseUpstream) : undefined;
+  const checks = checksRaw.length > 0 ? checksRaw.map(parseCheck) : undefined;
 
   return {
     version: doc.version !== undefined ? String(doc.version) : '1',
@@ -319,6 +430,7 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
     ...(certification ? { certification } : {}),
     ...(imports ? { imports } : {}),
     ...(upstreams ? { upstreams } : {}),
+    ...(checks ? { checks } : {}),
   };
 }
 
@@ -340,6 +452,7 @@ export function serializeDataset(d: Dataset): string {
   if (d.certification) doc.certification = d.certification;
   if (d.imports && d.imports.length > 0) doc.imports = d.imports;
   if (d.upstreams && d.upstreams.length > 0) doc.upstreams = d.upstreams;
+  if (d.checks && d.checks.length > 0) doc.checks = d.checks;
   return yaml.dump(doc, { lineWidth: 100, noRefs: true });
 }
 

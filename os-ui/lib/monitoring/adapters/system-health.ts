@@ -3,7 +3,6 @@
  */
 import 'server-only';
 import { listComponentsWithStatus } from '@/lib/platform';
-import { MOCK_SYSTEM } from '../mock';
 import type { Health, HealthItem } from '../types';
 
 /**
@@ -28,6 +27,8 @@ function workloadHealth(status: string): Health {
     case 'starting':
     case 'off':
       return 'amber';
+    case 'on-demand':
+      return 'green'; // job-based (e.g. dbt): no standing pod, runs on demand — benign
     case 'unknown':
     case 'disabled':
     case 'n/a':
@@ -44,7 +45,11 @@ export async function collectSystem(): Promise<HealthItem[]> {
     // Only surface workloads we could actually read (status !== unknown/n-a) AND
     // that are not green-by-default noise; attention-first means we keep the few
     // not-running ones plus a single rolled-up "platform services" green.
-    const readable = comps.filter((c) => c.status !== 'unknown' && c.status !== 'n/a');
+    // 'on-demand' (job-based components like dbt) has no standing workload — it is
+    // not a health signal and must not defeat the "unreachable → []" honesty rule.
+    const readable = comps.filter(
+      (c) => c.status !== 'unknown' && c.status !== 'n/a' && c.status !== 'on-demand',
+    );
     if (readable.length > 0) {
       for (const c of readable) {
         const h = workloadHealth(c.status);
@@ -78,14 +83,9 @@ export async function collectSystem(): Promise<HealthItem[]> {
       });
     }
   } catch {
-    /* not in a cluster — fall through to the mock self-heal story */
+    /* not in a cluster — cluster health unavailable */
   }
 
-  // The OOMKilled→auto-restart self-heal narrative + Prometheus/Argo/OpenSearch
-  // are mock on kind (no AGPL Grafana; managed STACKIT Observability is Mode-B).
-  // Always include the OOM self-heal item (it ties the gate together); add the
-  // cluster greens only when we have no live workload reads.
-  const oom = MOCK_SYSTEM.find((m) => m.id === 'sys-4001')!;
-  if (live.length > 0) return [oom, ...live];
-  return [...MOCK_SYSTEM];
+  // Return only live k8s data. Empty means the cluster is unreachable (honest).
+  return live;
 }

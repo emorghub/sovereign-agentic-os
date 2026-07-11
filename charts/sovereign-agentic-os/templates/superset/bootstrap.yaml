@@ -3,7 +3,7 @@
   Superset bootstrap — registers CENTRAL TRINO as a database connection (Trino
   SQLAlchemy dialect) and creates a dataset on analytics.daily_revenue, so a
   domain can build charts on the governed mart THROUGH Trino (OPA row/column
-  enforced). No DuckDB / Postgres-warehouse datasource. Post-install/upgrade hook;
+  enforced). Trino is the only registered datasource. Post-install/upgrade hook;
   idempotent. Uses the query-tool image (requests).
 */}}
 apiVersion: v1
@@ -94,7 +94,14 @@ spec:
               value: "superset-sales"
             - name: TRINO_CATALOG
               value: "iceberg"
-          command: ["python", "/script/bootstrap.py"]
+          # Non-blocking data hook (like dbt-build): a bootstrap error (Superset or
+          # Trino not ready yet, transient API failure) must NOT fail the platform
+          # upgrade — it only means the Superset↔Trino datasource is stale until the
+          # next run. Wrap so the container always exits 0; the WARNING stays in the log.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              python /script/bootstrap.py || echo "WARNING: superset bootstrap reported errors — the Trino datasource/dataset may be missing; NOT failing the platform upgrade (data hook is non-blocking)."
           resources:
             requests: { cpu: 25m, memory: 64Mi }
             limits: { cpu: 250m, memory: 192Mi }

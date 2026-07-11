@@ -226,6 +226,14 @@ export function personalSchema(uid: string): string {
   return 'personal_' + (core || 'user');
 }
 
+/** A domain normalized to a VALID Trino/Iceberg schema identifier — the SAME shape as
+ *  store-fqn.domainSchema, so a hyphenated domain (`agentic-leader-q3-2026`) becomes a
+ *  legal schema (`agentic_leader_q3_2026`) instead of a SYNTAX_ERROR. */
+export function domainSchema(domain: string): string {
+  const core = (domain ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return core || 'domain';
+}
+
 /**
  * The schema a Silver build writes into: the dataset's own domain when the dataset is
  * already governed AND the caller is in that domain (the query-tool re-checks the
@@ -234,7 +242,7 @@ export function personalSchema(uid: string): string {
  * never a literal cross-domain schema.
  */
 export function silverSchema(o: { tier: string; domain: string; uid: string; domains: string[] }): string {
-  if (o.tier !== 'dataset' && Array.isArray(o.domains) && o.domains.includes(o.domain)) return o.domain;
+  if (o.tier !== 'dataset' && Array.isArray(o.domains) && o.domains.includes(o.domain)) return domainSchema(o.domain);
   return personalSchema(o.uid);
 }
 
@@ -266,8 +274,19 @@ export type MeasureOp = (typeof MEASURE_OPS)[number];
 /** A column drawn from one join input: `ref` 0 = the base source, 1..n = joins[ref-1]. */
 export type ColRef = { ref: number; column: string };
 
-/** One equi-key of a join: an earlier table's column = a column on THIS joined table. */
-export type JoinCond = { left: ColRef; right: string };
+/** The reconciliation a mismatched key needs before it will match. `cast` coerces both
+ *  sides to one type (e.g. a numeric id stored as varchar on one side, integer on the
+ *  other); `text` normalizes both sides to `lower(trim(cast(x as varchar)))` so keys
+ *  that differ only by case/whitespace/format line up. Both wrap BOTH sides so the
+ *  equality is symmetric — the guided "adapt keys" step, kept out of the common case. */
+export type KeyAdapt =
+  | { mode: 'cast'; type: CastType }
+  | { mode: 'text' };
+
+/** One equi-key of a join: an earlier table's column = a column on THIS joined table.
+ *  `adapt` (optional) reconciles keys that differ by type or text format — auto-matched
+ *  same-name keys need none; the "adapt keys" step sets it only when needed. */
+export type JoinCond = { left: ColRef; right: string; adapt?: KeyAdapt };
 
 export type JoinInput = { table: string; type: JoinType; on: JoinCond[] };
 
@@ -304,6 +323,19 @@ function qref(c: ColRef, maxRef: number, what: string): string {
     throw new TransformError(`${what} references a table that is not part of this join`);
   }
   return `${tableAlias(c.ref)}.${qcol(c.column)}`;
+}
+
+/** Wrap ONE side of a join key with its reconciliation, if any. `cast` coerces to a
+ *  supported Trino type; `text` normalizes to `lower(trim(cast(x as varchar)))`. The
+ *  same adaptation is applied to both sides so the equality stays symmetric. */
+function adaptKey(expr: string, adapt: KeyAdapt | undefined, what: string): string {
+  if (!adapt) return expr;
+  if (adapt.mode === 'text') return `lower(trim(cast(${expr} as varchar)))`;
+  if (adapt.mode === 'cast') {
+    if (!CAST_TYPES.includes(adapt.type)) throw new TransformError(`${what}: unsupported cast type '${adapt.type}'`);
+    return `cast(${expr} as ${adapt.type})`;
+  }
+  throw new TransformError(`${what}: unknown key adaptation`);
 }
 
 function measureExpr(m: GoldMeasure, maxRef: number): string {
@@ -353,7 +385,8 @@ export function compileGoldJoin(spec: GoldJoinSpec): string {
       // The left side must reference an ALREADY-joined table (base or an earlier join).
       if (!c || !c.left || c.left.ref > i) throw new TransformError(`the join key for ${j.table} must match an earlier table`);
       const left = qref(c.left, i, `join #${i + 1} key`);
-      return `${left} = ${rightAlias}.${qcol(c.right)}`;
+      const right = `${rightAlias}.${qcol(c.right)}`;
+      return `${adaptKey(left, c.adapt, `join #${i + 1} key`)} = ${adaptKey(right, c.adapt, `join #${i + 1} key`)}`;
     });
     joinSql.push(`${j.type} join ${j.table} ${rightAlias} on ${on.join(' and ')}`);
   });
@@ -428,6 +461,48 @@ export function silverPlan(
   return { source, target, schema, sql };
 }
 
+/**
+ * The tier-aware PHYSICAL target of one medallion layer for this caller — the same
+ * schema resolution {@link silverPlan}/{@link goldJoinPlan} use, exposed so every
+ * build path (guided transform, pass-through, authored commit) probes/writes the
+ * SAME table name. Personal datasets live in `personal_<uid>`, governed ones in
+ * their (sanitized) domain schema.
+ */
+export function layerTarget(
+  dataset: { name: string; domain: string; tier: string },
+  identity: { uid: string; domains: string[] },
+  layer: 'bronze' | 'silver' | 'gold',
+): string {
+  const schema = silverSchema({ tier: dataset.tier, domain: dataset.domain, uid: identity.uid, domains: identity.domains });
+  return `iceberg.${schema}.${layer}_${slug(dataset.name)}`;
+}
+
+export type PassThroughPlan = { source: string; target: string; schema: string; sql: string };
+
+/**
+ * Compile the PASS-THROUGH materialization for Silver/Gold: carrying the prior layer
+ * forward is a PHYSICAL copy (`CREATE OR REPLACE TABLE <layer> AS SELECT * FROM
+ * <prior>`), never a registry-only flag — a "built" version must have a queryable
+ * table behind it (the honesty contract). Same guard-shaped single statement + caller
+ * schema discipline as {@link silverPlan}; server-authoritative.
+ */
+export function passThroughPlan(
+  dataset: { name: string; domain: string; tier: string },
+  identity: { uid: string; domains: string[] },
+  layer: 'silver' | 'gold',
+): PassThroughPlan {
+  const schema = silverSchema({ tier: dataset.tier, domain: dataset.domain, uid: identity.uid, domains: identity.domains });
+  const s = slug(dataset.name);
+  const prior = layer === 'silver' ? 'bronze' : 'silver';
+  const source = `iceberg.${schema}.${prior}_${s}`;
+  const target = `iceberg.${schema}.${layer}_${s}`;
+  assertFqn(source, 'pass-through source');
+  assertFqn(target, 'pass-through target');
+  const sql = `create or replace table ${target} as select * from ${source}`;
+  assertNoSqlMeta(sql, 'compiled SQL'); // defense in depth: never emit a guard-failing statement
+  return { source, target, schema, sql };
+}
+
 // ================================================================ Publish =======
 
 export type PublishPlan = {
@@ -467,10 +542,10 @@ export function publishPlan(d: {
   const s = slug(d.name);
   const sourceSchema = personalSchema(d.owner);
   const source = `iceberg.${sourceSchema}.${layer}_${s}`;
-  const target = `iceberg.${d.domain}.${layer}_${s}`;
+  const target = `iceberg.${domainSchema(d.domain)}.${layer}_${s}`;
   assertFqn(source, 'publish source');
   assertFqn(target, 'publish target');
-  const schemaSql = `create schema if not exists iceberg.${d.domain}`;
+  const schemaSql = `create schema if not exists iceberg.${domainSchema(d.domain)}`;
   const sql = `create or replace table ${target} as select * from ${source}`;
   assertNoSqlMeta(sql, 'compiled SQL'); // defense in depth: never emit a guard-failing statement
   return { source, sourceSchema, target, layer, schemaSql, sql };

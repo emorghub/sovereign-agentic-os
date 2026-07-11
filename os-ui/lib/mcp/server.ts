@@ -10,11 +10,19 @@ import { authorize, queryRun, trace } from '@/lib/governed';
 import { servePredict } from '@/lib/science/serve';
 import type { ChurnFeatures } from '@/lib/science';
 import { retrieveKnowledge } from '@/lib/knowledge/retrieve';
-import { listSystems } from '@/lib/agents/store';
+import { listSystems, ensureHydrated as agentsHydrated } from '@/lib/agents/store';
+import { ensureHydrated as datasetsHydrated } from '@/lib/data/store';
+import { ensureHydrated as filesHydrated } from '@/lib/files/store';
+import { ensureHydrated as knowledgeHydrated } from '@/lib/knowledge/store';
+import { ensureHydrated as betsHydrated } from '@/lib/bigbets/store';
 import { principalFor } from '@/lib/governance/roles';
+import { readPrincipalFor } from '@/lib/data/store-fqn';
 import { ALL_WRITE_TOOLS } from '@/lib/mcp/write-tools';
 import { DISCOVERY_TOOLS } from '@/lib/mcp/discovery-tools';
 import { governanceTools } from '@/lib/mcp/governance-tools';
+import { strategyReadTools } from '@/lib/mcp/strategy-tools';
+import { marketplaceReadTools } from '@/lib/mcp/marketplace-tools';
+import { MONITORING_TOOLS } from '@/lib/mcp/monitoring-tools';
 import {
   RESOURCES,
   RESOURCE_TEMPLATES,
@@ -65,11 +73,12 @@ export type JsonSchema = {
  * the ONE registry below (`/api/mcp/<tab>`) — a scoped lens, never a second
  * governance path. The overarching `/api/mcp` endpoint still serves them all.
  */
-// `governance` + `marketplace` are the first mcp-v2 cross-cutting surfaces (P0):
-// the approval queue + ladder + lineage + marketplace import. Later waves add
-// `strategy`/`monitoring`/`platform` here WHEN their tools ship (every declared
-// tab must carry ≥1 tool — the tabs.test invariant).
-export const MCP_TABS = ['software', 'data', 'science', 'knowledge', 'agents', 'files', 'metrics', 'dashboards', 'bigbets', 'connections', 'governance', 'marketplace'] as const;
+// `governance` + `marketplace` were the first mcp-v2 cross-cutting surfaces (P0):
+// the approval queue + ladder + lineage + marketplace import. The mcp-v2 surfaces
+// wave adds `strategy` (pillars/value) + `monitoring` (runs/traces, read-only) as
+// full tabs alongside the marketplace/governance READ additions. `platform` lands
+// WHEN its tools ship (every declared tab must carry ≥1 tool — the tabs.test invariant).
+export const MCP_TABS = ['software', 'data', 'science', 'knowledge', 'agents', 'files', 'metrics', 'dashboards', 'bigbets', 'connections', 'governance', 'marketplace', 'strategy', 'monitoring'] as const;
 export type McpTab = (typeof MCP_TABS)[number];
 export function isMcpTab(x: string): x is McpTab {
   return (MCP_TABS as readonly string[]).includes(x);
@@ -208,12 +217,24 @@ const crossTools: McpTool[] = [
     call: async (user, args) => {
       const sql = str(args.sql).trim();
       if (!sql) fail('query_data needs a `sql` string', 400);
-      const principal = user.domains[0] ?? user.id;
-      const authz = await authorize(principal, 'query');
-      if (!authz.allowed) fail(`OPA denied ${principal} → query (${authz.policy})`, 403);
-      const result = await queryRun(sql, principal);
-      const traced = await trace({ principal, tool: 'query', input: sql, output: result.rows });
-      return { principal, authorized: true, policy: authz.policy, traced, ...result };
+      // TWO distinct principals here:
+      //  - TOOL-ACCESS authz (`agentic.authz`) is granted by DOMAIN/agent-key —
+      //    `data.grants[<domain>]` holds `query` — so the access gate runs on the
+      //    caller's domain principal (a uid has no grant of its own).
+      //  - The TRINO SESSION USER (data-governance principal for row/column + the
+      //    personal-lane `is_owned_personal` hard-deny) MUST be the OWNER uid when the
+      //    SQL touches the caller's OWN personal lane (`personal_<uid>.*`) — even the
+      //    owner is DENIED reading their own personal table under the domain principal.
+      //    Every other read stays on the domain principal so cross-domain governance is
+      //    intact. Derived server-side from session + SQL text (same rule preview/profile
+      //    use), never from the request body; only the caller's OWN lane flips it.
+      const domainPrincipal = user.domains[0] ?? user.id;
+      const trinoPrincipal = readPrincipalFor(sql, { id: user.id, domains: user.domains });
+      const authz = await authorize(domainPrincipal, 'query');
+      if (!authz.allowed) fail(`OPA denied ${domainPrincipal} → query (${authz.policy})`, 403);
+      const result = await queryRun(sql, trinoPrincipal);
+      const traced = await trace({ principal: trinoPrincipal, tool: 'query', input: sql, output: result.rows });
+      return { principal: trinoPrincipal, authorized: true, policy: authz.policy, traced, ...result };
     },
   },
   {
@@ -358,6 +379,9 @@ export const ALL_MCP_TOOLS: McpTool[] = [
   ...ALL_WRITE_TOOLS,
   ...DISCOVERY_TOOLS,
   ...governanceTools,
+  ...strategyReadTools,
+  ...marketplaceReadTools,
+  ...MONITORING_TOOLS,
   ...discoveryTools,
 ];
 
@@ -511,6 +535,14 @@ export async function handleRpc(
 
   // Notifications (e.g. notifications/initialized) get no response body.
   if (typeof method === 'string' && method.startsWith('notifications/')) return null;
+
+  // Hydrate the durable-mirrored stores BEFORE any read/write — the same seam the
+  // HTTP routes get via their server boundaries (requirePrincipal → ensureHydrated).
+  // Without this, a fresh pod's first MCP call would see an EMPTY registry even
+  // though the mirror has the data. Idempotent + graceful (offline → in-memory).
+  if (method === 'tools/call' || method === 'resources/read') {
+    await Promise.all([datasetsHydrated(), filesHydrated(), agentsHydrated(), knowledgeHydrated(), betsHydrated()]);
+  }
 
   switch (method) {
     case 'initialize':

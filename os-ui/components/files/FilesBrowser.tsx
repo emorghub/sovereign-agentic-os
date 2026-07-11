@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useUser } from '@/lib/useUser';
 import { anchorAttr, ANCHORS } from '@/lib/tutorials/anchors';
+import { SCOPE_GROUPS, groupByScope, scopeCounts, type ScopeKey } from '@/lib/scopes';
 import FilePreview from './FilePreview';
 
 type Summary = {
@@ -13,12 +14,13 @@ type Summary = {
   tier: 'dataset' | 'asset' | 'product'; kind: 'doc' | 'image' | 'video' | 'audio' | 'table' | 'archive' | 'other';
   folder: string; tags: string[]; sensitivity: string; freshness: string | null;
   version: string; status: 'processing' | 'searchable' | 'stored'; bytes: number;
+  /** Soft-archived (retained, reversible). Absent/false = live. */
+  archived?: boolean;
 };
 type Facets = { folders: { path: string; count: number }[]; tags: { tag: string; count: number }[] };
 type Groups = { mine: Summary[]; domain: Summary[]; marketplace: Summary[]; facets: Facets };
 type Hit = { id: string; name: string; folder: string; tags: string[]; kind: Summary['kind']; score: number; snippet: string };
 
-type Scope = 'mine' | 'domain' | 'marketplace';
 const KIND_LABEL: Record<Summary['kind'], string> = { doc: 'DOC', image: 'IMG', audio: 'AUD', video: 'VID', table: 'TAB', archive: 'ZIP', other: 'FILE' };
 
 function bytesLabel(n: number): string {
@@ -51,18 +53,15 @@ function FileCard({ f, on, onOpen }: { f: Summary; on: boolean; onOpen: () => vo
 
 export default function FilesBrowser() {
   const { user } = useUser();
-  const domainLabel = user?.domains[0] ? `${user.domains[0]} domain` : 'your domain';
-  const scopeLabel: Record<Scope, string> = {
-    mine: 'Personal files',
-    domain: `Shared in ${domainLabel}`,
-    marketplace: 'Marketplace',
-  };
-  const [scope, setScope] = useState<Scope>('mine');
+  const [scope, setScope] = useState<ScopeKey>('mine');
   const [groups, setGroups] = useState<Groups | null>(null);
   const [err, setErr] = useState('');
   const [folder, setFolder] = useState<string | null>(null);
   const [tag, setTag] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // ?archived=1 additionally returns soft-archived files (their own section), so an
+  // archived file stays openable → its preview exposes Restore + Delete (OS-wide rule).
+  const [showArchived, setShowArchived] = useState(false);
 
   // search
   const [query, setQuery] = useState('');
@@ -75,12 +74,12 @@ export default function FilesBrowser() {
   const refresh = useCallback(async () => {
     setErr('');
     try {
-      const res = await fetch('/api/files', { cache: 'no-store' });
+      const res = await fetch(`/api/files${showArchived ? '?archived=1' : ''}`, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok) { setErr(data.error ?? 'Failed to load files'); return; }
       setGroups(data);
     } catch (e) { setErr((e as Error).message); }
-  }, []);
+  }, [showArchived]);
   useEffect(() => { refresh(); }, [refresh]);
 
   // Debounced search across the user's indexed files.
@@ -100,13 +99,14 @@ export default function FilesBrowser() {
   const upload = useCallback(async (files: FileList | File[]) => {
     setErr('');
     for (const file of Array.from(files)) {
-      const isText = /^text\/|json|csv|markdown/.test(file.type) || /\.(txt|md|csv|json|tsv)$/i.test(file.name);
-      const text = isText ? await file.text() : undefined;
+      // Send the ORIGINAL bytes (multipart) so the file is stored and downloadable
+      // byte-for-byte — the server extracts text from text-like files for search.
+      const form = new FormData();
+      form.append('file', file);
+      form.append('name', file.name);
+      form.append('folder', folder ?? '/');
       try {
-        const res = await fetch('/api/files', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ name: file.name, text, bytes: file.size, folder: folder ?? '/' }),
-        });
+        const res = await fetch('/api/files', { method: 'POST', body: form });
         if (!res.ok) { setErr((await res.json()).error ?? 'Upload failed'); }
       } catch (e) { setErr((e as Error).message); }
     }
@@ -118,20 +118,25 @@ export default function FilesBrowser() {
     if (e.dataTransfer.files?.length) upload(e.dataTransfer.files);
   }, [upload]);
 
-  const list = groups ? groups[scope] : [];
+  const uid = user?.id ?? '';
+  const scoped = groups ? groupByScope(groups, uid) : null;
+  const counts = groups ? scopeCounts(groups, uid) : null;
+  const list = scoped ? scoped[scope] : [];
   const facets = groups?.facets ?? { folders: [], tags: [] };
-  const filtered = list.filter((f) => (!folder || f.folder === folder) && (!tag || f.tags.includes(tag)));
+  const matched = list.filter((f) => (!folder || f.folder === folder) && (!tag || f.tags.includes(tag)));
+  const filtered = matched.filter((f) => !f.archived);
+  const archivedFiles = matched.filter((f) => f.archived);
   const searching = query.trim().length > 0;
 
   return (
     <>
       <div className="files-bar">
         <div className="files-scope">
-          {(['mine', 'domain', 'marketplace'] as Scope[]).map((s) => (
-            <button key={s} className={scope === s ? 'on' : ''}
-              {...(s === 'mine' ? anchorAttr(ANCHORS.files.sandbox) : {})}
-              onClick={() => { setScope(s); setFolder(null); setTag(null); setSelected(null); }}>
-              {scopeLabel[s]}{groups ? ` (${groups[s].length})` : ''}
+          {SCOPE_GROUPS.map((g) => (
+            <button key={g.key} className={scope === g.key ? 'on' : ''}
+              {...(g.key === 'mine' ? anchorAttr(ANCHORS.files.sandbox) : {})}
+              onClick={() => { setScope(g.key); setFolder(null); setTag(null); setSelected(null); }}>
+              {g.label('Files')}{counts ? ` (${counts[g.key]})` : ''}
             </button>
           ))}
         </div>
@@ -141,6 +146,14 @@ export default function FilesBrowser() {
             onChange={(e) => setQuery(e.target.value)} aria-label="Search files" />
           {searching ? <button className="preview-close" onClick={() => setQuery('')} aria-label="Clear">×</button> : null}
         </div>
+        <button
+          className="btn ghost"
+          style={{ opacity: showArchived ? 1 : 0.7 }}
+          onClick={() => { setShowArchived((v) => !v); setSelected(null); }}
+          title="Archived files are hidden by default"
+        >
+          {showArchived ? 'Hide archived' : 'Show archived'}
+        </button>
         <button className="btn" onClick={() => fileRef.current?.click()} {...anchorAttr(ANCHORS.files.upload)}>Upload</button>
         <input ref={fileRef} type="file" multiple hidden
           onChange={(e) => { if (e.target.files?.length) upload(e.target.files); e.target.value = ''; }} />
@@ -203,9 +216,9 @@ export default function FilesBrowser() {
                 <div className="stub-page"><span className="spin" /> Loading your drive…</div>
               ) : filtered.length === 0 ? (
                 <div className="stub-page">
-                  {scope === 'mine'
+                  {scope === 'mine' || scope === 'all'
                     ? 'No files here yet. Drag a file in, or use Upload — any type works.'
-                    : `Nothing ${scope === 'domain' ? 'shared in your domain' : 'in the marketplace'} yet.`}
+                    : `Nothing ${scope === 'shared' ? 'shared in your domain' : 'in the marketplace'} yet.`}
                 </div>
               ) : (
                 <div className="file-grid">
@@ -214,6 +227,20 @@ export default function FilesBrowser() {
                   ))}
                 </div>
               )}
+
+              {/* Archived — openable cards; the preview exposes Restore + Delete. */}
+              {showArchived && archivedFiles.length > 0 ? (
+                <>
+                  <div className="section-title" style={{ marginTop: 24 }}>
+                    Archived<span className="count-pill">{archivedFiles.length}</span>
+                  </div>
+                  <div className="file-grid">
+                    {archivedFiles.map((f) => (
+                      <FileCard key={f.id} f={f} on={selected === f.id} onOpen={() => setSelected(f.id)} />
+                    ))}
+                  </div>
+                </>
+              ) : null}
             </>
           )}
         </section>

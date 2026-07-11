@@ -31,6 +31,7 @@ import type {
 import { generateAndCompile } from '@/lib/software/auto-mcp';
 import { parseAppManifest, renderAppYaml, defaultOpenApi, detectSurface } from '@/lib/software/metadata';
 import { osMirror } from '@/lib/os-mirror';
+import { type ArtifactVersion, versionLog } from '@/lib/versioning';
 
 /**
  * App registry — the home of record for every application built in the Software
@@ -80,6 +81,13 @@ export type App = {
   mode: 'live' | 'offline';
   repo: { fullName: string; htmlUrl: string; seeded: string[] };
   subdomain: string;
+  /**
+   * Explicit prebuilt container image the in-cluster runner should serve (Phase 2
+   * runner). Optional: when unset the runner uses the CI-published registry
+   * convention `<registry>/<slug>:latest` (or the SOFTWARE_RUNNER_IMAGE default).
+   * We NEVER build images in-cluster — this is a reference to an already-built one.
+   */
+  runImage?: string;
   pipeline: Record<PipelineStage, StageStatus>;
   /** Markdown captured from the build chat + the template. */
   designDecisions: string;
@@ -143,6 +151,51 @@ type Template = {
   /** Files seeded into the per-app Forgejo repo (beyond auto_init's README). */
   files: (name: string, slug: string) => { path: string; content: string }[];
 };
+
+/**
+ * The REAL build->push CI workflow seeded into every app repo. Runs on the
+ * in-cluster Forgejo Actions runner inside the ci-builder job container, builds
+ * the image via the in-pod DinD daemon (which trusts forgejo-http:3000 as an
+ * insecure registry) and pushes `:latest` — the exact tag the OS app runner
+ * pulls (lib/software/runner.ts imageRef). Modelled on the proven demo-app seed
+ * workflow (charts/.../software/forgejo-seed.yaml). Login uses the REGISTRY_PASS
+ * Actions secret set by scaffoldRepo(). No external actions (fully sovereign).
+ */
+function ciWorkflow(slug: string): string {
+  // harborRegistry is "<host>/<owner>" (e.g. forgejo-http:3000/gitea_admin);
+  // docker login needs the bare host, so split it out.
+  const registry = config.harborRegistry.split('/')[0];
+  const owner = config.forgejoRepoOwner;
+  return (
+    'on:\n' +
+    '  push:\n' +
+    '    branches: [main]\n' +
+    'jobs:\n' +
+    '  build-and-push:\n' +
+    '    runs-on: docker\n' +
+    '    env:\n' +
+    '      DOCKER_HOST: tcp://localhost:2375\n' +
+    '      REGISTRY: ' + registry + '\n' +
+    '      OWNER: ' + owner + '\n' +
+    '      REPO: ' + slug + '\n' +
+    '    steps:\n' +
+    '      - name: Checkout (manual — sovereign, no github.com)\n' +
+    '        env: { REG_PASS: "${{ secrets.REGISTRY_PASS }}" }\n' +
+    '        run: |\n' +
+    '          set -eu\n' +
+    '          git clone --depth 1 "http://${OWNER}:${REG_PASS}@${REGISTRY}/${OWNER}/${REPO}.git" src\n' +
+    '      - name: Build & push image\n' +
+    '        env: { REG_PASS: "${{ secrets.REGISTRY_PASS }}" }\n' +
+    '        run: |\n' +
+    '          set -eu\n' +
+    '          TAG="$(echo "${GITHUB_SHA}" | cut -c1-12)"\n' +
+    '          IMAGE="${REGISTRY}/${OWNER}/${REPO}"\n' +
+    '          echo "${REG_PASS}" | docker login "${REGISTRY}" -u "${OWNER}" --password-stdin\n' +
+    '          docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" ./src\n' +
+    '          docker push "${IMAGE}:${TAG}"\n' +
+    '          docker push "${IMAGE}:latest"\n'
+  );
+}
 
 function nextjsSupabaseTemplate(): Template {
   return {
@@ -228,9 +281,7 @@ function nextjsSupabaseTemplate(): Template {
       },
       {
         path: '.forgejo/workflows/ci.yml',
-        content:
-          'on:\n  push:\n    branches: [main]\njobs:\n  build:\n    runs-on: docker\n    steps:\n' +
-          '      - run: echo "build & push image for ' + slug + ' (kaniko/buildah -> Harbor)"\n',
+        content: ciWorkflow(slug),
       },
       {
         path: 'manifests/app.yaml',
@@ -336,8 +387,21 @@ function withStatus(err: Error, status: number): Error {
 // lib/os-mirror.ts. A missing index is CREATED, never mistaken for a dead mirror.
 const mirror = osMirror({ index: config.appsIndex });
 
+// Durable, per-artifact version history. Snapshots the user-editable doc content
+// (designDecisions, dataDescriptions, docs) before each meaningful mutation.
+const versions = versionLog('app');
+
 function writeThrough(a: App): void {
   mirror.writeThrough(a.id, a);
+}
+
+/** The versioned slice of an app — the user-editable documentation fields. */
+function snapshotState(a: App): { designDecisions: string; dataDescriptions: string; docs: string } {
+  return { designDecisions: a.designDecisions, dataDescriptions: a.dataDescriptions, docs: a.docs };
+}
+
+function isOwnerOrAdminApp(a: App, user: CurrentUser): boolean {
+  return a.owner === user.id || (user.role === 'admin' && user.domains.includes(a.domain));
 }
 
 async function getCache(): Promise<Map<string, App>> {
@@ -355,6 +419,11 @@ async function getCache(): Promise<Map<string, App>> {
   }
   s.cache = map;
   return map;
+}
+
+/** Ensure the app registry and its version history are both hydrated. Used by the versions route. */
+export async function ensureHydrated(): Promise<void> {
+  await Promise.all([getCache(), versions.ensureHydrated()]);
 }
 
 // ------------------------------------------------------------------- Forgejo --
@@ -422,6 +491,12 @@ async function scaffoldRepo(
     // Forgejo unreachable -> offline shell.
     return { mode: 'offline', fullName, htmlUrl, seeded: [] };
   }
+  // The CI workflow logs in to the registry with the REGISTRY_PASS Actions
+  // secret; set it before seeding the workflow so the first push can build.
+  // (Admin creds — the same local-dev convenience the demo-app seed uses.)
+  await forgejoApi('PUT', `/repos/${owner}/${slug}/actions/secrets/REGISTRY_PASS`, {
+    data: config.forgejoPassword,
+  });
   const seeded: string[] = [];
   for (const f of tpl.files(name, slug)) {
     const r = await forgejoWrite(`/repos/${owner}/${slug}/contents/${f.path}`, {
@@ -614,6 +689,28 @@ export async function saveAppFile(
     decision: 'allow',
   });
   return { path: clean, sha: String(d?.content?.sha ?? ''), commitUrl: d?.commit?.html_url ?? null };
+}
+
+/**
+ * PHYSICALLY delete the app's per-app Forgejo repo (the counterpart of
+ * `scaffoldRepo`). Called on app DELETE only — archive keeps the repo so unarchive
+ * can re-provision. Best-effort + HONEST: a 404 (already gone / never created) is a
+ * benign success; an unreachable Forgejo (`status:0`) or a rejected delete is
+ * reported so the delete never silently claims the repo is gone. Idempotent.
+ */
+export async function deleteAppRepo(
+  app: App,
+): Promise<{ ok: boolean; live: boolean; action: 'deleted' | 'noop'; detail: string }> {
+  const { owner, repo } = repoCoords(app);
+  const res = await forgejoApi('DELETE', `/repos/${owner}/${repo}`);
+  if (res.status === 0) {
+    return { ok: false, live: false, action: 'noop', detail: 'Forgejo unreachable — repo not deleted (orphan flagged).' };
+  }
+  if (res.status === 404) return { ok: true, live: true, action: 'noop', detail: 'No repo to delete.' };
+  if (res.status === 204 || res.status === 200) {
+    return { ok: true, live: true, action: 'deleted', detail: `Deleted Forgejo repo ${owner}/${repo}.` };
+  }
+  return { ok: false, live: true, action: 'noop', detail: `Forgejo rejected the repo delete (HTTP ${res.status}).` };
 }
 
 // ----------------------------------------------------------------- MCP wiring --
@@ -817,6 +914,12 @@ export async function updateAppDocs(
   const isOwner = a.owner === user.id;
   const isDomainAdmin = user.role === 'admin' && user.domains.includes(a.domain);
   if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to edit this app'), 403);
+  // Snapshot prior state before any mutation; skip version churn on no-op edits.
+  const changed =
+    (patch.designDecisions !== undefined && patch.designDecisions !== a.designDecisions) ||
+    (patch.dataDescriptions !== undefined && patch.dataDescriptions !== a.dataDescriptions) ||
+    (patch.docs !== undefined && patch.docs !== a.docs);
+  if (changed) versions.record(a.id, user.id, snapshotState(a), 'edit docs');
   if (patch.designDecisions !== undefined) a.designDecisions = patch.designDecisions;
   if (patch.dataDescriptions !== undefined) a.dataDescriptions = patch.dataDescriptions;
   if (patch.docs !== undefined) a.docs = patch.docs;
@@ -883,6 +986,41 @@ export async function promoteApp(appId: string, user: CurrentUser): Promise<App>
   return a;
 }
 
+// --------------------------------------------------------- Version history -----
+
+/** Version history for an app, newest first (view-scoped). */
+export async function listAppVersions(appId: string, user: CurrentUser): Promise<ArtifactVersion[]> {
+  await getAppForUser(appId, user); // view gate — throws 404 if not visible
+  return versions.list(appId);
+}
+
+/**
+ * Restore a prior version of an app's doc content. Restore is auditable +
+ * reversible: the current state is snapshotted as a new version first, then
+ * the chosen version is applied. Edit-scoped (owner or Admin only).
+ */
+export async function restoreAppVersion(appId: string, user: CurrentUser, version: number): Promise<App> {
+  const map = await getCache();
+  const a = map.get(appId);
+  if (!a || !visibleToUser(a, user)) throw withStatus(new Error('App not found'), 404);
+  if (!isOwnerOrAdminApp(a, user)) throw withStatus(new Error('Not permitted to edit this app'), 403);
+  const snap = versions.get(appId, version);
+  if (!snap) throw withStatus(new Error(`Version ${version} not found`), 404);
+  const restored = snap.state as { designDecisions?: string; dataDescriptions?: string; docs?: string };
+  if (typeof restored.designDecisions !== 'string') {
+    throw withStatus(new Error(`Version ${version} has no restorable content`), 422);
+  }
+  // Snapshot the live state first so the restore can itself be undone.
+  versions.record(appId, user.id, snapshotState(a), `restore of v${version}`);
+  if (restored.designDecisions !== undefined) a.designDecisions = restored.designDecisions;
+  if (restored.dataDescriptions !== undefined) a.dataDescriptions = restored.dataDescriptions;
+  if (restored.docs !== undefined) a.docs = restored.docs;
+  a.updatedAt = now();
+  map.set(a.id, a);
+  writeThrough(a);
+  return a;
+}
+
 // ------------------------------------------------------- Server accessors -----
 //
 // The governed software modules (review / lifecycle / server / platform-mcp)
@@ -909,6 +1047,7 @@ export async function removeAppInternal(appId: string): Promise<void> {
   const map = await getCache();
   map.delete(appId);
   mirror.deleteThrough(appId);
+  versions.purge(appId);
 }
 
 /** Persist a mutated app back to the cache + the durable mirror. */
@@ -935,7 +1074,8 @@ export function __resetAppsCache(): void {
   const s = appCacheState();
   s.cache = null;
   mirror.__reset();
+  versions.__reset();
 }
 
 export { withStatus };
-export type { Artifact };
+export type { Artifact, ArtifactVersion };

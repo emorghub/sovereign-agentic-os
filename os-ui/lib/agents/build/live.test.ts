@@ -35,7 +35,7 @@ grants:
     - { id: crm_write, capability: Write-approval }
 agents:
   - { id: supervisor, role: r, agent_md: "# Supervisor", memory_md: "# Mem", members: [worker], tools: [retrieve] }
-  - { id: worker, role: w, agent_md: "# Worker", memory_md: "", tools: [write_file], model: ministral-3 }
+  - { id: worker, role: w, agent_md: "# Worker", memory_md: "", tools: [write_file], model: sovereign-default }
 edges:
   - { from: supervisor, to: worker, type: supervise }
 `;
@@ -55,6 +55,16 @@ function fakeForgejo(): ForgejoClient & { files: Map<string, { content: string; 
       const rec = { content, sha: sha(content) };
       files.set(path, rec);
       return { sha: rec.sha };
+    },
+    async deleteRepo() {
+      files.clear();
+      return { deleted: true };
+    },
+    async listCommits() {
+      return [];
+    },
+    async getCommitFiles() {
+      return {};
     },
   };
 }
@@ -92,7 +102,7 @@ function fakeLitellm(): LiteLlmClient & { keys: Map<string, unknown> } {
       return { key: `sk-${input.alias}` };
     },
     async models() {
-      return ['ministral-3', 'stackit-qwen3-vl-reasoning', 'stackit-qwen3-vl', 'sovereign-mock'];
+      return ['sovereign-default', 'stackit-qwen3-vl-reasoning', 'stackit-qwen3-vl', 'sovereign-mock'];
     },
   };
 }
@@ -199,6 +209,11 @@ test('opa grants the system principal + holds the write tool for approval', asyn
   await orchestrateBuild({ yaml: YAML, systemId: 'sys_live', adapters: makeLiveAdapters(d), probe: 'p' });
   const g = d.opa.grants.get('os-sys_live')!;
   assert.ok(g.has('retrieve'), 'granted tool present');
+  // Raw legacy grants ALSO resolve into their sanctioned MCP registry names, so a
+  // Build authorizes the same vocabulary the Run path resolves to (raw ∪ resolved).
+  assert.ok(g.has('search_knowledge'), 'legacy retrieve grant resolved into its MCP name');
+  assert.ok(g.has('upload_file'), 'legacy write_file grant resolved into its MCP name');
+  assert.equal((await d.opa.decision('os-sys_live', 'search_knowledge')).effect, 'allow');
   assert.ok(g.has('connection_crm'), 'enabled connection present');
   assert.ok(g.has('connection_crm_write'), 'write connection granted');
   assert.ok(d.opa.approval.has('connection_crm_write'), 'write connection held for approval');
@@ -212,10 +227,10 @@ test('litellm registers a scoped key (alias os-<id>) with budget caps + routed m
   await orchestrateBuild({ yaml: YAML, systemId: 'sys_live', adapters: makeLiveAdapters(d), probe: 'p' });
   const info = (await d.litellm.keyInfo('os-sys_live')) as { models: string[]; maxBudget: number };
   assert.ok(info, 'key registered under the system alias');
-  assert.ok(info.models.includes('ministral-3'), 'light tier model allowed');
+  assert.ok(info.models.includes('sovereign-default'), 'light/standard tier model allowed');
   assert.ok(info.models.some((m) => /sovereign-reasoning/i.test(m)), 'reasoning tier model allowed');
   const litellm = (await orchestrateBuild({ yaml: YAML, systemId: 'sys_live', adapters: makeLiveAdapters(d), probe: 'p' })).rows.find((r) => r.tool === 'litellm')!;
-  assert.match(litellm.detail.toLowerCase(), /ministral/);
+  assert.match(litellm.detail.toLowerCase(), /sovereign-default/);
   assert.match(litellm.detail.toLowerCase(), /sovereign-reasoning/);
 });
 

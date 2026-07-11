@@ -47,6 +47,15 @@ export const config = {
   // Shared bearer the runtime presents to the os-ui governed-tool endpoint (the
   // ONLY way the runtime reaches OPA/Langfuse — it has neither itself). Server-only.
   agentRuntimeToken: env('AGENT_RUNTIME_TOKEN', 'dev-only-insecure-agent-runtime-token'),
+  // Agent SCHEDULE CronJobs (Agents tab). Saving a `cron` schedule provisions a
+  // batch/v1 CronJob in the platform namespace that curls the scheduled-run
+  // receiver below with the shared runtime bearer. The bearer is read at run time
+  // from a Secret (never baked into the CronJob spec) — its name/key are
+  // env-configurable so this tracks whatever Secret mounts AGENT_RUNTIME_TOKEN.
+  scheduledRunUrl: base(env('SCHEDULED_RUN_URL', 'http://os-ui:3000/api/agents/scheduled-run')),
+  scheduleCronImage: env('SCHEDULE_CRON_IMAGE', 'curlimages/curl:8.11.1'),
+  agentRuntimeTokenSecret: env('AGENT_RUNTIME_TOKEN_SECRET', 'os-ui'),
+  agentRuntimeTokenSecretKey: env('AGENT_RUNTIME_TOKEN_SECRET_KEY', 'agent-runtime-token'),
 
   // ml-agent (LangGraph Science driver): GET {ML_AGENT_URL}/health, /models;
   // POST /run. Off by default (opt-in Science component); probed gracefully.
@@ -71,21 +80,32 @@ export const config = {
   s3Region: env('S3_REGION', 'us-east-1'),
   s3PathStyle: env('S3_PATH_STYLE', 'true').toLowerCase() !== 'false',
   uploadsBucket: env('UPLOADS_BUCKET', 'lakehouse'),
+  // The governed Files-tab object store. Uploaded originals live under the store's
+  // prefix invariant `s3://files/<owner|domain>/…` (lib/files/asset-schema.ts →
+  // objectPrefixFor); this bucket name is the `files` in that scheme.
+  filesBucket: env('FILES_BUCKET', 'files'),
   awsAccessKeyId: env('AWS_ACCESS_KEY_ID', ''),
   awsSecretAccessKey: env('AWS_SECRET_ACCESS_KEY', ''),
   // M1 upload cap (documented). Streams a single buffered PUT; ~100 MB keeps the
   // os-ui pod memory bounded. Larger loads are an M2 connector (dlt source) job.
   uploadMaxBytes: Number(env('UPLOAD_MAX_BYTES', String(100 * 1024 * 1024))) || 100 * 1024 * 1024,
 
-  // sandbox-duckdb (personal/sandbox lane): ephemeral DuckDB scoped to the user's
-  // private prefix ONLY (uploads + Trino-authorized extracts) — never governed
-  // marts. POST {SANDBOX_DUCKDB_URL}/query {"sql": "..."}.
-  sandboxDuckdbUrl: base(env('SANDBOX_DUCKDB_URL', 'http://sandbox-duckdb:8000')),
+  // (Removed) sandbox-duckdb personal-query engine — the second engine. The personal
+  // lane now reads through the SAME governed Trino path (owner-principal); there is
+  // no separate query engine.
 
   // Langfuse: GET {LANGFUSE_URL}/api/public/traces  (HTTP basic auth)
   langfuseUrl: base(env('LANGFUSE_URL', 'http://agentic-os-langfuse-web:3000')),
   langfusePublicKey: env('LANGFUSE_PUBLIC_KEY', 'pk-lf-localdev0000public'),
   langfuseSecretKey: env('LANGFUSE_SECRET_KEY', 'sk-lf-localdev0000secret'),
+  // Langfuse SSO service account (server-only). Langfuse authenticates with
+  // NextAuth — no trusted-header remote-user mode — so the /tools/langfuse proxy
+  // signs in server-side with THIS account and injects the resulting session
+  // cookie (lib/tool-sso-langfuse.ts). The password NEVER reaches the browser.
+  // Defaults to the local headless-init user; on STACKIT point these at a
+  // dedicated read-only (VIEWER) Langfuse account via the os-ui Secret.
+  langfuseSsoEmail: env('LANGFUSE_SSO_EMAIL', 'alex@datamasterclass.com'),
+  langfuseSsoPassword: env('LANGFUSE_SSO_PASSWORD', 'langfuse-local-dev-admin'),
 
   // OpenSearch (Knowledge / Search): GET/POST {OPENSEARCH_URL}/knowledge/_search
   // Security plugin is disabled locally (no auth); on STACKIT enable security+TLS.
@@ -120,9 +140,10 @@ export const config = {
   // when the service is unreachable (kind), so the golden path runs offline. ----
   filesIndex: env('FILES_INDEX', 'files'),
   // The SHARED embedding model fronted by LiteLLM (kind: sovereign-embed@384;
-  // STACKIT: bge-m3@1024 via TEI-through-LiteLLM). NEVER hardcode the dim — the
-  // helm template wires FILES_EMBED_DIM from `retrieval.knnDimension` (the single
-  // source), so changing the model + dim reindexes consistently.
+  // STACKIT: Qwen3-VL-Embedding-8B@4096 via STACKIT-managed inference). NEVER
+  // hardcode the dim — the helm template wires FILES_EMBED_DIM from
+  // `retrieval.knnDimension` (the single source), so changing the model + dim
+  // reindexes consistently.
   filesEmbedModel: env('FILES_EMBED_MODEL', 'sovereign-embed'),
   filesEmbedDim: Number(env('FILES_EMBED_DIM', '384')),
   // Ingest-by-type services (Phase 3). Docling (docs), a transcriber (audio/video),
@@ -177,6 +198,20 @@ export const config = {
   harborEnabled: env('HARBOR_ENABLED', '') === 'true',
   harborRegistry: env('HARBOR_REGISTRY', 'forgejo-http:3000/gitea_admin'),
 
+  // Software golden path — Phase 2 in-cluster app RUNNER (lib/software/runner.ts).
+  // A go-live provisions a real Deployment+Service+Ingress for the built app into
+  // a dedicated runner namespace, on the app's per-app host (App.subdomain). The
+  // image is the app's CI-published registry artifact by default; set
+  // SOFTWARE_RUNNER_IMAGE to a known-good prebuilt image (e.g. traefik/whoami) to
+  // serve every app from a teaching placeholder until its own image is published.
+  // Ingress class + TLS issuer MATCH the chart's tool ingress (ingress.className /
+  // ingress.tlsIssuer) so per-app hosts get a cert-manager cert exactly like the
+  // consoles. When the k8s API is unreachable the runner degrades honestly (no URL).
+  softwareRunnerNamespace: env('SOFTWARE_RUNNER_NAMESPACE', 'agentic-apps'),
+  softwareRunnerImage: env('SOFTWARE_RUNNER_IMAGE', ''),
+  appsIngressClass: env('OS_APPS_INGRESS_CLASS', 'nginx'),
+  appsTlsIssuer: env('OS_APPS_TLS_ISSUER', 'letsencrypt-prod'),
+
   // Hermes autonomous runtime (Layer 1, opt-in). GATED OFF by default — the chart
   // sets HERMES_ENABLED=true only when `hermes.enabled` is on (never in base/kind).
   // When off the Agent tab still SHOWS the runtime option (documented) but the
@@ -198,6 +233,17 @@ export const config = {
   // fall back to the mock chat model so the loop still runs on a laptop.
   litellmReasoningModel: env('LITELLM_REASONING_MODEL', env('LITELLM_CHAT_MODEL', 'sovereign-reasoning')),
   litellmExecModel: env('LITELLM_EXEC_MODEL', env('LITELLM_CHAT_MODEL', 'sovereign-default')),
+  // Ask-the-OS assistant: max PLAN→ACT tool-call rounds per turn. Raised from the
+  // original 8 so multi-step builds (ingest → silver → gold → metric → publish) can
+  // complete in one conversation. Tunable via env without a rebuild.
+  assistantMaxSteps: Number(env('ASSISTANT_MAX_STEPS', '')) || 20,
+  // LLM Gateway tab — the read-only, tenant-total usage/spend panel
+  // (app/api/gateway/usage). The budget envelope is surfaced for the "budget
+  // used" bar; it mirrors the chart's litellmAgentKey.maxBudget / budgetDuration
+  // (USD cap + reset window). Read-only; no key or per-user datum reaches the
+  // browser — the master key stays server-side in the usage route.
+  litellmBudgetUsd: Number(env('LITELLM_BUDGET_USD', '5')) || 0,
+  litellmBudgetWindow: env('LITELLM_BUDGET_WINDOW', 'weekly'),
 
   // OPA (Policy): POST {OPA_URL}/v1/data/agentic/authz/allow and
   // GET {OPA_URL}/v1/data/grants for the principal -> tools grant map.
@@ -277,6 +323,12 @@ export const config = {
   // catalog SKIPS OpenMetadata entirely and reports it honestly, rather than
   // firing a doomed 401 and silently degrading. See app/api/catalog/route.ts.
   openmetadataJwt: env('OPENMETADATA_JWT', ''),
+  // The OpenMetadata SERVICE name the Trino/Iceberg lakehouse is ingested under
+  // (OM entity FQNs are `<service>.<catalog>.<schema>.<table>`). Used ONLY to build
+  // browser deep links from a governed mart (`iceberg.<schema>.<table>`) to its OM
+  // entity page — see lib/data/openmetadata.ts omEntityUrl. Must match the OM
+  // ingestion pipeline's service name; defaults to `trino`.
+  openmetadataService: env('OPENMETADATA_SERVICE', 'trino'),
 
   // ---- Layer-4 (Science / ML) ENABLEMENT. Off by default; an Admin enables
   // Science per domain (`ml.enabled=true`) + sets GPU quotas. When OFF, the

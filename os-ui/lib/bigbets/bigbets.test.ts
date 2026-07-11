@@ -15,21 +15,44 @@ import {
   __resetBets,
   addComponent,
   advanceComponent,
+  archiveBet,
   auditLog,
   canViewComponentDetail,
   createBet,
+  deleteBet,
   getBet,
+  listBetVersions,
   listBets,
   removeComponent,
+  restoreBetVersion,
   setOverride,
+  unarchiveBet,
+  updateBet,
 } from './store.ts';
-import { proposePlan, approvePlan } from './planner.ts';
+import { proposePlan, approvePlan, type PlanCompleter } from './planner.ts';
 import { deriveBet } from './status.ts';
 import { rollup } from './roadmap.ts';
 import { buildComposition } from './composition.ts';
 import { realizedValue, distribute } from './value.ts';
 import { __resetSources, __resetStrategy, __seedStrategy, resolveArtifact, sourceFor, isReady } from './sources.ts';
-import { type Actor, type Principal } from './model.ts';
+import { type Actor, type BigBet, type Principal } from './model.ts';
+
+/**
+ * A deterministic assistant completer standing in for the ONE governed LLM: it
+ * returns the worked "reduce churn" breakdown as the planner's JSON contract, so
+ * these gate tests exercise the real proposePlan → parse → scaffold path offline.
+ */
+const churnCompleter: PlanCompleter = async () =>
+  JSON.stringify({
+    template: 'reduce-churn',
+    steps: [
+      { tab: 'data', title: 'Churn data product', dependsOn: [], offsetDays: 14, rationale: 'A governed churn feature mart the model trains on.' },
+      { tab: 'ml', title: 'Churn risk model', dependsOn: [0], offsetDays: 35, rationale: 'Predicts churn probability; depends on the data product.' },
+      { tab: 'dashboard', title: 'Churn Risk dashboard', dependsOn: [1], offsetDays: 49, rationale: 'Surfaces at-risk accounts; builds on the model.' },
+      { tab: 'agent', title: 'Sales retention agent', dependsOn: [1], offsetDays: 56, rationale: 'Reaches out to at-risk accounts; builds on the model.' },
+    ],
+  });
+const churnPlan = () => proposePlan('Reduce churn', { complete: churnCompleter });
 
 const sara: Actor = { id: 'sara', domains: ['sales'], role: 'builder', kind: 'human' };
 const amir: Principal = { id: 'amir', domains: ['marketing'], role: 'creator' }; // non-member, other domain
@@ -69,7 +92,7 @@ function newChurnBet() {
 test('gate: planner proposes + scaffolds a churn breakdown, all tagged + planned', async () => {
   reset();
   const bet = newChurnBet();
-  const plan = proposePlan('Reduce churn');
+  const plan = await churnPlan();
   assert.equal(plan.template, 'reduce-churn');
   assert.deepEqual(plan.steps.map((s) => s.tab), ['data', 'ml', 'dashboard', 'agent']);
 
@@ -93,7 +116,7 @@ test('gate: planner proposes + scaffolds a churn breakdown, all tagged + planned
 test('gate: certify the data product → status auto-flips; model blocked until then', async () => {
   reset();
   const bet = newChurnBet();
-  await approvePlan(bet.id, sara, proposePlan('Reduce churn'), { mode: 'autonomous', kickoff: '2026-07-01' });
+  await approvePlan(bet.id, sara, await churnPlan(), { mode: 'autonomous', kickoff: '2026-07-01' });
   let b = getBet(bet.id, sara);
   const data = b.components.find((c) => c.tab === 'data')!;
   const model = b.components.find((c) => c.tab === 'ml')!;
@@ -111,7 +134,7 @@ test('gate: certify the data product → status auto-flips; model blocked until 
 test('gate: the planner CANNOT promote the model; a Builder can', async () => {
   reset();
   const bet = newChurnBet();
-  const res = await approvePlan(bet.id, sara, proposePlan('Reduce churn'), { mode: 'autonomous' });
+  const res = await approvePlan(bet.id, sara, await churnPlan(), { mode: 'autonomous' });
   const model = getBet(bet.id, sara).components.find((c) => c.tab === 'ml')!;
 
   // A planner actor is rejected for the ready (production) transition.
@@ -206,10 +229,118 @@ test('scoping: list only returns bets the user may view', () => {
   assert.ok(listBets(arya).some((b) => b.id === bet.id), 'admin sees all');
 });
 
+test('audit: detail is a Record object (not a string) — JSON.stringify is safe for UI rendering', () => {
+  reset();
+  const bet = newChurnBet();
+  const logs = auditLog(bet.id);
+  assert.ok(logs.length > 0, 'createBet writes at least one audit event');
+  const withDetail = logs.filter((e) => e.detail !== undefined);
+  assert.ok(withDetail.length > 0, 'bet.create event carries a detail object');
+  for (const e of withDetail) {
+    // detail must be a plain object — rendering it raw as a React child would crash
+    // ("Objects are not valid as a React child"). The fix: JSON.stringify before render.
+    assert.strictEqual(typeof e.detail, 'object', 'detail is an object, not a string');
+    assert.doesNotThrow(() => JSON.stringify(e.detail), 'safe to serialize for rendering');
+  }
+});
+
+test('picker: sourceFor list returns scaffolded artifacts; canView filter is domain-scoped', () => {
+  reset();
+  const bet = newChurnBet();
+  const ref = addComponent(bet.id, sara, { tab: 'data', scaffold: { title: 'Churn data' }, plannedReady: '2026-07-15' }).ref;
+  const art = resolveArtifact(ref.artifactId)!;
+  assert.equal(art.visibility, 'personal', 'freshly scaffolded artifact is personal (draft)');
+
+  // sourceFor list surfaces the artifact (the API endpoint reads this list then applies the canView filter).
+  const list = sourceFor('data').list();
+  assert.ok(list.some((a) => a.id === art.id), 'scaffolded artifact appears in sourceFor list');
+
+  // The API-level canView predicate (replicated here):
+  const canSee = (domains: string[], role: string) =>
+    role === 'admin' || art.visibility !== 'personal' || domains.includes(art.domain);
+
+  assert.ok(canSee(sara.domains, sara.role), 'same-domain builder sees their own personal artifact');
+  assert.ok(!canSee(amir.domains, amir.role), 'other-domain non-admin cannot see a personal artifact');
+  assert.ok(canSee(arya.domains, arya.role), 'admin sees all');
+
+  // Attaching by resolved id re-resolves through tag(), confirming server-side id authority.
+  const linked = sourceFor('data').tag(art.id, bet.id);
+  assert.ok(linked, 'tag() returns the artifact');
+  assert.ok(linked!.bigBetIds.includes(bet.id), 'bet id is recorded on the artifact after link');
+});
+
+test('updateBet: editing core fields persists and is audited', () => {
+  reset();
+  const bet = newChurnBet();
+  const updated = updateBet(bet.id, sara, {
+    name: 'Reduce enterprise churn',
+    solution: 'Churn propensity ML model',
+    targetValue: 500_000,
+    goLive: '2026-10-01',
+    ownerDeclaredValue: 420_000,
+  });
+  assert.equal(updated.name, 'Reduce enterprise churn');
+  assert.equal(updated.solution, 'Churn propensity ML model');
+  assert.equal(updated.targetValue, 500_000);
+  assert.equal(updated.ownerDeclaredValue, 420_000);
+  const log = auditLog(bet.id);
+  assert.ok(log.some(e => e.action === 'bet.update'), 'update is audited');
+});
+
+test('gate: a non-owner cannot edit the bet (updateBet → 403)', () => {
+  reset();
+  const bet = newChurnBet(); // sara owns
+  assert.throws(() => updateBet(bet.id, amir, { name: 'hijack' }), /Not permitted to edit/);
+});
+
+test('gate: a creator cannot advance a component to a ready verb (human-ships needs Builder+)', () => {
+  reset();
+  const bet = newChurnBet();
+  const data = addComponent(bet.id, sara, { tab: 'data', scaffold: { title: 'Churn data' }, plannedReady: '2026-07-15' }).ref;
+  const cara: Actor = { id: 'cara', domains: ['sales'], role: 'creator', kind: 'human' };
+  assert.throws(() => advanceComponent(bet.id, cara, data.id, 'certified'), /Builder or Admin/);
+});
+
+test('gate: a cross-domain bet cannot be edited by a non-admin', () => {
+  reset();
+  const bet = createBet(arya, {
+    name: 'Cross-domain bet',
+    problem: { who: 'Ops', need: 'shared outcome', obstacle: 'silos', impact: 'slow' },
+    pillarId: 'pillar_retention', metricId: 'metric_nrr', targetValue: 100_000, goLive: '2026-09-01',
+    crossDomain: true,
+  });
+  assert.throws(() => updateBet(bet.id, sara, { name: 'nope' }), /Not permitted to edit/);
+});
+
+test('gate: PATCH whitelist blocks mass-assignment + creator self-activation', () => {
+  reset();
+  const cara: Principal = { id: 'cara', domains: ['sales'], role: 'creator' };
+  const draft = createBet(cara, {
+    name: 'Cara draft',
+    problem: { who: 'Cara', need: 'x', obstacle: 'y', impact: 'z' },
+    pillarId: 'pillar_retention', metricId: 'metric_nrr', targetValue: 1, goLive: '2026-09-01',
+  });
+  assert.equal(draft.status, 'draft');
+  // A Creator may draft + archive their own bet, but NEVER self-activate it.
+  assert.throws(() => updateBet(draft.id, cara, { status: 'active' }), /Builder or Admin/);
+  // Escalation keys are silently stripped; only the whitelisted `name` lands.
+  const evil: Partial<BigBet> = { owner: 'mallory', domain: 'finance', crossDomain: true, id: 'evil', name: 'renamed' };
+  updateBet(draft.id, cara, evil);
+  const after = getBet(draft.id, cara);
+  assert.equal(after.owner, 'cara', 'owner is immutable via PATCH');
+  assert.equal(after.domain, 'sales', 'domain is immutable via PATCH');
+  assert.equal(after.crossDomain, false, 'crossDomain is immutable via PATCH');
+  assert.equal(after.id, draft.id, 'id is immutable via PATCH');
+  assert.equal(after.status, 'draft', 'still a draft — no self-activation slipped through');
+  assert.equal(after.name, 'renamed', 'the whitelisted field applied');
+  // A non-finite target is rejected outright (no €NaN for viewers).
+  assert.throws(() => updateBet(draft.id, cara, { targetValue: Number('abc') }), /finite number/);
+});
+
 test('value end-to-end: realized distributes to components and reconciles to the bet', async () => {
   reset();
   const bet = newChurnBet();
-  await approvePlan(bet.id, sara, proposePlan('Reduce churn'), { mode: 'autonomous' });
+  await approvePlan(bet.id, sara, await churnPlan(), { mode: 'autonomous' });
   const b = getBet(bet.id, sara);
   const realized = realizedValue(b, 'sara').realized; // uplift default = 360k
   const refs = b.components.map((c) => ({ refId: c.id, artifactId: c.artifactId }));
@@ -218,4 +349,104 @@ test('value end-to-end: realized distributes to components and reconciles to the
   const dist = distribute(realized, refs, weights, 'manual', comp);
   assert.ok(dist.reconciles, `shares sum back to the bet (residual ${dist.residual})`);
   assert.equal(dist.betValue, 360_000);
+});
+
+// ------------------------------------------------ archive / delete / versions --
+
+test('versions: updateBet snapshots prior state; list is newest-first; no-op skips', () => {
+  reset();
+  const bet = newChurnBet();
+  assert.equal(listBetVersions(bet.id, sara).length, 0, 'no history before first edit');
+
+  // First edit → one prior version captured.
+  updateBet(bet.id, sara, { name: 'Reduce enterprise churn' });
+  assert.equal(listBetVersions(bet.id, sara).length, 1);
+
+  // Second edit → two prior versions.
+  updateBet(bet.id, sara, { targetValue: 500_000 });
+  const history = listBetVersions(bet.id, sara);
+  assert.equal(history.length, 2);
+  assert.equal(history[0].version, 2, 'newest first');
+  assert.equal(history[0].author, 'sara');
+  assert.equal(history[1].version, 1, 'oldest last');
+
+  // A no-op PATCH (empty clean object) does NOT churn a new version.
+  updateBet(bet.id, sara, {});
+  assert.equal(listBetVersions(bet.id, sara).length, 2, 'no-op edit skips version');
+});
+
+test('versions: restore reverts content and is itself snapshotted', () => {
+  reset();
+  const bet = newChurnBet();
+  const originalName = bet.name;
+
+  // Two edits capture v1 (original) and v2 (after first edit).
+  updateBet(bet.id, sara, { name: 'Edit one' });
+  updateBet(bet.id, sara, { name: 'Edit two' });
+  assert.equal(listBetVersions(bet.id, sara).length, 2);
+
+  // Restore v1 → name reverts to original AND the pre-restore state is
+  // snapshotted as v3, so restore is auditable + reversible.
+  restoreBetVersion(bet.id, sara, 1);
+  assert.equal(getBet(bet.id, sara).name, originalName, 'content reverted to v1');
+  const after = listBetVersions(bet.id, sara);
+  assert.equal(after.length, 3);
+  assert.equal(after[0].version, 3);
+  assert.match(after[0].summary, /restore of v1/);
+
+  // Restoring an unknown version 404s.
+  assert.throws(() => restoreBetVersion(bet.id, sara, 99), /not found/i);
+});
+
+test('archive: hides from default list; unarchive restores it', () => {
+  reset();
+  const bet = newChurnBet();
+  assert.ok(listBets(sara).some((b) => b.id === bet.id), 'visible before archive');
+
+  archiveBet(bet.id, sara);
+  assert.equal(getBet(bet.id, sara).status, 'archived');
+  // Hidden from the default working list.
+  assert.ok(!listBets(sara).some((b) => b.id === bet.id), 'hidden after archive');
+  // Visible with includeArchived opt-in.
+  assert.ok(listBets(sara, { includeArchived: true }).some((b) => b.id === bet.id));
+
+  unarchiveBet(bet.id, sara);
+  assert.equal(getBet(bet.id, sara).status, 'active');
+  assert.ok(listBets(sara).some((b) => b.id === bet.id), 'visible again after unarchive');
+});
+
+test('delete: removes bet permanently and purges version history', () => {
+  reset();
+  const bet = newChurnBet();
+  updateBet(bet.id, sara, { name: 'Going away' });
+  assert.equal(listBetVersions(bet.id, sara).length, 1, 'history exists before delete');
+
+  deleteBet(bet.id, sara);
+  assert.throws(() => getBet(bet.id, sara), /not found/i);
+  assert.ok(!listBets(sara, { includeArchived: true }).some((b) => b.id === bet.id));
+
+  // A fresh bet reusing no state has no leaked history (purge worked).
+  const fresh = newChurnBet();
+  assert.equal(listBetVersions(fresh.id, sara).length, 0, 'no leaked history after purge');
+});
+
+test('authz: archive / delete / restore obey edit-scope (non-editor is rejected 403)', () => {
+  reset();
+  // Sara owns the bet; amir is a different domain, non-member.
+  const bet = newChurnBet();
+  updateBet(bet.id, sara, { name: 'Governed bet' });
+
+  // amir (other domain) may NOT edit → archive/delete/restore rejected.
+  assert.throws(() => archiveBet(bet.id, amir), /not permitted to edit/i);
+  assert.throws(() => deleteBet(bet.id, amir), /not permitted to edit/i);
+  assert.throws(() => restoreBetVersion(bet.id, amir, 1), /not permitted to edit/i);
+
+  // arya is an admin → may archive (admin overrides all domain checks).
+  assert.doesNotThrow(() => archiveBet(bet.id, arya));
+
+  // Viewer (amir) may still LIST versions (view-scoped) — but amir can't view
+  // this bet at all (different domain, non-member), so that 403s too.
+  // A same-domain viewer (if the bet were Shared) would pass list but not restore.
+  // Here we just assert amir cannot view at all.
+  assert.throws(() => listBetVersions(bet.id, amir), /not permitted to view/i);
 });

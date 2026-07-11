@@ -3,6 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/config';
+import { importDashboardBundle, deleteDashboardByName } from '@/lib/superset/client';
 import { type DashboardLiveDeps, type EmbedClient, type SupersetClient } from './live.ts';
 import { type GuestTokenRequest } from '../embed.ts';
 
@@ -32,13 +33,10 @@ async function withTimeout(url: string, init: RequestInit, ms = 5000): Promise<R
 export function realSuperset(): SupersetClient {
   const base = config.supersetInternalUrl;
   return {
-    async importBundle(name, _bundle) {
-      const res = await withTimeout(`${base}/api/v1/dashboard/import/`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ dashboard_title: name }),
-      });
-      if (!res || !res.ok) throw new Error(`Superset import failed (${res?.status ?? 'unreachable'})`);
+    async importBundle(_name, bundle) {
+      // Build the real import_assets ZIP from the manifest and POST it multipart; a
+      // non-2xx (incl. auth) throws → ✗ → the honest offline-mock fallback.
+      await importDashboardBundle(base, bundle);
     },
     async dashboardExists(name) {
       const q = encodeURIComponent(JSON.stringify({ filters: [{ col: 'dashboard_title', opr: 'ct', value: name }] }));
@@ -46,6 +44,10 @@ export function realSuperset(): SupersetClient {
       if (!res || !res.ok) return false;
       const d = (await res.json().catch(() => ({}))) as { count?: number };
       return (d.count ?? 0) > 0;
+    },
+    async deleteDashboard(name) {
+      // Real DELETE /api/v1/dashboard/{id} (id resolved by title); throws → ✗.
+      return deleteDashboardByName(base, name);
     },
     async createReport(spec) {
       const res = await withTimeout(`${base}/api/v1/report/`, {

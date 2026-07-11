@@ -6,6 +6,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useUser } from '@/lib/useUser';
 import { roleAtLeast } from '@/lib/session';
+import { DATASET_SCOPES, tilesForScope, scopeCounts, type DatasetScope } from '@/lib/data/dataset-scopes';
+import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
+import LifecycleActions from '@/components/lifecycle/LifecycleActions';
+import DomainTag from '@/components/DomainTag';
+import type { Visibility } from '@/lib/lifecycle';
 
 /** Mirrors lib/data/store `DatasetSummary`. */
 type Tile = {
@@ -19,8 +24,14 @@ type Tile = {
   quality: 'unknown' | 'passing' | 'failing';
   dots: { bronze: boolean; silver: boolean; gold: boolean };
   storage: string;
+  /** Soft-archived (retained, reversible). */
+  archived?: boolean;
 };
 type Groups = { mine: Tile[]; domain: Tile[]; marketplace: Tile[] };
+
+/** Tile tier → the OS-wide lifecycle visibility (drives the delete gate). */
+const lcVis = (tier: Tile['tier']): Visibility =>
+  tier === 'asset' ? 'shared' : tier === 'product' ? 'certified' : 'personal';
 
 function freshLabel(iso: string | null): string {
   if (!iso) return 'not built yet';
@@ -47,26 +58,34 @@ function Dots({ dots }: { dots: Tile['dots'] }) {
   );
 }
 
-function TileCard({ t, onOpen, onImport }: { t: Tile; onOpen: (id: string) => void; onImport?: (id: string) => void }) {
-  // A role="button" DIV (not a <button>) so the optional Import control can be a real
-  // nested <button> without invalid button-in-button nesting.
+function TileCard({ t, onOpen, onImport, canManage, onChanged, showDomain }: { t: Tile; onOpen: (id: string) => void; onImport?: (id: string) => void; canManage?: boolean; onChanged: () => void; showDomain?: boolean }) {
+  // A role="button" DIV (not a <button>) so the optional Import / lifecycle controls
+  // can be real nested <button>s without invalid button-in-button nesting. Every
+  // nested control stops propagation so it never also opens the card.
+  const stop = (fn: () => void) => (e: React.MouseEvent) => { e.stopPropagation(); fn(); };
   return (
     <div
       role="button"
       tabIndex={0}
       className="card tile"
-      onDoubleClick={() => onOpen(t.id)}
+      onClick={() => onOpen(t.id)}
       onKeyDown={(e) => { if (e.key === 'Enter') onOpen(t.id); }}
-      title="Double-click to open"
+      title="Click to open"
     >
       <div className="tile-top">
         <span className="tile-name">{t.name}</span>
-        <span className={`badge ${TIER_BADGE[t.tier]}`}>{TIER_WORD[t.tier]}</span>
+        <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+          {t.archived ? <span className="badge muted">archived</span> : null}
+          <span className={`badge ${TIER_BADGE[t.tier]}`}>{TIER_WORD[t.tier]}</span>
+        </div>
       </div>
       <div className="tile-meta">
         <span className="muted">{t.owner}</span>
         <span className="dot-sep">·</span>
         <span className="muted">{freshLabel(t.freshness)}</span>
+        {/* Source-domain provenance — shown in Shared/Marketplace where two datasets
+            from different domains can share a name. Renders nothing without a domain. */}
+        {showDomain ? <DomainTag domain={t.domain} style={{ marginLeft: 4 }} /> : null}
       </div>
       <div className="tile-foot">
         <span className={`quality-badge q-${t.quality}`}>
@@ -76,23 +95,31 @@ function TileCard({ t, onOpen, onImport }: { t: Tile; onOpen: (id: string) => vo
       </div>
       {onImport ? (
         <button type="button" className="tile-action btn ghost sm"
-          onClick={(e) => { e.stopPropagation(); onImport(t.id); }}>
+          onClick={stop(() => onImport(t.id))}>
           Import
         </button>
       ) : null}
+      {canManage ? (
+        <div
+          className="row"
+          style={{ gap: 6, marginTop: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <LifecycleActions
+            id={t.id}
+            name={t.name}
+            kind="dataset"
+            visibility={lcVis(t.tier)}
+            archived={!!t.archived}
+            api={`/api/data/datasets/${t.id}`}
+            onChanged={onChanged}
+            compact
+            showVersions={false}
+            surface="tile"
+          />
+        </div>
+      ) : null}
     </div>
-  );
-}
-
-function Group({ title, tiles, onOpen, onImport }: { title: string; tiles: Tile[]; onOpen: (id: string) => void; onImport?: (id: string) => void }) {
-  if (tiles.length === 0) return null;
-  return (
-    <>
-      <div className="section-title">{title}<span className="count-pill">{tiles.length}</span></div>
-      <div className="tile-grid">
-        {tiles.map((t) => <TileCard key={t.id} t={t} onOpen={onOpen} onImport={onImport} />)}
-      </div>
-    </>
   );
 }
 
@@ -106,16 +133,21 @@ export default function DatasetTiles({ onOpen }: { onOpen: (id: string) => void 
   const [err, setErr] = useState('');
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  // Scope switcher — the Files-tab mental model: All · My · Shared · Marketplace.
+  const [scope, setScope] = useState<DatasetScope>('all');
+  // Archive/lifecycle UI (mirrors the Knowledge tab's reference pattern).
+  const [showArchived, setShowArchived] = useState(false);
 
   const refresh = useCallback(async () => {
     setErr('');
     try {
-      const res = await fetch('/api/data/datasets', { cache: 'no-store' });
+      // ?archived=1 additionally returns soft-archived datasets (their own section).
+      const res = await fetch(`/api/data/datasets${showArchived ? '?archived=1' : ''}`, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok) { setErr(data.error ?? 'Failed to load datasets'); return; }
       setGroups(data);
     } catch (e) { setErr((e as Error).message); }
-  }, []);
+  }, [showArchived]);
   useEffect(() => { refresh(); }, [refresh]);
 
   const create = useCallback(async () => {
@@ -130,7 +162,7 @@ export default function DatasetTiles({ onOpen }: { onOpen: (id: string) => void 
       const data = await res.json();
       if (!res.ok) { setErr(data.error ?? 'Could not create'); return; }
       setNewName(''); setCreating(false);
-      onOpen(data.dataset.id); // straight into the new dataset's stepper
+      onOpen(data.dataset.id); // navigates to the new dataset's detail view
     } catch (e) { setErr((e as Error).message); }
   }, [newName, onOpen]);
 
@@ -144,42 +176,114 @@ export default function DatasetTiles({ onOpen }: { onOpen: (id: string) => void 
     } catch (e) { setErr((e as Error).message); }
   }, [refresh]);
 
-  const empty = groups && groups.mine.length === 0 && groups.domain.length === 0 && groups.marketplace.length === 0;
+  // A dataset is the caller's to manage when they own it or are an in-domain Admin
+  // (the server enforces this either way — this only decides whether to show controls).
+  const canManage = useCallback((t: Tile) =>
+    !!user && (t.owner === user.id || (user.role === 'admin' && user.domains.includes(t.domain))), [user]);
+
+  // Scope slice (Files mental model): All Data · My Data · Shared Data · Marketplace
+  // Data, working tiles + archived (soft-hidden) split per scope.
+  const uid = user?.id ?? '';
+  const scoped = groups ? tilesForScope(groups, scope, uid) : { active: [], archived: [] };
+  const counts = groups ? scopeCounts(groups, uid) : null;
+  const empty = groups && scoped.active.length === 0;
+  // Source-domain tag rides along in the cross-domain scopes (Shared / Marketplace),
+  // where a dataset's origin domain disambiguates same-named assets. DomainTag itself
+  // no-ops on a missing domain, so this is always safe.
+  const showDomain = scope === 'shared' || scope === 'marketplace';
 
   return (
-    <>
+    <ConfirmProvider>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-end' }}>
         <p className="lead" style={{ margin: 0, maxWidth: 560 }}>
           Your datasets. Open one to refine it through <strong>Bronze → Silver → Gold</strong>,
           define a metric, and share it — the tools stay in the engine room.
         </p>
-        {creating ? (
-          <div className="row" style={{ gap: 8 }}>
-            <input autoFocus value={newName} placeholder="Dataset name" onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') create(); if (e.key === 'Escape') setCreating(false); }} />
-            <button className="btn" onClick={create} disabled={!newName.trim()}>Create</button>
-            <button className="btn ghost" onClick={() => { setCreating(false); setNewName(''); }}>Cancel</button>
-          </div>
-        ) : (
-          <button className="btn" onClick={() => setCreating(true)}>+ New dataset</button>
-        )}
+        <div className="row" style={{ gap: 8 }}>
+          <button
+            className="btn ghost"
+            style={{ opacity: showArchived ? 1 : 0.7 }}
+            onClick={() => setShowArchived((v) => !v)}
+            title="Archived datasets are hidden by default"
+          >
+            {showArchived ? 'Hide archived' : 'Show archived'}
+          </button>
+          {creating ? (
+            <div className="row" style={{ gap: 8 }}>
+              <input autoFocus value={newName} placeholder="Dataset name" onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') create(); if (e.key === 'Escape') setCreating(false); }} />
+              <button className="btn" onClick={create} disabled={!newName.trim()}>Create</button>
+              <button className="btn ghost" onClick={() => { setCreating(false); setNewName(''); }}>Cancel</button>
+            </div>
+          ) : (
+            <button className="btn" onClick={() => setCreating(true)}>+ New dataset</button>
+          )}
+        </div>
+      </div>
+
+      {/* Scope switcher — same grouping logic as the Files tab, plus All Data. */}
+      <div className="seg" style={{ marginTop: 14 }}>
+        {DATASET_SCOPES.map((s) => (
+          <button
+            key={s.key}
+            type="button"
+            className={scope === s.key ? 'on' : ''}
+            onClick={() => setScope(s.key)}
+          >
+            {s.label}{counts ? ` (${counts[s.key]})` : ''}
+          </button>
+        ))}
       </div>
 
       {err ? <div className="error" style={{ marginTop: 14 }}>{err}</div> : null}
 
       {empty ? (
         <div className="stub-page" style={{ marginTop: 20 }}>
-          No datasets yet. <strong>+ New dataset</strong> starts one — bring a file in, and you’re at Bronze.
+          {scope === 'mine' || scope === 'all'
+            ? <>No datasets yet. <strong>+ New dataset</strong> starts one — bring a file in, and you’re at Bronze.</>
+            : scope === 'shared'
+              ? 'Nothing shared in your domain yet — promote a dataset to share it.'
+              : 'Nothing in the marketplace yet — an Admin certifies assets into data products.'}
         </div>
       ) : null}
 
       {groups ? (
         <>
-          <Group title="My data" tiles={groups.mine} onOpen={onOpen} />
-          <Group title="Shared Data" tiles={groups.domain} onOpen={onOpen} />
-          <Group title="Marketplace Data" tiles={groups.marketplace} onOpen={onOpen} onImport={canImport ? importProduct : undefined} />
+          {scoped.active.length > 0 ? (
+            <div className="tile-grid" style={{ marginTop: 16 }}>
+              {scoped.active.map((t) => (
+                <TileCard
+                  key={t.id}
+                  t={t}
+                  onOpen={onOpen}
+                  // Import applies to marketplace products only (Builder+; store re-checks).
+                  onImport={canImport && t.tier === 'product' && t.owner !== uid ? importProduct : undefined}
+                  canManage={canManage(t)}
+                  onChanged={refresh}
+                  showDomain={showDomain}
+                />
+              ))}
+            </div>
+          ) : null}
+
+          {showArchived ? (
+            scoped.archived.length > 0 ? (
+              <>
+                <div className="section-title">Archived<span className="count-pill">{scoped.archived.length}</span></div>
+                <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
+                  Archived datasets are hidden from the working lists (their tables are retained).
+                  Restore brings one back; Delete removes it permanently — including its physical tables.
+                </p>
+                <div className="tile-grid">
+                  {scoped.archived.map((t) => <TileCard key={t.id} t={t} onOpen={onOpen} canManage={canManage(t)} onChanged={refresh} showDomain={showDomain} />)}
+                </div>
+              </>
+            ) : (
+              <div className="hint" style={{ marginTop: 16 }}>No archived datasets.</div>
+            )
+          ) : null}
         </>
       ) : !err ? <div className="stub-page" style={{ marginTop: 20 }}>Loading datasets…</div> : null}
-    </>
+    </ConfirmProvider>
   );
 }

@@ -5,6 +5,8 @@ import 'server-only';
 import type { CurrentUser } from '@/lib/auth';
 import type { Role } from '@/lib/session';
 import type { McpTool, JsonSchema } from './server';
+import { strategyWriteTools } from './strategy-tools';
+import { marketplaceWriteTools } from './marketplace-tools';
 
 // --- Governed lib functions (the EXACT same the UI + /api routes call) ---------
 import {
@@ -15,18 +17,24 @@ import {
   getDataset,
   defineMeasure,
   buildGoldJoin as commitGoldJoin,
+  addCheck,
+  builtLayerFqn,
   type PromotionRequest,
 } from '@/lib/data/store';
+import { runQualityChecks } from '@/lib/data/dq-run';
+import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data/dataset-schema';
+import { queryRun } from '@/lib/governed';
 import { publishPromotionLive } from '@/lib/data/publish-server';
 import { enqueue, getApproval, decide, listApprovals } from '@/lib/approvals';
 import { canBuildStage, canPassThrough, stageArtifact } from '@/lib/data/panels';
 import { scaffoldCubeYaml } from '@/lib/data/metrics';
 import { ingestAndRegisterBronze } from '@/lib/data/ingest';
-import { buildStage } from '@/lib/data/build/server';
+import { buildStage, commitLayerVersion } from '@/lib/data/build/server';
 import {
   silverPlan,
   goldJoinPlan,
   goldMeasureToCube,
+  CAST_TYPES,
   type TransformOp,
   type ResolvedJoin,
   type GoldDimension,
@@ -36,7 +44,7 @@ import {
 import { assetTarget } from '@/lib/data/store-fqn';
 import type { ExecuteIdentity } from '@/lib/governed';
 import type { Layer, Quality, DataVisibility, Grant, ColumnDoc, DatasetUpstream } from '@/lib/data/dataset-schema';
-import { measureFromForm, measureMember, type MetricForm } from '@/lib/metrics/model';
+import { measureFromForm, measureMember, type MetricForm, type GuidedFilter, type GuidedWindow } from '@/lib/metrics/model';
 import type { MeasureType } from '@/lib/data/metrics';
 
 import {
@@ -222,7 +230,7 @@ export const dataWriteTools: McpTool[] = [
     tab: 'data',
     minRole: 'creator',
     description:
-      'Build one medallion version (bronze→silver→gold) of a dataset you can edit — the guided panel’s “Confirm”. Pass an authored dbt-SQL `body` for silver/gold, or `passThrough:true` to carry the prior layer forward. The prior layer must exist first.',
+      'Commit one medallion version (bronze→silver→gold) of a dataset you can edit — the guided panel’s “Confirm”. Pass an authored dbt-SQL `body` for silver/gold, or `passThrough:true` to carry the prior layer forward. The prior layer must exist first. Honesty contract: silver/gold register ONLY after a real materialization — a pass-through runs a governed CTAS copy of the prior layer, an authored commit is probed against its physical table (build it first, e.g. via transform_silver); a ✗ registers nothing. Offline it degrades to an honestly-labelled offline-mock.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -248,12 +256,17 @@ export const dataWriteTools: McpTool[] = [
       if (!canBuildStage(current.versions, layer)) fail(`bring in the prior layer before building ${layer}`, 400);
       const passThrough = bool(args.passThrough);
       if (passThrough && !canPassThrough(layer)) fail('Bronze is the entry point — nothing to pass through', 400);
-      return buildVersion(datasetId, p, layer, {
-        quality: (str(args.quality) as Quality) || undefined,
+      // The ONE honest commit path (shared with the version route): silver/gold are
+      // registered ONLY after the materialize-or-probe build report is ✓.
+      const outcome = await commitLayerVersion(current, layer, p, {
         passThrough,
-        artifact: passThrough ? null : stageArtifact(current.name, layer),
-        body: passThrough ? undefined : (typeof args.body === 'string' ? args.body : undefined),
+        quality: (str(args.quality) as Quality) || undefined,
+        body: typeof args.body === 'string' ? args.body : undefined,
       });
+      if (!outcome.ok || !outcome.dataset) {
+        fail(`${layer} commit did not pass${outcome.build ? ` (${outcome.build.mode})` : ''}: ${outcome.error ?? 'apply/verify failed'} — nothing was registered`, 502);
+      }
+      return outcome.dataset;
     },
   },
   {
@@ -380,7 +393,7 @@ export const dataWriteTools: McpTool[] = [
       // Personal-lane builds run under the UID so Trino→OPA recognises the caller as
       // the personal_<uid> owner (same rule as the transform route).
       if (plan.schema.startsWith('personal_')) identity.principal = user.id;
-      const build = await buildStage(dataset, 'silver', identity.principal, { transformSql: plan.sql, identity });
+      const build = await buildStage(dataset, 'silver', identity.principal, { transformSql: plan.sql, identity, targetFqn: plan.target });
       if (!build.ok) {
         const failed = build.rows.find((r) => r.status === 'fail');
         fail(`Silver build did not pass (${build.mode}): ${failed?.error ?? 'apply/verify failed'} — nothing was registered`, 502);
@@ -399,7 +412,7 @@ export const dataWriteTools: McpTool[] = [
     tab: 'data',
     minRole: 'creator',
     description:
-      'Build a dataset’s physical GOLD by JOINING its Silver with other governed datasets you may read — the Data tab’s stage-4 reuse, compiled into ONE governed CTAS. You pass dataset IDS to join (never table names — each is re-resolved through the canView guard), the join keys, projected dimensions and derived measures (sum/avg/count/count_distinct/min/max, or count(*) with agg "count" and no col). Column refs are {ref, column} where ref 0 = your Silver base and 1..n = the joined datasets in order. Purpose: the reuse step of the physical Data golden path — the measures recorded here feed define_metric after promotion. Before: transform_silver (Silver must be built); pick join partners from list_datasets (governed asset/product tiers with a built table). After: document_dataset → request_promotion → define_metric. Governance: the CTAS targets YOUR OWN schema and executes AS YOU (Trino→OPA masks every joined read); a non-visible pick is a typed forbidden; Gold + lineage + measures are recorded ONLY on a ✓ apply+verify.',
+      'Build a dataset’s physical GOLD by JOINING its Silver with other governed datasets you may read — the Data tab’s stage-4 reuse, compiled into ONE governed CTAS. You pass dataset IDS to join (never table names — each is re-resolved through the canView guard), the join keys, projected dimensions and derived measures (sum/avg/count/count_distinct/min/max, or count(*) with agg "count" and no col). Column refs are {ref, column} where ref 0 = your Silver base and 1..n = the joined datasets in order. KEY MAPPING / RECONCILE: same-name keys auto-match with no extra config; when the two sides differ, set the join key’s optional `adapt` to reconcile them symmetrically (both sides wrapped): `{mode:"text"}` normalizes to lower(trim(cast … as varchar)) so keys differing only by case/whitespace/format line up, `{mode:"cast",type}` coerces both sides to one Trino type (varchar|integer|bigint|double|boolean|date|timestamp) — e.g. an id stored as varchar on one side, integer on the other. Purpose: the reuse step of the physical Data golden path — the measures recorded here feed define_metric after promotion. Before: transform_silver (Silver must be built); pick join partners from list_datasets (governed asset/product tiers with a built table). After: document_dataset → request_promotion → define_metric. Governance: the CTAS targets YOUR OWN schema and executes AS YOU (Trino→OPA masks every joined read); a non-visible pick is a typed forbidden; Gold + lineage + measures are recorded ONLY on a ✓ apply+verify.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -420,6 +433,15 @@ export const dataWriteTools: McpTool[] = [
                   properties: {
                     left: { type: 'object', properties: { ref: { type: 'number' }, column: { type: 'string' } }, required: ['ref', 'column'] },
                     right: { type: 'string' },
+                    adapt: {
+                      type: 'object',
+                      description: 'Optional key reconciliation when the two sides don’t match verbatim (auto-matched same-name keys need none). Applied symmetrically to BOTH sides. `text` normalizes to lower(trim(cast … as varchar)) (case/whitespace/format); `cast` coerces both sides to one Trino type.',
+                      properties: {
+                        mode: { type: 'string', enum: ['text', 'cast'] },
+                        type: { type: 'string', enum: [...CAST_TYPES], description: 'Required for mode "cast": the shared Trino type both sides are cast to.' },
+                      },
+                      required: ['mode'],
+                    },
                   },
                   required: ['left', 'right'],
                 },
@@ -444,6 +466,18 @@ export const dataWriteTools: McpTool[] = [
         {
           datasetId: 'ds_ab12cd',
           picks: [{ datasetId: 'ds_customers', type: 'left', on: [{ left: { ref: 0, column: 'customer_id' }, right: 'customer_id' }] }],
+          dimensions: [{ col: { ref: 1, column: 'region' } }],
+          measures: [{ name: 'revenue', agg: 'sum', col: { ref: 0, column: 'net_amount' } }],
+        },
+        {
+          datasetId: 'ds_ab12cd',
+          picks: [
+            {
+              datasetId: 'ds_customers',
+              type: 'left',
+              on: [{ left: { ref: 0, column: 'cust_code' }, right: 'customer_id', adapt: { mode: 'text' } }],
+            },
+          ],
           dimensions: [{ col: { ref: 1, column: 'region' } }],
           measures: [{ name: 'revenue', agg: 'sum', col: { ref: 0, column: 'net_amount' } }],
         },
@@ -478,7 +512,7 @@ export const dataWriteTools: McpTool[] = [
       // Compile server-side (TransformError → typed bad_request with the real reason).
       const plan = goldJoinPlan(dataset, identity, joins, dimensions, measures);
       if (plan.schema.startsWith('personal_')) identity.principal = user.id;
-      const build = await buildStage(dataset, 'gold', identity.principal, { transformSql: plan.sql, identity });
+      const build = await buildStage(dataset, 'gold', identity.principal, { transformSql: plan.sql, identity, targetFqn: plan.target });
       if (!build.ok) {
         const failed = build.rows.find((r) => r.status === 'fail');
         fail(`Gold join did not pass (${build.mode}): ${failed?.error ?? 'apply/verify failed'} — nothing was recorded`, 502);
@@ -500,6 +534,86 @@ export const dataWriteTools: McpTool[] = [
         measures: updated.measures,
         upstreams: updated.upstreams,
       };
+    },
+  },
+  {
+    name: 'define_quality_rules',
+    tab: 'data',
+    minRole: 'creator',
+    description:
+      'Add one or more data-quality RULES to a dataset you can edit — the Data tab’s "Data quality" editor. Each rule is executable: not_null(column), not_blank(column), unique(column), accepted_values(column, values[]), range(column, min?, max?). Rules are stored on the dataset.yaml spine (versioned + discoverable) and RUN via run_quality_checks. Before: get_dataset (to see the real column names). After: run_quality_checks to get a real pass/fail. Governance: Creator+ on a dataset you own (or domain Admin); each rule needs a column. Idempotent-ish: re-running appends rules.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        datasetId: { type: 'string', description: 'Target dataset id (from list_datasets / get_dataset).' },
+        rules: {
+          type: 'array',
+          description: 'The rules to add.',
+          items: {
+            type: 'object',
+            properties: {
+              rule: { type: 'string', enum: [...DATA_CHECK_RULES], description: 'The rule kind.' },
+              column: { type: 'string', description: 'The column the rule applies to.' },
+              values: { type: 'array', items: { type: 'string' }, description: 'accepted_values: the allowed set.' },
+              min: { type: 'number', description: 'range: inclusive lower bound (optional).' },
+              max: { type: 'number', description: 'range: inclusive upper bound (optional).' },
+            },
+            required: ['rule', 'column'],
+          },
+        },
+      },
+      required: ['datasetId', 'rules'],
+      examples: [
+        { datasetId: 'ds_ab12cd', rules: [{ rule: 'not_null', column: 'order_id' }, { rule: 'range', column: 'net_amount', min: 0 }, { rule: 'accepted_values', column: 'status', values: ['open', 'shipped', 'closed'] }] },
+      ],
+    },
+    call: async (user, args) => {
+      const datasetId = str(args.datasetId).trim();
+      if (!datasetId) fail('define_quality_rules needs a `datasetId`', 400);
+      const rulesIn = Array.isArray(args.rules) ? args.rules : [];
+      if (rulesIn.length === 0) fail('define_quality_rules needs at least one rule', 400);
+      const p = P(user);
+      let dataset = getDataset(datasetId, p); // canView/canEdit re-gated in addCheck
+      for (const raw of rulesIn) {
+        const r = (raw ?? {}) as Record<string, unknown>;
+        const rule = str(r.rule) as DataCheckRule;
+        if (!(DATA_CHECK_RULES as string[]).includes(rule)) fail(`unknown rule '${str(r.rule)}' (${DATA_CHECK_RULES.join('|')})`, 400);
+        const column = str(r.column).trim();
+        if (!column) fail(`${rule} needs a column`, 400);
+        dataset = addCheck(datasetId, p, {
+          name: `${rule}(${column})`,
+          rule,
+          column,
+          values: Array.isArray(r.values) ? r.values.map((x) => str(x)) : undefined,
+          min: typeof r.min === 'number' ? r.min : undefined,
+          max: typeof r.max === 'number' ? r.max : undefined,
+        });
+      }
+      return { datasetId, checks: dataset.checks ?? [] };
+    },
+  },
+  {
+    name: 'run_quality_checks',
+    tab: 'data',
+    minRole: 'creator',
+    description:
+      'Run a dataset’s data-quality rules and READ the result — the "Run checks" button. Each structured rule is compiled to a governed COUNT-of-violations SQL and executed through the SAME governed query path AS THE OWNER (a private dataset’s personal_<uid> table is read as its owner, OPA-governed), producing a REAL pass/fail per rule plus an aggregate badge (passing | failing | unknown). Honesty: a rule that can’t run (nothing materialised yet, or a free-text intention) is reported "not_run", NEVER a fake pass. Before: define_quality_rules (+ a built layer to check). Governance: Creator+ on a dataset you can see; read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: { datasetId: { type: 'string', description: 'Dataset id whose rules to run (from get_dataset).' } },
+      required: ['datasetId'],
+    },
+    call: async (user, args) => {
+      const datasetId = str(args.datasetId).trim();
+      if (!datasetId) fail('run_quality_checks needs a `datasetId`', 400);
+      const p = P(user);
+      const dataset = getDataset(datasetId, p); // canView gate
+      const resolved = builtLayerFqn(dataset, p); // { fqn, principal } | null
+      const report = await runQualityChecks(dataset.checks ?? [], {
+        fqn: resolved?.fqn ?? null,
+        queryFn: (sql) => queryRun(sql, resolved?.principal),
+      });
+      return { datasetId, name: dataset.name, ...report };
     },
   },
 ];
@@ -818,18 +932,55 @@ export const metricWriteTools: McpTool[] = [
     tab: 'metrics',
     minRole: 'creator',
     description:
-      'Define a governed metric on a dataset’s built GOLD version — the one definition of a number (Cube member). The dataset must already be a governed asset/product (promote it in Data first). Returns the canonical member + the generated Cube YAML.',
+      'Define a governed metric on a dataset’s built GOLD version — the one definition of a number (Cube member). The dataset must already be a governed asset/product (promote it in Data first). Returns the canonical member + the generated Cube YAML. THE FULL MEASURE MODEL (same as the Metrics tab form — all optional, a plain call yields exactly {name,type,sql}): `aggregation` — count · count_distinct · count_distinct_approx (fast approximate distinct) · sum · avg · min · max · number (a DERIVED/ratio measure). `filter` — a FILTERED measure: aggregate only rows where {column op value} (op: equals|notEquals|gt|gte|lt|lte|set|notSet). `runningTotal` — a cumulative running total from the beginning of time. `rollingWindow` — a trailing time window (last N day|week|month|quarter|year), mutually exclusive with runningTotal. `ratio` — for aggregation "number", a derived measure numerator/denominator over two OTHER measures on the same cube. `format` — display format (currency|percent|number…). `drillMembers` — drill-down members exposed for exploration. `timeDimension`+`granularity` are query-time (query_metric), not part of the definition.',
     inputSchema: {
       type: 'object',
       properties: {
         datasetId: { type: 'string', description: 'Gold, governed (asset/product) dataset id.' },
         name: { type: 'string', description: 'Human metric name, e.g. "Revenue".' },
-        aggregation: { type: 'string', enum: ['count', 'count_distinct', 'sum', 'avg', 'min', 'max', 'number'], description: 'The aggregation.' },
-        column: { type: 'string', description: 'Gold column to aggregate (empty for count).' },
+        aggregation: { type: 'string', enum: ['count', 'count_distinct', 'count_distinct_approx', 'sum', 'avg', 'min', 'max', 'number'], description: 'The aggregation. count/count_distinct/count_distinct_approx count rows; sum/avg/min/max aggregate a column; number is a derived (ratio) measure.' },
+        column: { type: 'string', description: 'Gold column to aggregate (omit for count/count_distinct-of-rows and for number/ratio).' },
         dimensions: { type: 'array', items: { type: 'string' }, description: 'Dimensions the metric can be sliced by.' },
+        filter: {
+          type: 'object',
+          description: 'Optional FILTERED measure — aggregate only rows matching {column op value}.',
+          properties: {
+            column: { type: 'string' },
+            operator: { type: 'string', enum: ['equals', 'notEquals', 'gt', 'gte', 'lt', 'lte', 'set', 'notSet'] },
+            value: { type: 'string', description: 'Compared value (unused for set/notSet).' },
+          },
+          required: ['column', 'operator'],
+        },
+        runningTotal: { type: 'boolean', description: 'Cumulative running total from the beginning of time (mutually exclusive with rollingWindow).' },
+        rollingWindow: {
+          type: 'object',
+          description: 'Trailing time window — last `amount` `unit` (mutually exclusive with runningTotal).',
+          properties: {
+            amount: { type: 'number' },
+            unit: { type: 'string', enum: ['day', 'week', 'month', 'quarter', 'year'] },
+          },
+          required: ['amount', 'unit'],
+        },
+        ratio: {
+          type: 'object',
+          description: 'For aggregation "number": a derived measure = numerator / denominator, each an EXISTING measure member name on the same cube.',
+          properties: {
+            numerator: { type: 'string' },
+            denominator: { type: 'string' },
+          },
+          required: ['numerator', 'denominator'],
+        },
+        format: { type: 'string', description: 'Display format — e.g. currency, percent, number.' },
+        drillMembers: { type: 'array', items: { type: 'string' }, description: 'Drill-down members exposed for exploration.' },
       },
       required: ['datasetId', 'name', 'aggregation'],
-      examples: [{ datasetId: 'ds_ab12cd', name: 'Revenue', aggregation: 'sum', column: 'net_amount', dimensions: ['order_date', 'region'] }],
+      examples: [
+        { datasetId: 'ds_ab12cd', name: 'Revenue', aggregation: 'sum', column: 'net_amount', dimensions: ['order_date', 'region'] },
+        { datasetId: 'ds_ab12cd', name: 'Unique Customers', aggregation: 'count_distinct_approx', column: 'customer_id' },
+        { datasetId: 'ds_ab12cd', name: 'Completed Orders', aggregation: 'count', filter: { column: 'status', operator: 'equals', value: 'completed' } },
+        { datasetId: 'ds_ab12cd', name: 'Trailing 7d Revenue', aggregation: 'sum', column: 'net_amount', rollingWindow: { amount: 7, unit: 'day' }, format: 'currency' },
+        { datasetId: 'ds_ab12cd', name: 'Conversion Rate', aggregation: 'number', ratio: { numerator: 'orders', denominator: 'sessions' }, format: 'percent' },
+      ],
     },
     call: async (user, args) => {
       const datasetId = str(args.datasetId).trim();
@@ -842,7 +993,24 @@ export const metricWriteTools: McpTool[] = [
         column: str(args.column),
         dimensions: strArr(args.dimensions),
       };
-      const measure = measureFromForm(form);
+      // The richer (optional) measure model — same guided controls as the tab form.
+      const f = args.filter as Record<string, unknown> | undefined;
+      if (f && str(f.column).trim()) {
+        form.filter = { column: str(f.column), operator: str(f.operator) as GuidedFilter['operator'], value: str(f.value) };
+      }
+      if (args.runningTotal === true) form.runningTotal = true;
+      const rw = args.rollingWindow as Record<string, unknown> | undefined;
+      if (rw && typeof rw.amount === 'number' && str(rw.unit).trim()) {
+        form.rollingWindow = { amount: rw.amount, unit: str(rw.unit) as GuidedWindow['unit'] };
+      }
+      const r = args.ratio as Record<string, unknown> | undefined;
+      if (r && str(r.numerator).trim() && str(r.denominator).trim()) {
+        form.ratio = { numerator: str(r.numerator), denominator: str(r.denominator) };
+      }
+      if (str(args.format).trim()) form.format = str(args.format).trim();
+      if (Array.isArray(args.drillMembers)) form.drillMembers = strArr(args.drillMembers);
+
+      const measure = measureFromForm(form); // MetricError → typed bad_request with the real reason
       const dataset = defineMeasure(datasetId, P(user), measure);
       return { datasetId, measure, member: measureMember(dataset, measure), cube: scaffoldCubeYaml(dataset) };
     },
@@ -1260,6 +1428,9 @@ export const ALL_WRITE_TOOLS: McpTool[] = [
   ...bigbetWriteTools,
   ...agentWriteTools,
   ...promotionTools,
+  // mcp-v2 surfaces wave — Strategy (pillar CRUD) + Marketplace (rate) writes.
+  ...strategyWriteTools,
+  ...marketplaceWriteTools,
 ];
 
 // Keep an explicit reference to JsonSchema so the imported type is used (schemas above

@@ -3,14 +3,20 @@
  */
 /**
  * The OS sidebar tab set. The first group is the canonical OS tab order
- * (os-application.md §4); every tab routes to a real surface in v1.0. The
- * second group ("Platform") is the operator plane: Governance (builders
- * approve promotions — the sharing ladder), plus the admin consoles (Admin,
- * Components, Terminal, About / Licenses). The former Users / Gateway /
- * Orchestration / Consoles / Workbench tabs were consolidated: Users & Access
- * lives in Admin (/platform), and the gateway / orchestrator / console
- * launchers merged into the one Components surface (/components); the old
- * routes redirect.
+ * (os-application.md §4); every tab routes to a real surface in v1.0.
+ *
+ * Six sections:
+ *   Ungrouped (entry): Home, Cockpit
+ *   Plan:    Strategy, Big Bets, MCP, Tutorials
+ *   Context: Knowledge, Files, Data, Connections, Metrics, Marketplace
+ *   Build:   Agents, Software, Science, Dashboards
+ *   Monitor: Governance (builder+), Monitoring, Components (admin), LLM Gateway
+ *   Admin:   Admin (admin), Terminal (admin), About / Licenses (admin)
+ *
+ * The former Users / Gateway / Orchestration / Consoles / Workbench tabs were
+ * consolidated: Users & Access lives in Admin (/platform), and the gateway /
+ * orchestrator / console launchers merged into the one Components surface
+ * (/components); the old routes redirect.
  */
 import type { Role } from '@/lib/session';
 
@@ -30,32 +36,56 @@ export type TabGroup = {
 
 export const TAB_GROUPS: TabGroup[] = [
   {
+    // Entry points — ungrouped, always at the top
     tabs: [
       { label: 'Home', icon: '◇', href: '/' },
       { label: 'Cockpit', icon: '◉', href: '/cockpit' },
-      { label: 'Strategy', icon: '▲', href: '/strategy' },
-      { label: 'Big Bets', icon: '◆', href: '/big-bets' },
-      { label: 'Agents', icon: '✦', href: '/agents' },
-      { label: 'Software', icon: '⌘', href: '/software' },
-      { label: 'Science', icon: '∿', href: '/science' },
-      { label: 'Knowledge', icon: '❦', href: '/knowledge' },
-      { label: 'Files', icon: '❏', href: '/unstructured' },
-      { label: 'Data', icon: '▤', href: '/data' },
-      { label: 'Metrics', icon: '∑', href: '/metrics' },
-      { label: 'Dashboards', icon: '▦', href: '/dashboards' },
-      { label: 'Connections', icon: '⇄', href: '/connections' },
       { label: 'Marketplace', icon: '⊞', href: '/marketplace', role: 'Builder / Administrator' },
-      { label: 'Monitoring', icon: '◷', href: '/monitoring' },
-      { label: 'Tutorials', icon: '◎', href: '/tutorials' },
-      { label: 'Settings', icon: '⚙', href: '/settings' },
     ],
   },
   {
-    heading: 'Platform',
+    heading: 'Plan',
     tabs: [
+      { label: 'Strategy', icon: '▲', href: '/strategy' },
+      { label: 'Big Bets', icon: '◆', href: '/big-bets' },
+      { label: 'MCP', icon: '⌗', href: '/mcp' },
+      { label: 'Tutorials', icon: '◎', href: '/tutorials' },
+    ],
+  },
+  {
+    heading: 'Context',
+    tabs: [
+      { label: 'Knowledge', icon: '❦', href: '/knowledge' },
+      { label: 'Files', icon: '❏', href: '/unstructured' },
+      { label: 'Data', icon: '▤', href: '/data' },
+      { label: 'Connections', icon: '⇄', href: '/connections' },
+      { label: 'Metrics', icon: '∑', href: '/metrics' },
+    ],
+  },
+  {
+    heading: 'Build',
+    tabs: [
+      { label: 'Agents', icon: '✦', href: '/agents' },
+      { label: 'Software', icon: '⌘', href: '/software' },
+      { label: 'Science', icon: '∿', href: '/science' },
+      { label: 'Dashboards', icon: '▦', href: '/dashboards' },
+    ],
+  },
+  {
+    heading: 'Monitor',
+    tabs: [
+      // Governance (approvals / the sharing ladder) is oversight — it lives in Monitor.
+      // Builder+ (its own minRole) see it here.
       { label: 'Governance', icon: '⚖', href: '/governance', role: 'Builder / Administrator', minRole: 'builder' },
-      { label: 'Admin', icon: '❖', href: '/platform', role: 'Administrator', minRole: 'admin' },
+      { label: 'Monitoring', icon: '◷', href: '/monitoring' },
       { label: 'Components', icon: '▥', href: '/components', role: 'Administrator', minRole: 'admin' },
+      { label: 'LLM Gateway', icon: '⌁', href: '/llm-gateway' },
+    ],
+  },
+  {
+    heading: 'Admin',
+    tabs: [
+      { label: 'Admin', icon: '❖', href: '/platform', role: 'Administrator', minRole: 'admin' },
       { label: 'Terminal', icon: '▮', href: '/terminal', role: 'Administrator', minRole: 'admin' },
       { label: 'About / Licenses', icon: '©', href: '/about', role: 'Administrator', minRole: 'admin' },
     ],

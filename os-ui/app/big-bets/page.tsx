@@ -8,11 +8,19 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import PageHeader from '@/components/PageHeader';
 import { useApi } from '@/lib/useApi';
+import { useUser } from '@/lib/useUser';
 import { useTileOrder } from '@/lib/prefs/useTileOrder';
 import {
   type BetSummary, type Pillar, api, eur, fmtDate, problemLine,
 } from './types';
 import { ProgressBar, SignalBadge } from './ui';
+import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
+import LifecycleActions from '@/components/lifecycle/LifecycleActions';
+import type { Visibility as LcVisibility } from '@/lib/lifecycle';
+import DomainTag from '@/components/DomainTag';
+
+/** A bet's reach → the OS-wide lifecycle visibility (cross-domain bets affect others). */
+const betVisibility = (b: BetSummary): LcVisibility => (b.crossDomain ? 'shared' : 'personal');
 
 type ListData = { bets: BetSummary[] };
 type StrategyData = {
@@ -33,9 +41,17 @@ const NO_BETS: BetSummary[] = [];
 const betIdOf = (b: BetSummary) => b.id;
 
 export default function BigBetsPage() {
-  const { data, loading, error } = useApi<ListData>('/api/big-bets');
+  const { data, loading, error, reload } = useApi<ListData>('/api/big-bets');
   const { data: strat } = useApi<StrategyData>('/api/big-bets/strategy');
+  const { user } = useUser();
   const [creating, setCreating] = useState(false);
+
+  // A bet is the caller's to manage when they own it or are an Admin (the route
+  // re-checks either way — this only decides whether to surface the controls).
+  const canManage = useCallback(
+    (b: BetSummary) => !!user && (b.owner === user.id || user.role === 'admin'),
+    [user],
+  );
 
   const pillars = useMemo(() => strat?.pillars ?? [], [strat]);
   const bets = data?.bets ?? NO_BETS;
@@ -45,7 +61,7 @@ export default function BigBetsPage() {
   // would undo. Mirrors groupByPillar's bucketing (unknown pillar → Unassigned).
   const pillarIds = useMemo(() => new Set(pillars.map((p) => p.id)), [pillars]);
   const groupOf = useCallback(
-    (b: BetSummary) => (pillarIds.has(b.pillarId) ? b.pillarId : '__none__'),
+    (b: BetSummary) => (b.pillarId && pillarIds.has(b.pillarId) ? b.pillarId : '__none__'),
     [pillarIds],
   );
 
@@ -62,7 +78,7 @@ export default function BigBetsPage() {
   const groups = useMemo(() => groupByPillar(orderedBets, pillars), [orderedBets, pillars]);
 
   return (
-    <>
+    <ConfirmProvider>
       <PageHeader title="Big Bets" crumb="initiative roadmaps over real components" tutorial="big-bets" />
       <div className="content">
         <p className="lead">
@@ -113,6 +129,8 @@ export default function BigBetsPage() {
                         b={b}
                         dragProps={itemDragProps(b)}
                         dragHandleProps={dragHandleProps}
+                        canManage={canManage(b)}
+                        onChanged={reload}
                       />
                     ))}
                   </div>
@@ -122,7 +140,7 @@ export default function BigBetsPage() {
           </>
         )}
       </div>
-    </>
+    </ConfirmProvider>
   );
 }
 
@@ -133,7 +151,7 @@ function groupByPillar(bets: BetSummary[], pillars: Pillar[]): PortfolioGroup[] 
   const byId = new Map(pillars.map((p) => [p.id, p]));
   const buckets = new Map<string, BetSummary[]>();
   for (const b of bets) {
-    const key = byId.has(b.pillarId) ? b.pillarId : '__none__';
+    const key = b.pillarId && byId.has(b.pillarId) ? b.pillarId : '__none__';
     const arr = buckets.get(key) ?? [];
     arr.push(b);
     buckets.set(key, arr);
@@ -155,10 +173,14 @@ function BetCard({
   b,
   dragProps,
   dragHandleProps,
+  canManage,
+  onChanged,
 }: {
   b: BetSummary;
   dragProps?: ItemDragProps;
   dragHandleProps?: DragHandleProps;
+  canManage?: boolean;
+  onChanged?: () => void;
 }) {
   const archived = b.status === 'archived';
   return (
@@ -188,6 +210,7 @@ function BetCard({
             <div className="row" style={{ alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <h3 style={{ margin: 0, fontSize: 15, color: 'var(--text)' }}>{b.name}</h3>
               {archived ? <span className="chip">archived</span> : <SignalBadge signal={b.signal} />}
+              {b.crossDomain ? <DomainTag domain={b.domain} /> : null}
               {b.crossDomain ? <span className="chip">cross-domain</span> : null}
             </div>
             <p className="muted" style={{ marginTop: 8, marginBottom: 0, maxWidth: 640, lineHeight: 1.5 }}>
@@ -221,6 +244,21 @@ function BetCard({
           </span>
         </div>
       </Link>
+      {canManage ? (
+        <div className="row" style={{ gap: 6, marginTop: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+          <LifecycleActions
+            id={b.id}
+            name={b.name}
+            kind="bigbet"
+            visibility={betVisibility(b)}
+            archived={archived}
+            api={`/api/big-bets/${b.id}`}
+            onChanged={onChanged}
+            compact
+            surface="tile"
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -284,7 +322,9 @@ function CreatePanel({
     }
   };
 
-  const valid = Boolean(f.problem.trim());
+  // No mandatory field — the server derives a name from any text provided, or uses
+  // "Untitled big bet" if nothing is filled in. The submit button is always enabled.
+  const valid = true;
 
   const submit = async () => {
     if (!valid || busy) return;
@@ -390,7 +430,7 @@ function CreatePanel({
                 <button
                   type="button"
                   className="btn ghost sm"
-                  style={{ marginTop: 6, fontSize: 12, color: 'var(--text-secondary)' }}
+                  style={{ marginTop: 6, fontSize: 12 }}
                   onClick={() => setShowNewPillar(true)}
                 >
                   + New pillar
@@ -405,12 +445,12 @@ function CreatePanel({
         )}
       </Field>
 
-      <Field label="Problem Statement" required>
+      <Field label="Problem Statement">
         <textarea
           value={f.problem}
           rows={3}
           onChange={(e) => set('problem', e.target.value)}
-          placeholder="e.g. Sales reps spend 3 hours/week manually updating CRM — costing $400k/year in lost selling time."
+          placeholder="e.g. Sales reps spend 3 hours/week manually updating CRM — costing $400k/year in lost selling time. (Optional — you can add this later.)"
         />
       </Field>
 

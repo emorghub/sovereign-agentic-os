@@ -6,7 +6,7 @@ import { config } from '@/lib/config';
 import { type Workflow, type DomainKnowledge } from './schema.ts';
 import { chunkWorkflow, chunkDomain, type KnowledgeUnit } from './chunk.ts';
 import { embed } from './embed.ts';
-import { upsertUnits, type IndexedUnit } from './index-store.ts';
+import { upsertUnits, removeUnits, type IndexedUnit } from './index-store.ts';
 
 /**
  * The indexing pipeline (the "Dagster sensor → Haystack pipeline" of the design,
@@ -42,8 +42,71 @@ function toIndexed(units: KnowledgeUnit[], vectors: number[][]): IndexedUnit[] {
   return units.map((u, i) => ({ ...u, embedding: vectors[i] ?? [], indexedAt: now }));
 }
 
+/**
+ * PHYSICALLY purge a scope's indexed units — the delete side of the Knowledge
+ * lifecycle. Removes the workflow/domain's vectors from OpenSearch (_delete_by_query)
+ * AND the in-process offline mirror, so a DELETED knowledge artifact stops being
+ * retrievable (by agents or search). Best-effort + honest: returns whether the
+ * OpenSearch delete succeeded (the in-process removal always happens). Archive does
+ * NOT call this — an archived workflow keeps its index until it is truly deleted.
+ */
+export async function purgeKnowledgeUnits(scope: string): Promise<boolean> {
+  removeUnits(scope); // offline mirror — always
+  const delBody = { query: { bool: { should: [{ term: { workflow_id: scope } }, { term: { _id: scope } }] } } };
+  const res = await withTimeout(`${config.opensearchUrl}/${config.knowledgeIndex}/_delete_by_query?refresh=true`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(delBody),
+  });
+  return !!res && res.ok;
+}
+
+/** The `knowledge` index mapping — a knn_vector `embedding` whose dimension comes
+ *  from config (never hardcoded), plus the keyword/text/date fields the writer sets
+ *  and the retrieve query filters/searches on. Mirrors `filesIndexMapping`. */
+export function knowledgeIndexMapping(dim = config.embedDim): Record<string, unknown> {
+  return {
+    settings: { index: { knn: true } },
+    mappings: {
+      properties: {
+        title: { type: 'text' },
+        text: { type: 'text' },
+        embedding: { type: 'knn_vector', dimension: dim },
+        domain: { type: 'keyword' },
+        workflow_id: { type: 'keyword' },
+        step_id: { type: 'keyword' },
+        type: { type: 'keyword' },
+        actor: { type: 'keyword' },
+        owner: { type: 'keyword' },
+        version: { type: 'keyword' },
+        visibility: { type: 'keyword' },
+        trust: { type: 'float' },
+        authority: { type: 'float' },
+        updated_at: { type: 'date' },
+        ingested_at: { type: 'date' },
+      },
+    },
+  };
+}
+
+/** Create the `knowledge` index with its knn_vector mapping if absent (best-effort).
+ *  Without this the index auto-creates with NO `embedding` field → writes fail and
+ *  retrieval silently falls back to the in-memory mirror. Mirrors `ensureFilesIndex`. */
+export async function ensureKnowledgeIndex(): Promise<boolean> {
+  const head = await withTimeout(`${config.opensearchUrl}/${config.knowledgeIndex}`, { method: 'HEAD' });
+  if (head && head.ok) return true;
+  const res = await withTimeout(`${config.opensearchUrl}/${config.knowledgeIndex}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(knowledgeIndexMapping()),
+  });
+  return Boolean(res && res.ok);
+}
+
 /** Bulk-write embedded units to OpenSearch (best-effort live path). */
 async function writeOpenSearch(scope: string, indexed: IndexedUnit[]): Promise<boolean> {
+  await ensureKnowledgeIndex();
+
   // Delete the scope's existing docs first (incremental re-index), then bulk-add.
   const delBody = {
     query: {
