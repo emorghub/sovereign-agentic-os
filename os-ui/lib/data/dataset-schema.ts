@@ -4,6 +4,7 @@
 import yaml from 'js-yaml';
 import { roleAtLeast } from '../core/session.ts';
 import type { Role } from '../core/session.ts';
+import { normaliseFolderPath } from '../core/folders.ts';
 
 /**
  * `dataset.yaml` — the SINGLE source of truth for one logical dataset (Data tab).
@@ -154,6 +155,11 @@ export type Dataset = {
   domain: string;
   tier: Tier;
   visibility: DataVisibility;
+  /** The folder this dataset lives in — a normalised path (leading slash; `'/'` is
+   *  the root). Mirrors Files: additive + defaulted, so old datasets parse unchanged
+   *  at the root and it is OMITTED from the yaml when at root (byte-stable). The
+   *  folder ROOT (personal vs domain tree) is decided by tier, exactly like Files. */
+  folder: string;
   description: string;
   versions: Versions;
   grants: Grant[];
@@ -169,6 +175,21 @@ export type Dataset = {
   upstreams?: DatasetUpstream[];
   /** Manually-authored data-quality check intentions (not auto-executed). */
   checks?: DataCheck[];
+  /** Cube identity scheme marker (#155). When true, this dataset's cube name / view /
+   *  model file are DOMAIN-NAMESPACED (`<domain>__<slug>`), so two domains can each name
+   *  a dataset "Sales" without colliding on one shared cube/view/model file. ABSENT ⇒
+   *  legacy un-namespaced identity (`slug(name)`) — every dataset created before #155 (and
+   *  the LIVE Cube models, dashboards, metric members and Power BI queries that reference
+   *  them) keeps its exact old identity, so there is ZERO migration. Set once at create,
+   *  immutable for the life of the dataset (so every derived name stays stable). Omitted
+   *  from the yaml when false (byte-stable — old records don't churn). */
+  cubeNamespaced?: boolean;
+  /** Analytics-as-code gate (#146 Phase 6). When true, a promoted dataset also emits a
+   *  git-backed dbt model (`dbt/models/governed/<domain>/<layer>_<slug>.sql`) + column
+   *  docs (`schema.yml`) into the analytics repo. ABSENT/false ⇒ no dbt model is emitted —
+   *  pre-existing datasets stay un-emitted until they are re-promoted (zero migration,
+   *  byte-stable). Set at promote time. Omitted from yaml when false. */
+  gitBacked?: boolean;
 };
 
 export class DatasetError extends Error {
@@ -412,6 +433,10 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
   const imports = Array.isArray(doc.imports) ? doc.imports.map((x) => String(x)) : undefined;
   const upstreams = Array.isArray(doc.upstreams) ? doc.upstreams.map(parseUpstream) : undefined;
   const checks = checksRaw.length > 0 ? checksRaw.map(parseCheck) : undefined;
+  // #155: absent/false ⇒ legacy un-namespaced cube identity (every pre-#155 record).
+  const cubeNamespaced = doc.cubeNamespaced === true ? true : undefined;
+  // #146 Phase 6: absent/false ⇒ no dbt model emitted (pre-existing datasets stay un-emitted).
+  const gitBacked = doc.gitBacked === true ? true : undefined;
 
   return {
     version: doc.version !== undefined ? String(doc.version) : '1',
@@ -422,6 +447,8 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
     tier,
     // A dataset is always private; tier+visibility are kept consistent on parse.
     visibility: visibilityFor(tier, visRaw),
+    // Additive + defaulted: absent → root. Normalised so equality/prefix checks are stable.
+    folder: normaliseFolderPath(typeof doc.folder === 'string' ? doc.folder : undefined),
     description: typeof doc.description === 'string' ? doc.description : '',
     versions: parseVersions(doc.versions),
     grants: grantsRaw.map(parseGrant),
@@ -431,6 +458,8 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
     ...(imports ? { imports } : {}),
     ...(upstreams ? { upstreams } : {}),
     ...(checks ? { checks } : {}),
+    ...(cubeNamespaced ? { cubeNamespaced } : {}),
+    ...(gitBacked ? { gitBacked } : {}),
   };
 }
 
@@ -444,6 +473,9 @@ export function serializeDataset(d: Dataset): string {
     tier: d.tier,
     visibility: d.visibility,
   };
+  // Omit-when-root (byte-stable, like the `layer !== 'gold'` omit precedent): a
+  // dataset at the root serializes exactly as before, so no old record churns.
+  if (d.folder && normaliseFolderPath(d.folder) !== '/') doc.folder = normaliseFolderPath(d.folder);
   if (d.description) doc.description = d.description;
   doc.versions = d.versions;
   if (d.grants.length > 0) doc.grants = d.grants;
@@ -453,6 +485,12 @@ export function serializeDataset(d: Dataset): string {
   if (d.imports && d.imports.length > 0) doc.imports = d.imports;
   if (d.upstreams && d.upstreams.length > 0) doc.upstreams = d.upstreams;
   if (d.checks && d.checks.length > 0) doc.checks = d.checks;
+  // Omit-when-false (byte-stable): a legacy (un-namespaced) dataset serializes exactly
+  // as before #155, so no old record churns in the durable mirror.
+  if (d.cubeNamespaced) doc.cubeNamespaced = true;
+  // Omit-when-false (#146 Phase 6): pre-existing datasets serialize exactly as before,
+  // un-emitted until re-promoted with gitBacked=true.
+  if (d.gitBacked) doc.gitBacked = true;
   return yaml.dump(doc, { lineWidth: 100, noRefs: true });
 }
 

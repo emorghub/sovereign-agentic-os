@@ -296,7 +296,7 @@ osUI:
     # 0.1.11 = Agents-tab builder rebuild: globalThis store fix (AGENT.md/MEMORY.md
     # now load), single Auto/Reasoning/Execution model toggle (real sovereign-*
     # ids), React Flow drag-and-drop graph builder, master-detail rail + templates.
-    tag: "0.1.74"
+    tag: "0.5.42"   # EM: pinned to DMC/upstream current (chart ships a stale 0.3.1 here)
   # CANONICAL PUBLIC URL — the apex host. OS_PUBLIC_URL derives from this (os-ui.yaml
   # reads `.Values.osUI.publicUrl` first, only falling back to the `os.<zone>` ingress
   # host). Pinning it here makes the apex authoritative so a `helm upgrade` can NEVER
@@ -531,6 +531,11 @@ polaris:
 # resolves/explores through it). Depends on Trino (now ON above).
 cube:
   enabled: true
+  # Faster convergence: the model-sync sidecar polls os-ui's /api/cube/models and writes
+  # the .cube.yml files Cube hot-reloads. Poll every 5s (base default 30s) so a newly
+  # defined measure reaches Cube in seconds — the define/preview fail-soft handles the gap.
+  modelSync:
+    pollSeconds: 5
 
 # litellm: remove the db-migrate initContainer (it OOMKilled on the live cluster;
 # the DB is already migrated). Setting extraInitContainers: [] overrides the list
@@ -672,6 +677,19 @@ ingress:
     # tab). WITHOUT this the chart renders DAGSTER_CONSOLE_URL as "" on the
     # os-ui and the UI has no reachable console to open.
     dagster: "dagster.agentic.datamasterclass.com"
+    # JupyterHub (Science tab). Notebooks need WebSocket kernels, so Jupyter is NOT
+    # served through the os-ui same-origin tool proxy (that rejects protocol:ws) —
+    # it gets its OWN public host fronting the Z2JH `proxy-public` service (the CHP).
+    # WITHOUT this key the chart renders JUPYTERHUB_CONSOLE_URL="" (UI hides the link)
+    # AND no ingress is created, so the "Open JupyterHub" button 404s on localhost.
+    # DNS wildcard *.agentic.datamasterclass.com already points at ingress-nginx.
+    # The ingress inherits the tenant-wide soa-basic-auth annotation from
+    # `ingress.annotations`; JupyterHub's DummyAuthenticator (jupyter-local-dev) is
+    # the app-level gate behind it.
+    # (MLflow/Featureform have NO host here on purpose — they open via the os-ui
+    #  proxy iframe; KServe has no human UI. Their *_CONSOLE_URL render "" and the
+    #  Science tab hides those native "Open" links instead of dialing localhost.)
+    jupyterhub: "jupyter.agentic.datamasterclass.com"
   # Dagster OSS has NO auth of its own (every other exposed console has a login),
   # so its Ingress enforces nginx basic-auth from this htpasswd Secret (key
   # `auth`, release namespace). Create it once:

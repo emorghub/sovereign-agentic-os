@@ -44,28 +44,11 @@ import {
 
 // ----------------------------------------------------------------- clients -------
 
-/** One commit in a repo's history (Gitea/Forgejo commits API), newest first. */
-export type ForgejoCommit = { sha: string; message: string; author: string; date: string };
-/** A path→content map of a repo's whitelisted files AT a given commit. */
-export type ForgejoCommitFiles = Record<string, string>;
-
-export interface ForgejoClient {
-  ensureRepo(repo: string): Promise<void>;
-  readFile(repo: string, path: string): Promise<{ content: string; sha: string } | null>;
-  writeFile(repo: string, path: string, content: string, sha?: string, message?: string): Promise<{ sha: string }>;
-  /** PHYSICALLY delete the system's repo (DELETE path only). Returns whether the
-   *  repo is gone; throws only on a real failure (unreachable / rejected) so the
-   *  caller reports an orphan honestly. A missing repo (404) resolves cleanly. */
-  deleteRepo(repo: string): Promise<{ deleted: boolean }>;
-  /** The repo's commit history on `main`, NEWEST first. Returns `null` when the
-   *  repo has no git history yet OR Forgejo is unreachable, so the caller can fall
-   *  back to snapshot versioning honestly rather than fabricate an empty history. */
-  listCommits(repo: string, opts?: { limit?: number }): Promise<ForgejoCommit[] | null>;
-  /** The system's whitelisted files (system.yaml + agents/*) AS THEY WERE at `sha`,
-   *  read via the contents-at-ref API. Returns `null` when unreachable so restore
-   *  fails loudly rather than clobbering HEAD with empty content. */
-  getCommitFiles(repo: string, sha: string): Promise<ForgejoCommitFiles | null>;
-}
+// The Forgejo client contract is an EXTERNAL-service boundary → it lives in
+// `lib/infra` (a tab must not own a shape core/other-tabs depend on). Re-exported
+// here so existing importers of this module keep working unchanged.
+export type { ForgejoClient, ForgejoCommit, ForgejoCommitFiles } from '../../infra/forgejo.ts';
+import type { ForgejoClient } from '../../infra/forgejo.ts';
 
 export interface OpaClient {
   /** PUT the principal's allowed tools (in-memory data document). */
@@ -180,6 +163,10 @@ function ok(detail: string): StepResult {
 }
 function fail(error: string): StepResult {
   return { ok: false, detail: error, error };
+}
+/** A NEUTRAL "verified from a run trace — needs a run first" result (not a failure). */
+function pending(detail: string): StepResult {
+  return { ok: true, pending: true, detail };
 }
 
 // ----------------------------------------------------------------- adapters ------
@@ -324,7 +311,7 @@ export function makeLiveAdapters(deps: LiveDeps): BuildAdapter[] {
     async verify(ctx) {
       const principal = principalFor(ctx.systemId ?? 'sys');
       const n = await deps.langfuse.tracesFor(principal);
-      if (n <= 0) return fail('no trace appeared for the test invocation');
+      if (n <= 0) return pending('this component is verified from a run trace — run the agent once, then Build again');
       return ok(`${n} trace(s) landed for the test invocation`);
     },
   };

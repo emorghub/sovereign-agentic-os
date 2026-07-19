@@ -3,6 +3,7 @@
  */
 import type { Dataset, DataVisibility } from '../dataset-schema.ts';
 import { assetTarget, productTarget } from '../store-fqn.ts';
+import { cubeName } from '../metrics.ts';
 
 /**
  * The policy compiler (data-policy-compiler.md): ONE source — a governed dataset's
@@ -80,6 +81,17 @@ export function compileOpa(datasets: Dataset[], roster: Roster): OpaBundle {
   for (const [id, p] of Object.entries(roster)) {
     principals[id] = { domains: p.domains, clearances: p.clearances ?? [] };
   }
+  // Domain SELF-PRINCIPAL — every domain that governs a table (or is shared one)
+  // MUST map to itself, or the Trino row filter resolves a domain-session user's
+  // membership to [] and returns ZERO rows (the empty-scorecard bug). The governed
+  // query tool runs as the domain name (`user.domains[0]`), so this self-mapping is
+  // load-bearing and must be emitted on EVERY compile — it cannot depend on the
+  // user directory happening to list the domain. Never clobber a real roster entry.
+  for (const g of Object.values(tables)) {
+    for (const dom of [g.domain, ...(g.shared_with ?? [])]) {
+      if (dom && !principals[dom]) principals[dom] = { domains: [dom], clearances: [] };
+    }
+  }
   return { tables, principals };
 }
 
@@ -98,9 +110,13 @@ export type CubeAccessPolicy = {
   excludes: string[];
 };
 
-/** The cube name a dataset's view binds to (one cube per gold mart). */
+/** The cube name a dataset's view binds to (one cube per gold mart). Delegates to
+ *  `cubeName` (the single identity source) so the compiled access-policy key is
+ *  BYTE-FOR-BYTE the model name `buildCubeModels` joins on — #155 namespacing included.
+ *  If these two ever diverged, `policies.get(cubeName(d))` would miss and the cube would
+ *  ship with NO access policy. */
 export function cubeFor(d: Dataset): string {
-  return d.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'dataset';
+  return cubeName(d);
 }
 
 export function compileCube(datasets: Dataset[]): CubeAccessPolicy[] {

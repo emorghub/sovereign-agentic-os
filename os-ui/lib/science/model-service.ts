@@ -13,9 +13,12 @@ import type {
   Caller,
   CompiledPredictPolicy,
   ConsumptionMode,
+  ModelSpec,
   ModelTier,
   ServiceModel,
 } from '@/lib/science/types';
+// Pure edit-scope helper (type-only dep chain — safe under `node --test`).
+import { canManageArtifact, type ArtifactScope } from '../governance/edit-scope.ts';
 
 /**
  * Model-as-service governance — the Opus spine of the Science golden path.
@@ -65,6 +68,56 @@ function seedModels(): ServiceModel[] {
   return [];
 }
 
+/**
+ * The churn/KServe slice as a FULL model artifact — the one live backend, wrapped
+ * as the first `trained`+`deployed` model so the Science tab is never empty and has
+ * a real thing to open/predict/promote. Personal tier (owner-only) so the whole
+ * ladder is walkable; Production stage + a certified v2 version mirror the live
+ * MLflow registry. This is the Phase-1 template the route seeds when the registry
+ * has no churn model yet; tests seed it explicitly via `upsertModel`.
+ */
+export function churnSeedModel(owner = 'sara', domain = 'sales'): ServiceModel {
+  const now = new Date().toISOString();
+  return {
+    id: 'svc_churn_model',
+    model: 'churn_model',
+    name: 'Churn model',
+    owner,
+    domain,
+    tier: 'Personal',
+    stage: 'Production',
+    frontDoors: ['rest', 'mcp'],
+    versions: [{ version: 'v2', stage: 'Production', auc: 0.871, certified: true, runId: 'mlf-run-2a9c' }],
+    spec: {
+      sourceDataProductFqn: 'sales.customer_360',
+      targetColumn: 'churned',
+      taskType: 'binary_classification',
+      algorithm: 'xgboost',
+      features: ['recency_days', 'order_frequency', 'monetary_value', 'tenure_months'],
+      trainTestSplit: 0.8,
+      optimizeMetric: 'auc',
+    },
+    buildState: 'deployed',
+    description: 'Predicts customer churn from RFM + tenure features. Served by KServe; the live Layer-4 slice.',
+    metrics: { primary: 0.871, primaryMetric: 'auc' },
+    mlflowRunId: 'mlf-run-2a9c',
+    kserveService: 'churn_model',
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/**
+ * Ensure the wrapped churn model exists (idempotent) — the route calls this so a
+ * fresh tenant's Science tab opens on the live model rather than an empty grid.
+ * Returns the model that is now in the registry (seeded or pre-existing).
+ */
+export function ensureChurnSeed(owner?: string, domain?: string): ServiceModel {
+  const existing = getModel('churn_model');
+  if (existing) return existing;
+  return upsertModel(churnSeedModel(owner, domain));
+}
+
 let registry: Map<string, ServiceModel> | null = null;
 
 function store(): Map<string, ServiceModel> {
@@ -105,9 +158,10 @@ function modelVisibleToUser(m: ServiceModel, viewer: ModelViewer): boolean {
  * surface. Returns the viewer's own Personal models + the Domain models of the
  * domains they belong to + Marketplace-published models, and nothing else.
  */
-export function listModelsForUser(viewer: ModelViewer): ServiceModel[] {
+export function listModelsForUser(viewer: ModelViewer, opts: { includeArchived?: boolean } = {}): ServiceModel[] {
   return [...store().values()]
     .filter((m) => modelVisibleToUser(m, viewer))
+    .filter((m) => opts.includeArchived || !m.archived)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -124,6 +178,138 @@ export function upsertModel(m: ServiceModel): ServiceModel {
 /** Reset the registry to seed — used by tests so each case starts clean. */
 export function _resetModels(): void {
   registry = null;
+}
+
+// --------------------------------------------------------------- create a model ---
+
+function slugModel(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/(^_|_$)/g, '');
+}
+
+/** The fields a caller supplies when creating a model; the rest are derived. */
+export type CreateModelInput = {
+  name: string;
+  description?: string;
+  spec: ModelSpec;
+};
+
+/**
+ * Register a NEW model as a `draft` artifact, owned by the actor in their domain
+ * at the base `Personal` tier — the create seam the builder's Define step calls.
+ * Mirrors how every other artifact is born: authored by a human (agents rejected),
+ * scoped to a domain the actor belongs to, and persisted into the SAME in-process
+ * registry every other store fn keys on (`upsertModel`), so the RLS list, the
+ * policy compiler and the whole tier ladder apply to it immediately. Pure + in-
+ * process (like the agents/dataset MOCK stores) so it stays `node --test`-safe.
+ */
+export function createModel(input: CreateModelInput, actor: Actor): ServiceModel {
+  assertHuman(actor, 'create a model');
+  const domain = actor.domains[0];
+  if (!domain) throw withStatus(new Error('You must belong to a domain to create a model'), 403);
+  const name = input.name?.trim();
+  if (!name) throw withStatus(new Error('A model needs a name'), 400);
+  const modelId = slugModel(name);
+  if (!modelId) throw withStatus(new Error('The model name must contain letters or digits'), 400);
+  if (getModel(modelId)) throw withStatus(new Error(`A model named ${modelId} already exists`), 409);
+
+  const now = new Date().toISOString();
+  const m: ServiceModel = {
+    id: `svc_${modelId}`,
+    model: modelId,
+    name,
+    owner: actor.id,
+    domain,
+    tier: 'Personal',
+    stage: 'Staging',
+    frontDoors: ['rest', 'mcp'],
+    versions: [],
+    spec: input.spec,
+    buildState: 'draft',
+    description: input.description?.trim() || undefined,
+    kserveService: modelId,
+    createdAt: now,
+    updatedAt: now,
+  };
+  return upsertModel(m);
+}
+
+// ------------------------------------------------------------ train transitions ---
+
+/**
+ * A model-service can only be TRAINED by its owner (or an in-domain admin) — the
+ * same edit-scope gate archive/delete use, plus the human invariant. Reused by the
+ * train route before it submits the (least-privilege, run-as-user) training Job.
+ */
+export function assertCanTrain(model: string, actor: Actor): ServiceModel {
+  const m = getModel(model);
+  if (!m) throw withStatus(new Error(`unknown model ${model}`), 404);
+  assertHuman(actor, 'train a model');
+  requireEditScope(actor, m, 'train');
+  if (!m.spec) throw withStatus(new Error('This model has no spec to train from — define it first'), 400);
+  return m;
+}
+
+/**
+ * Flip a model draft→training and stamp the submitted run handle. Guarded so a
+ * second submit while a run is in flight is a typed 409 (never two Jobs racing the
+ * same artifact). Returns the updated model.
+ */
+export function startTraining(model: string, actor: Actor, run: { jobName: string; namespace: string }): ServiceModel {
+  const m = assertCanTrain(model, actor);
+  if (m.buildState === 'training') throw withStatus(new Error('A training run is already in flight for this model'), 409);
+  m.buildState = 'training';
+  m.trainingJob = run.jobName;
+  m.trainingNamespace = run.namespace;
+  m.updatedAt = new Date().toISOString();
+  store().set(m.model, m);
+  return m;
+}
+
+/**
+ * Complete a training run: training→trained, register the new version and record
+ * the run's metrics (from MLflow if the route resolved them; a placeholder value
+ * otherwise so the version is honest about being untracked). Edit-scoped + human.
+ */
+export function completeTraining(
+  model: string,
+  actor: Actor,
+  result: { runId: string; metric?: number; metricName?: string },
+): ServiceModel {
+  const m = getModel(model);
+  if (!m) throw withStatus(new Error(`unknown model ${model}`), 404);
+  assertHuman(actor, 'complete training');
+  requireEditScope(actor, m, 'train');
+  const version = `v${m.versions.length + 1}`;
+  const metricName = result.metricName ?? m.spec?.optimizeMetric ?? 'metric';
+  const value = typeof result.metric === 'number' ? result.metric : 0;
+  m.versions.push({ version, stage: 'Staging', auc: value, certified: false, runId: result.runId });
+  m.buildState = 'trained';
+  m.mlflowRunId = result.runId;
+  m.metrics = { primary: value, primaryMetric: metricName };
+  m.trainingJob = undefined;
+  m.trainingNamespace = undefined;
+  m.updatedAt = new Date().toISOString();
+  store().set(m.model, m);
+  return m;
+}
+
+/** Mark a training run failed (training→draft) so the owner can fix the spec + retry. */
+export function failTraining(model: string, actor: Actor, reason: string): ServiceModel {
+  const m = getModel(model);
+  if (!m) throw withStatus(new Error(`unknown model ${model}`), 404);
+  assertHuman(actor, 'fail training');
+  requireEditScope(actor, m, 'train');
+  m.buildState = 'draft';
+  m.trainingJob = undefined;
+  m.trainingNamespace = undefined;
+  m.lastTrainingError = reason;
+  m.updatedAt = new Date().toISOString();
+  store().set(m.model, m);
+  return m;
 }
 
 // --------------------------------------------------- The policy compiler (mirror) ---
@@ -275,8 +461,8 @@ export function promoteModel(model: string, actor: Actor): ServiceModel {
   assertHuman(actor, 'promote a model');
   requireDomain(actor, m);
   if (m.tier !== 'Personal') throw withStatus(new Error(`model is already ${m.tier}; use certify for Marketplace`), 400);
-  if (actor.role !== 'builder' && actor.role !== 'admin') {
-    throw withStatus(new Error('Promoting to Domain requires a Builder or Admin'), 403);
+  if (actor.role === 'user') {
+    throw withStatus(new Error('Promoting to Domain requires a Builder, Domain admin, or Admin'), 403);
   }
   m.tier = 'Domain';
   store().set(m.model, m);
@@ -293,8 +479,8 @@ export function goLive(model: string, actor: Actor): ServiceModel {
   if (!m) throw withStatus(new Error(`unknown model ${model}`), 404);
   assertHuman(actor, 'approve go-live');
   requireDomain(actor, m);
-  if (actor.role !== 'builder' && actor.role !== 'admin') {
-    throw withStatus(new Error('Go-live to Production requires a Builder or Admin'), 403);
+  if (actor.role === 'user') {
+    throw withStatus(new Error('Go-live to Production requires a Builder, Domain admin, or Admin'), 403);
   }
   const staging = m.versions.find((v) => v.stage === 'Staging');
   if (staging) {
@@ -333,4 +519,50 @@ export function certifyModel(model: string, actor: Actor, mode: ConsumptionMode)
 export function nextTier(t: ModelTier): ModelTier | null {
   const i = ORDER.indexOf(t);
   return i >= 0 && i < ORDER.length - 1 ? ORDER[i + 1] : null;
+}
+
+/** Edit-scope for archive/delete: the owner, a domain_admin of the owning domain,
+ *  or a platform Admin — the ONE fail-closed rule shared with every other tab. */
+function requireEditScope(actor: Actor, m: ServiceModel, action: string): void {
+  requireDomain(actor, m);
+  // Map the science Actor role onto the session Role for the shared gate:
+  // 'user' has no manage rights (→ creator); builder/domain_admin/admin pass through.
+  const role = actor.role === 'user' ? 'creator' : actor.role;
+  // A Personal-tier model is owner-only; a shared/marketplace model admits an in-
+  // domain domain_admin or a platform admin.
+  const scope: ArtifactScope = m.tier === 'Personal' ? 'personal' : m.tier === 'Marketplace' ? 'certified' : 'shared';
+  if (!canManageArtifact({ id: actor.id, role, domains: actor.domains }, { owner: m.owner, domain: m.domain, scope })) {
+    throw withStatus(new Error(`Only the owner, an in-domain Domain admin, or an Admin can ${action} this model`), 403);
+  }
+}
+
+/**
+ * Archive / restore a model (the OS-wide lifecycle). Archived models drop out of
+ * the tab list until restored; delete is reachable only once archived. Edit-scoped
+ * (owner or domain Admin), agents rejected — the same authz posture as promote.
+ */
+export function setModelArchived(model: string, actor: Actor, archived: boolean): ServiceModel {
+  const m = getModel(model);
+  if (!m) throw withStatus(new Error(`unknown model ${model}`), 404);
+  assertHuman(actor, archived ? 'archive a model' : 'restore a model');
+  requireEditScope(actor, m, archived ? 'archive' : 'restore');
+  m.archived = archived;
+  store().set(m.model, m);
+  return m;
+}
+
+/**
+ * Physically delete a model — remove it from the registry (the record every store
+ * fn keys on). Edit-scoped, agents rejected, and ONLY once archived (mirrors the
+ * OS-wide "delete archived-only" rule the UI also enforces). Returns the removed
+ * record so the route can report the backing teardown honestly.
+ */
+export function deleteModel(model: string, actor: Actor): ServiceModel {
+  const m = getModel(model);
+  if (!m) throw withStatus(new Error(`unknown model ${model}`), 404);
+  assertHuman(actor, 'delete a model');
+  requireEditScope(actor, m, 'delete');
+  if (!m.archived) throw withStatus(new Error('Archive the model before deleting it'), 400);
+  store().delete(m.model);
+  return m;
 }

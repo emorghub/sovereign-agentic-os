@@ -11,11 +11,13 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { seed, createArtifact, promoteArtifact, addFromMarketplace, getArtifact, updateArtifact, deleteArtifact, listForUser, archiveArtifact, listArtifactVersions, restoreArtifactVersion, __resetArtifactsCache } from './artifacts.ts';
+import { seed, createArtifact, promoteArtifact, demoteArtifact, addFromMarketplace, getArtifact, updateArtifact, deleteArtifact, listForUser, archiveArtifact, listArtifactVersions, restoreArtifactVersion, __resetArtifactsCache } from './artifacts.ts';
 import type { CurrentUser } from './auth.ts';
 
 const admin: CurrentUser = { id: 'arya', name: 'Arya', domains: ['sales'], role: 'admin' };
 const builder: CurrentUser = { id: 'sara', name: 'Sara', domains: ['sales'], role: 'builder' };
+// Promoting Personal→Shared now requires domain_admin+; `domainAdmin` is the in-domain approver.
+const domainAdmin: CurrentUser = { id: 'dana', name: 'Dana', domains: ['sales'], role: 'domain_admin' };
 const creator: CurrentUser = { id: 'cara', name: 'Cara', domains: ['sales'], role: 'creator' };
 const participant: CurrentUser = { id: 'amir', name: 'Amir', domains: ['sales'], role: 'creator' };
 
@@ -49,6 +51,38 @@ test('a Builder (and Admin) may import from the Marketplace', async () => {
   assert.equal(copy.owner, builder.id);
   assert.equal(copy.origin, 'certified-copy');
   assert.equal(copy.sourceId, id);
+});
+
+test('DEMOTE: revoke sharing lowers Certified → Shared → Personal one step at a time', async () => {
+  __resetArtifactsCache();
+  const id = await certified();
+  assert.equal((await getArtifact(id))!.visibility, 'Certified');
+  const shared = await demoteArtifact(id, admin); // Certified → Shared (admin)
+  assert.equal(shared.visibility, 'Shared');
+  const personal = await demoteArtifact(id, admin); // Shared → Personal
+  assert.equal(personal.visibility, 'Personal');
+  await assert.rejects(() => demoteArtifact(id, admin), /already Personal/i);
+});
+
+test('DEMOTE role gate: revoking a Certified artifact requires an admin (builder → 403)', async () => {
+  __resetArtifactsCache();
+  const id = await certified();
+  await assert.rejects(() => demoteArtifact(id, builder), /admin/i);
+});
+
+test('DEMOTE role gate (fail-closed): a creator cannot unshare a Shared artifact they do not own', async () => {
+  __resetArtifactsCache();
+  const a = await createArtifact(builder, { type: 'knowledge', name: 'Shared runbook', domain: 'sales' });
+  await promoteArtifact(a.id, domainAdmin); // Personal → Shared (owned by builder)
+  await assert.rejects(() => demoteArtifact(a.id, creator), /owner|domain admin|admin/i);
+});
+
+test('DEMOTE: the owner may unshare their own Shared artifact even as a creator', async () => {
+  __resetArtifactsCache();
+  const a = await createArtifact(creator, { type: 'knowledge', name: 'My draft', domain: 'sales' });
+  await promoteArtifact(a.id, domainAdmin); // Personal → Shared (a domain admin promoted it)
+  const back = await demoteArtifact(a.id, creator); // owner pulls it back
+  assert.equal(back.visibility, 'Personal');
 });
 
 test('globalThis: soa.artifacts.cache — write is visible on globalThis and readable back', async () => {

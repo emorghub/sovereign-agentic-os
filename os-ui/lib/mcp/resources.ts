@@ -8,7 +8,7 @@ import type { ToolTab, McpTab } from './server';
 
 // --- Governed read/list lib functions (the SAME the UI + discovery tools call) --
 import { listDatasets, getDataset } from '@/lib/data/store';
-import { listWorkflows, getWorkflow } from '@/lib/knowledge/store';
+import { listWorkflows, getWorkflow, getManual } from '@/lib/knowledge/store';
 import { listFiles, getFile } from '@/lib/files/store';
 import { listMetrics } from '@/lib/metrics/store';
 import { listDashboards, getDashboard } from '@/lib/dashboards/store';
@@ -16,7 +16,7 @@ import { listBets, getBet } from '@/lib/bigbets/store';
 import { listSystems, getSystem } from '@/lib/agents/store';
 import { listAppsForUser, getAppForUser } from '@/lib/software/apps';
 import { listConnectionsForUser, getConnectionForUser } from '@/lib/connections';
-import { listModelsForUser } from '@/lib/science/model-service';
+import { listModelsForUser } from '@/lib/science';
 import { listPillars } from '@/lib/strategy/pillars';
 import { config } from '@/lib/core/config';
 import { loadGuide, guideTitle, type GuidePath } from '@/lib/tabs/guides';
@@ -66,6 +66,7 @@ const json = (v: unknown): string => JSON.stringify(v, null, 2);
 // ================================ GUIDES ======================================
 type GuideDef = { uri: string; path: GuidePath; tab: ToolTab; priority?: number };
 const GUIDE_DEFS: GuideDef[] = [
+  { uri: 'sovereign-os://guide/how-to-use', path: 'how-to-use', tab: 'meta', priority: 1 },
   { uri: 'sovereign-os://guide/overview', path: 'overview', tab: 'meta', priority: 1 },
   { uri: 'sovereign-os://guide/governance', path: 'governance', tab: 'meta', priority: 1 },
   { uri: 'sovereign-os://guide/path/data', path: 'data', tab: 'data' },
@@ -133,7 +134,7 @@ const myResources: McpResource[] = [
     uri: 'sovereign-os://my/datasets',
     name: 'my-datasets',
     title: 'My datasets',
-    description: 'Datasets you can see (yours · domain · marketplace), DLS-scoped. Reuse before you create.',
+    description: 'Datasets you can see (My · Domain · Company), DLS-scoped. Reuse before you create.',
     mimeType: 'application/json',
     tab: 'data',
     minRole: 'creator',
@@ -163,7 +164,7 @@ const myResources: McpResource[] = [
     uri: 'sovereign-os://my/files',
     name: 'my-files',
     title: 'My files',
-    description: 'Files you can see (yours · domain · marketplace), DLS-scoped.',
+    description: 'Files you can see (My · Domain · Company), DLS-scoped.',
     mimeType: 'application/json',
     tab: 'files',
     minRole: 'creator',
@@ -193,7 +194,7 @@ const myResources: McpResource[] = [
     uri: 'sovereign-os://my/agents',
     name: 'my-agents',
     title: 'My agent systems',
-    description: 'Agent systems you can see (yours · domain · marketplace).',
+    description: 'Agent systems you can see (My · Domain · Company).',
     mimeType: 'application/json',
     tab: 'agents',
     minRole: 'creator',
@@ -203,7 +204,7 @@ const myResources: McpResource[] = [
     uri: 'sovereign-os://my/software',
     name: 'my-software',
     title: 'My software',
-    description: 'Apps you can see (yours · domain · shared).',
+    description: 'Apps you can see (My · Domain · Company).',
     mimeType: 'application/json',
     tab: 'software',
     minRole: 'creator',
@@ -213,7 +214,7 @@ const myResources: McpResource[] = [
     uri: 'sovereign-os://my/science',
     name: 'my-science',
     title: 'My models',
-    description: 'ML models you can score through the governed predict door (tier-scoped: yours · domain · marketplace), plus whether serving (ml.enabled) is on. Honest: predict 404s while ml is disabled.',
+    description: 'ML models you can score through the governed predict door (tier-scoped: My · Domain · Company), plus whether serving (ml.enabled) is on. Honest: predict 404s while ml is disabled.',
     mimeType: 'application/json',
     tab: 'science',
     minRole: 'creator',

@@ -16,6 +16,15 @@ import {
   goLive,
   certifyModel,
   nextTier,
+  setModelArchived,
+  deleteModel,
+  createModel,
+  ensureChurnSeed,
+  churnSeedModel,
+  assertCanTrain,
+  startTraining,
+  completeTraining,
+  failTraining,
 } from './model-service.ts';
 import {
   proposePlan,
@@ -45,6 +54,13 @@ function personalModel(): ServiceModel {
     tier: 'Personal', stage: 'Staging', frontDoors: ['rest', 'mcp'],
     versions: [{ version: 'v1', stage: 'Staging', auc: 0.8, certified: false, runId: 'r1' }],
   };
+}
+
+// A SHARED (Domain-tier) model — the scope where a non-owner domain_admin/admin
+// has management authority (a Personal model is owner-only under the manage-rights
+// rule, so admin/domain_admin lifecycle tests use this shared model).
+function domainModel(): ServiceModel {
+  return { ...personalModel(), tier: 'Domain' };
 }
 
 // The store ships EMPTY now; tests that exercise the churn worked-example
@@ -179,7 +195,7 @@ test('promote Personal→Domain needs a Builder; an agent can NEVER self-promote
   assert.throws(() => promoteModel('test_model', agentActor('sales')), /agent cannot promote/i);
   assert.throws(
     () => promoteModel('test_model', { id: 'u', role: 'user', domains: ['sales'], isAgent: false }),
-    /Builder or Admin/i,
+    /Builder|Domain admin|Admin/i,
   );
   assert.equal(promoteModel('test_model', builder('sales')).tier, 'Domain');
 });
@@ -267,4 +283,191 @@ test('fork-allowed import drops a governed fork in the consumer domain', () => {
 test('cannot import a model that is not yet certified to the Marketplace', () => {
   resetWithChurn(); // churn at Personal, not Marketplace
   assert.throws(() => importModel('churn_model', { id: 'm', domain: 'marketing' }), /not certified/i);
+});
+
+test('setModelArchived archives + restores; archived drops out of the viewer list', () => {
+  _resetModels();
+  upsertModel(domainModel()); // SHARED model → an in-domain admin may manage it
+  const viewer = { id: 'sara', domains: ['sales'] };
+  assert.equal(listModelsForUser(viewer).length, 1);
+  setModelArchived('test_model', admin('sales'), true);
+  assert.equal(listModelsForUser(viewer).length, 0, 'archived model hidden by default');
+  assert.equal(listModelsForUser(viewer, { includeArchived: true }).length, 1);
+  setModelArchived('test_model', admin('sales'), false);
+  assert.equal(listModelsForUser(viewer).length, 1, 'restored model visible again');
+});
+
+test('deleteModel requires archive first, then removes the record', () => {
+  _resetModels();
+  upsertModel(domainModel()); // SHARED model → an in-domain admin may manage it
+  assert.throws(() => deleteModel('test_model', admin('sales')), /archive the model before deleting/i);
+  setModelArchived('test_model', admin('sales'), true);
+  deleteModel('test_model', admin('sales'));
+  assert.equal(getModel('test_model'), null, 'record physically removed');
+});
+
+test('archive/delete reject agents and out-of-domain / non-owner non-admin actors', () => {
+  _resetModels();
+  upsertModel(personalModel()); // owner sara, domain sales
+  assert.throws(() => setModelArchived('test_model', agentActor('sales'), true), /agent cannot/i);
+  assert.throws(() => setModelArchived('test_model', admin('marketing'), true), /domain you belong to/i);
+  // a builder who is neither the owner (sara) nor a domain_admin/admin is edit-scoped out
+  assert.throws(() => setModelArchived('test_model', builder('sales'), true), /owner|Domain admin|Admin/i);
+});
+
+test('archive/delete: a domain_admin of the owning domain MAY manage a non-owned SHARED model', () => {
+  _resetModels();
+  upsertModel(domainModel()); // owner sara, domain sales, SHARED (Domain) tier
+  const domainAdmin: Actor = { id: 'dana', role: 'domain_admin', domains: ['sales'], isAgent: false };
+  assert.equal(setModelArchived('test_model', domainAdmin, true).archived, true);
+  // a domain_admin of ANOTHER domain is out of scope.
+  const otherDomainAdmin: Actor = { id: 'omar', role: 'domain_admin', domains: ['ops'], isAgent: false };
+  assert.throws(() => setModelArchived('test_model', otherDomainAdmin, false), /domain you belong to/i);
+});
+
+test('archive/delete: a PERSONAL model is owner-only — no admin, no domain_admin', () => {
+  _resetModels();
+  upsertModel(personalModel()); // owner sara, domain sales, Personal tier
+  // A platform admin (not the owner) may NOT manage another user's private model.
+  assert.throws(() => setModelArchived('test_model', admin('sales'), true), /owner|Domain admin|Admin/i);
+  const domainAdmin: Actor = { id: 'dana', role: 'domain_admin', domains: ['sales'], isAgent: false };
+  assert.throws(() => setModelArchived('test_model', domainAdmin, true), /owner|Domain admin|Admin/i);
+  // The owner still manages their own private model.
+  const sara: Actor = { id: 'sara', role: 'creator', domains: ['sales'], isAgent: false };
+  assert.equal(setModelArchived('test_model', sara, true).archived, true);
+});
+
+// ------------------------------------------------------------- createModel (Phase 1)
+
+const spec = () => ({
+  sourceDataProductFqn: 'sales.customer_360',
+  targetColumn: 'churned',
+  taskType: 'binary_classification' as const,
+  algorithm: 'xgboost',
+  features: ['recency_days', 'tenure_months'],
+  trainTestSplit: 0.8,
+  optimizeMetric: 'auc',
+});
+
+test('createModel registers a draft Personal model owned by the actor, in their domain', () => {
+  _resetModels();
+  const m = createModel({ name: 'Lead scoring', description: 'score leads', spec: spec() }, builder('sales'));
+  assert.equal(m.model, 'lead_scoring'); // slugged
+  assert.equal(m.owner, 'b');
+  assert.equal(m.domain, 'sales');
+  assert.equal(m.tier, 'Personal');
+  assert.equal(m.buildState, 'draft');
+  assert.equal(m.stage, 'Staging');
+  assert.deepEqual(m.frontDoors, ['rest', 'mcp']);
+  assert.equal(m.spec?.taskType, 'binary_classification');
+  assert.ok(m.createdAt && m.updatedAt);
+  // It's in the registry + RLS-visible to its owner as a Personal model.
+  assert.equal(getModel('lead_scoring')?.name, 'Lead scoring');
+  const mine = listModelsForUser({ id: 'b', domains: ['sales'] });
+  assert.ok(mine.some((x) => x.model === 'lead_scoring'));
+});
+
+test('createModel rejects agents, empty names, missing domain, and duplicates', () => {
+  _resetModels();
+  assert.throws(() => createModel({ name: 'X', spec: spec() }, agentActor('sales')), /agent cannot create/i);
+  assert.throws(() => createModel({ name: '   ', spec: spec() }, builder('sales')), /needs a name/i);
+  assert.throws(
+    () => createModel({ name: 'Y', spec: spec() }, { id: 'u', role: 'user', domains: [], isAgent: false }),
+    /belong to a domain/i,
+  );
+  createModel({ name: 'Dup', spec: spec() }, builder('sales'));
+  assert.throws(() => createModel({ name: 'Dup', spec: spec() }, builder('sales')), /already exists/i);
+});
+
+test('createModel: a base user (creator) MAY create their own draft in their domain', () => {
+  _resetModels();
+  const m = createModel({ name: 'My draft', spec: spec() }, { id: 'sara', role: 'user', domains: ['sales'], isAgent: false });
+  assert.equal(m.owner, 'sara');
+  assert.equal(m.tier, 'Personal');
+});
+
+// ------------------------------------------------------ churn seed (the first model)
+
+test('ensureChurnSeed wraps the live churn/KServe slice as the first trained+deployed model', () => {
+  _resetModels();
+  assert.equal(getModel('churn_model'), null, 'registry starts empty');
+  const m = ensureChurnSeed('sara', 'sales');
+  assert.equal(m.model, 'churn_model');
+  assert.equal(m.buildState, 'deployed');
+  assert.equal(m.spec?.taskType, 'binary_classification');
+  assert.equal(m.kserveService, 'churn_model');
+  assert.ok(m.versions.some((v) => v.stage === 'Production' && v.certified));
+  // Idempotent — a second call does not duplicate or clobber.
+  const again = ensureChurnSeed('someone-else', 'other');
+  assert.equal(again.owner, 'sara', 'pre-existing model is returned unchanged');
+  assert.equal(listModels().filter((x) => x.model === 'churn_model').length, 1);
+  // The churn seed appears in its owner's RLS-scoped list.
+  assert.ok(listModelsForUser({ id: 'sara', domains: ['sales'] }).some((x) => x.model === 'churn_model'));
+});
+
+test('churnSeedModel is a self-consistent Personal-tier template (walkable ladder)', () => {
+  const m = churnSeedModel('sara', 'sales');
+  assert.equal(m.tier, 'Personal'); // owner-only start → the whole ladder is walkable
+  assert.equal(nextTier(m.tier), 'Domain');
+  assert.equal(compilePredictPolicy(m).allowedDomains.length, 0); // Personal = owner only
+});
+
+// ------------------------------------------------------------ train transitions ---
+
+const owner = (): Actor => ({ id: 'sara', role: 'user', domains: ['sales'], isAgent: false });
+
+test('startTraining flips draft→training and stamps the run handle (owner-scoped)', () => {
+  _resetModels();
+  createModel({ name: 'Lead scoring', spec: spec() }, owner());
+  const m = startTraining('lead_scoring', owner(), { jobName: 'train-lead-scoring-x', namespace: 'agentic-os' });
+  assert.equal(m.buildState, 'training');
+  assert.equal(m.trainingJob, 'train-lead-scoring-x');
+  assert.equal(m.trainingNamespace, 'agentic-os');
+});
+
+test('startTraining is a typed 409 while a run is already in flight', () => {
+  _resetModels();
+  createModel({ name: 'Lead scoring', spec: spec() }, owner());
+  startTraining('lead_scoring', owner(), { jobName: 'j1', namespace: 'ns' });
+  assert.throws(
+    () => startTraining('lead_scoring', owner(), { jobName: 'j2', namespace: 'ns' }),
+    (e: any) => e.status === 409,
+  );
+});
+
+test('assertCanTrain rejects a non-owner, an agent, and a specless model', () => {
+  _resetModels();
+  createModel({ name: 'Lead scoring', spec: spec() }, owner());
+  // A different user in the same domain but NOT owner/admin cannot train.
+  assert.throws(
+    () => assertCanTrain('lead_scoring', { id: 'other', role: 'user', domains: ['sales'], isAgent: false }),
+    /Only the owner/i,
+  );
+  // An agent can never drive training.
+  assert.throws(() => assertCanTrain('lead_scoring', agentActor('sales')), /agent cannot/i);
+});
+
+test('completeTraining registers a Staging version + metric and lands trained', () => {
+  _resetModels();
+  createModel({ name: 'Lead scoring', spec: spec() }, owner());
+  startTraining('lead_scoring', owner(), { jobName: 'j', namespace: 'ns' });
+  const m = completeTraining('lead_scoring', owner(), { runId: 'mlf-run-1', metric: 0.83, metricName: 'auc' });
+  assert.equal(m.buildState, 'trained');
+  assert.equal(m.versions.length, 1);
+  assert.equal(m.versions[0].version, 'v1');
+  assert.equal(m.versions[0].stage, 'Staging');
+  assert.equal(m.versions[0].certified, false);
+  assert.equal(m.metrics?.primary, 0.83);
+  assert.equal(m.mlflowRunId, 'mlf-run-1');
+  assert.equal(m.trainingJob, undefined); // handle cleared on completion
+});
+
+test('failTraining resets training→draft and records the reason', () => {
+  _resetModels();
+  createModel({ name: 'Lead scoring', spec: spec() }, owner());
+  startTraining('lead_scoring', owner(), { jobName: 'j', namespace: 'ns' });
+  const m = failTraining('lead_scoring', owner(), 'BackoffLimitExceeded');
+  assert.equal(m.buildState, 'draft');
+  assert.equal(m.lastTrainingError, 'BackoffLimitExceeded');
+  assert.equal(m.trainingJob, undefined);
 });

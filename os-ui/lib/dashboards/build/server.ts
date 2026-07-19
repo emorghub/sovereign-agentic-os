@@ -10,6 +10,8 @@ import { type AlertRule } from '../../metrics/alerts.ts';
 import { type DashboardBuildContext, makeDashboardAdapters } from './live.ts';
 import { makeMockDashboardAdapters, mockDashboardDeps, newDashboardMock } from './mocks.ts';
 import { makeRealDashboardClients, liveDashboardsReachable } from './live-clients.ts';
+import { config } from '../../core/config.ts';
+import { ensureEmbedded, resolveDashboardIdByTitle } from '../../superset/client.ts';
 
 /**
  * Server boundary for a Dashboard build (mirrors lib/data/build/server.ts). It builds the
@@ -50,18 +52,51 @@ export async function buildDashboard(
  * The guest-token REQUEST (which carries the RLS, R3) is built here regardless of mode;
  * the live signer/offline-mock returns the token. Returns the request too so the route
  * can hand the Embedded SDK the resource + ttl.
+ *
+ * On the LIVE path the guest token must target the dashboard's Superset EMBEDDED UUID, not
+ * the OS/Superset dashboard id — so we resolve the Superset dashboard by title, ensure it
+ * is registered for embedding (creating the registration on first view), and mint against
+ * that UUID. `dashboardName` is the Superset dashboard title (spec.name). If it can't be
+ * resolved live, we fall through to the honest offline-mock rather than 500 the open.
  */
-export async function mintEmbed(token: DelegatedToken, dashboardId: string): Promise<{
+export async function mintEmbed(token: DelegatedToken, dashboardId: string, spec?: DashboardSpec): Promise<{
   request: ReturnType<typeof guestTokenRequest>;
   token: string;
   expiresInSeconds: number;
   mode: BuildMode;
+  reason?: string;
 }> {
   const request = guestTokenRequest(token, dashboardId);
-  if (await liveDashboardsReachable()) {
-    const minted = await makeRealDashboardClients().embed.mint(request);
-    return { request, ...minted, mode: 'live' };
+  const dashboardName = spec?.name;
+  let reason: string | undefined;
+  if (dashboardName && (await liveDashboardsReachable())) {
+    try {
+      const base = config.supersetInternalUrl;
+      let supersetId = await resolveDashboardIdByTitle(base, dashboardName);
+      if (supersetId == null && spec) {
+        // Auto-heal: a dashboard that was created before it was ever built into Superset
+        // (or before the build-on-create fix) isn't there yet, so the guest token has
+        // nothing to target → offline-mock forever. Build it now from its spec, then
+        // re-resolve, so the embed mounts on this very open. Idempotent: for a dashboard
+        // already in Superset this branch never runs; buildDashboard's own superset adapter
+        // is an upsert-by-title.
+        await buildDashboard(spec, token, dashboardId);
+        supersetId = await resolveDashboardIdByTitle(base, dashboardName);
+      }
+      if (supersetId == null) {
+        reason = `dashboard "${dashboardName}" not found in Superset`;
+      } else {
+        const uuid = await ensureEmbedded(base, supersetId);
+        const embedRequest = { ...request, resourceId: uuid }; // guest token targets the embedded UUID
+        const minted = await makeRealDashboardClients().embed.mint(embedRequest);
+        return { request: embedRequest, ...minted, mode: 'live' };
+      }
+    } catch (e) {
+      // fall through to the honest offline-mock on any live failure — but capture WHY, so a
+      // future mint 403 (or unreachable Superset) surfaces in the panel instead of vanishing.
+      reason = e instanceof Error ? e.message : String(e);
+    }
   }
   const minted = await mockDashboardDeps(newDashboardMock()).embed.mint(request);
-  return { request, ...minted, mode: 'offline-mock' };
+  return { request, ...minted, mode: 'offline-mock', reason };
 }

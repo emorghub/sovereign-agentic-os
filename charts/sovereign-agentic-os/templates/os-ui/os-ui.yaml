@@ -43,6 +43,27 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "services"]
     verbs: ["get", "list"]
+  {{- if .Values.osUI.externalConnectorsEnabled }}
+  # One-click external-warehouse catalog registration (Connections tab): the os-ui
+  # server merges the catalog `.properties` into the `trino-catalog` ConfigMap and
+  # materializes a `trino-ext-<catalog>` Secret in-namespace, then rolls Trino
+  # (lib/connections/warehouse/k8s-registration.ts). Least-privilege: namespaced
+  # configmaps + secrets read/write only — gated on the same flag as the feature, so a
+  # deployment with external connectors OFF grants no secret access at all.
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "create", "patch", "update"]
+  {{- end }}
+  {{- if .Values.ml.enabled }}
+  # Science training runtime (Science tab): the train route submits a per-model
+  # batch/v1 Job (lib/science/training.ts) as the os-ui ServiceAccount and polls it
+  # by name for completion. Least-privilege: namespaced Jobs get/list/create only —
+  # no delete, no pod exec — and gated on the same flag as the Science surface, so a
+  # deployment with ml OFF grants no batch access at all.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -334,15 +355,54 @@ spec:
             # backend URLs already wired above. Server-only; never sent to browsers.
             - name: SUPERSET_INTERNAL_URL
               value: {{ $u.supersetInternalUrl | default "http://agentic-os-superset:8088" | quote }}
+            # Trusted-header SSO service account for Superset writes (guest-token mint,
+            # dashboard import/delete). Superset's _sso_login maps X-Forwarded-Roles → the
+            # user's role, so the service user MUST be provisioned as Admin — only Admin has
+            # can_grant_guest_token (a Gamma default 403s the mint). Admin-overridable.
+            - name: SUPERSET_SERVICE_USER
+              value: {{ $u.supersetServiceUser | default "admin" | quote }}
+            - name: SUPERSET_SERVICE_ROLES
+              value: {{ $u.supersetServiceRoles | default "Admin" | quote }}
             - name: OPENSEARCH_DASHBOARDS_INTERNAL_URL
               value: {{ $u.opensearchDashboardsInternalUrl | default "http://opensearch-dashboards:5601" | quote }}
             - name: CUBE_URL
               value: {{ $u.cubeUrl | default "http://cube:4000" | quote }}
+            {{- if .Values.cube.sqlApi.enabled }}
+            # Power BI consumption via Cube's SQL API (Postgres-wire). The
+            # /api/powerbi/connection-info route advertises host/port so a user can
+            # point Power BI at their per-domain BI principal (bi_<domain>). Override
+            # `cube.sqlApi.host` with the published TCP ingress host for external Power BI.
+            - name: CUBE_SQL_API_ENABLED
+              value: "true"
+            - name: CUBE_SQL_HOST
+              value: {{ .Values.cube.sqlApi.host | default "cube-sql" | quote }}
+            - name: CUBE_SQL_PORT
+              value: {{ .Values.cube.sqlApi.port | default 15432 | quote }}
+            # The domain-scoped Cube SQL password the dashboard-import client injects into
+            # Superset's import `passwords` map so an embedded chart can query the Cube SQL
+            # API as bi_<domain>. From the existing cube-sql-secrets Secret (never inlined).
+            - name: CUBE_SQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cube-sql-secrets
+                  key: CUBEJS_SQL_PASSWORD
+            {{- end }}
             - name: FEATUREFORM_URL
               # Port 80 = Featureform's HTTP dashboard (what the tool-proxy iframes
               # and the Science-tab probe GETs). 7878 is gRPC-only — plain HTTP
               # against it resets, which made the tab report Featureform "absent".
               value: {{ $u.featureformUrl | default "http://featureform:80" | quote }}
+            # External-warehouse connectors (Glue/Snowflake/BigQuery/Databricks/Fabric).
+            # OFF by default — surfaces the warehouse create-flow + MCP tools only when the
+            # operator opts in (lib/core/config.ts reads EXTERNAL_CONNECTORS_ENABLED).
+            - name: EXTERNAL_CONNECTORS_ENABLED
+              value: {{ $u.externalConnectorsEnabled | default false | quote }}
+            # External OpenMetadata connections (Phase 1 — read/discover only). OFF
+            # by default — surfaces the om-catalog create-flow, catalog discovery fold
+            # + MCP read tools only when the operator opts in (lib/core/config.ts reads
+            # OPENMETADATA_CONNECT_ENABLED). No writes to OM in this phase.
+            - name: OPENMETADATA_CONNECT_ENABLED
+              value: {{ $u.openmetadataConnectEnabled | default false | quote }}
             {{- if .Values.ml.enabled }}
             # Layer 4 (Science). Gates the Science/ML surfaces in the UI
             # (lib/config.ts reads ML_ENABLED). On when the Science plane
@@ -407,6 +467,27 @@ spec:
               value: {{ include "soa.consoleUrl" (dict "ctx" . "key" "openmetadata" "fallback" $u.openmetadataUrl) | quote }}
             - name: DAGSTER_CONSOLE_URL
               value: {{ include "soa.consoleUrl" (dict "ctx" . "key" "dagster" "fallback" $u.dagsterConsoleUrl) | quote }}
+            {{- if .Values.ml.enabled }}
+            # Layer-4 (Science) browser-reachable consoles. The Science-tab "Open"
+            # buttons for JupyterHub + KServe are NATIVE links (not the same-origin
+            # tool proxy: Jupyter needs WebSocket kernels and KServe has no human UI,
+            # so both are rejected by the /tools proxy). Without these env vars they
+            # fall back to the localhost defaults in lib/core/config.ts — a dead link
+            # on a real deploy (the Jupyter 404 / KServe localhost bug). Resolve them
+            # through soa.consoleUrl exactly like every other console: the PUBLIC
+            # ingress host when `ingress.hosts.<key>` is set, else "" so the UI HIDES
+            # the "Open" link instead of dialing localhost. MLflow/Featureform ALSO
+            # get a console value here (they open via the proxy, but this keeps the
+            # env explicit and consistent). Local-kind keeps the port-forward defaults.
+            - name: JUPYTERHUB_CONSOLE_URL
+              value: {{ include "soa.consoleUrl" (dict "ctx" . "key" "jupyterhub" "fallback" $u.jupyterhubConsoleUrl) | quote }}
+            - name: MLFLOW_CONSOLE_URL
+              value: {{ include "soa.consoleUrl" (dict "ctx" . "key" "mlflow" "fallback" $u.mlflowConsoleUrl) | quote }}
+            - name: FEATUREFORM_CONSOLE_URL
+              value: {{ include "soa.consoleUrl" (dict "ctx" . "key" "featureform" "fallback" $u.featureformConsoleUrl) | quote }}
+            - name: KSERVE_CONSOLE_URL
+              value: {{ include "soa.consoleUrl" (dict "ctx" . "key" "kserve" "fallback" $u.kserveConsoleUrl) | quote }}
+            {{- end }}
             # Langfuse project keys — public key is non-secret; secret key via Secret.
             - name: LANGFUSE_PUBLIC_KEY
               value: {{ .Values.langfuseInit.publicKey | quote }}

@@ -83,6 +83,78 @@ test('round-trips through serialize -> parse', () => {
   assert.equal(again.entrypoint, 'supervisor');
 });
 
+// --- DATA-grant medallion layer -------------------------------------------------
+
+test('data grant: layer omitted defaults to gold and stays out of the file (byte-stable)', () => {
+  const sys = parseSystem(`
+entrypoint: a
+grants:
+  data:
+    - { id: ds_orders, capability: Read }
+agents:
+  - { id: a, role: r, agent_md: "", memory_md: "" }
+`);
+  // No layer key ⇒ gold (unset) — the historic/serving behaviour.
+  assert.equal(sys.grants.data[0].layer, undefined);
+  // Serialize does not introduce a `layer:` key for a gold/unset grant.
+  assert.ok(!/layer:/.test(serializeSystem(sys)), 'gold grant serializes without a layer key');
+});
+
+test('data grant: a silver layer is parsed, preserved and round-trips', () => {
+  const sys = parseSystem(`
+entrypoint: a
+grants:
+  data:
+    - { id: ds_orders, capability: Read, layer: silver }
+agents:
+  - { id: a, role: r, agent_md: "", memory_md: "" }
+`);
+  assert.equal(sys.grants.data[0].layer, 'silver');
+  const yaml = serializeSystem(sys);
+  assert.match(yaml, /layer: silver/);
+  const again = parseSystem(yaml);
+  assert.equal(again.grants.data[0].layer, 'silver');
+});
+
+test('data grant: an explicit gold layer is normalized away (byte-stable with unset)', () => {
+  const withGold = parseSystem(`
+entrypoint: a
+grants: { data: [{ id: ds_x, capability: Read, layer: gold }] }
+agents: [{ id: a, role: r, agent_md: "", memory_md: "" }]
+`);
+  const withUnset = parseSystem(`
+entrypoint: a
+grants: { data: [{ id: ds_x, capability: Read }] }
+agents: [{ id: a, role: r, agent_md: "", memory_md: "" }]
+`);
+  assert.equal(withGold.grants.data[0].layer, undefined);
+  assert.equal(serializeSystem(withGold), serializeSystem(withUnset));
+});
+
+test('an invalid data layer is rejected', () => {
+  assert.throws(
+    () =>
+      parseSystem(`
+entrypoint: a
+grants: { data: [{ id: ds_x, capability: Read, layer: platinum }] }
+agents: [{ id: a, role: r, agent_md: "", memory_md: "" }]
+`),
+    /invalid layer 'platinum'/,
+  );
+});
+
+test('downgradeGrantsForRole preserves a data grant layer', () => {
+  const sys = parseSystem(`
+entrypoint: a
+grants: { data: [{ id: ds_x, capability: Write-bounded, layer: silver }] }
+agents: [{ id: a, role: r, agent_md: "", memory_md: "" }]
+`);
+  // A non-builder downgrade flips Write-bounded → Write-approval but keeps the layer.
+  const down = downgradeGrantsForRole(sys, 'creator');
+  assert.equal(down.grants.data[0].capability, 'Write-approval');
+  assert.equal(down.grants.data[0].layer, 'silver');
+});
+
 test('ui.positions round-trips and is pruned to declared agents', () => {
   const sys = parseSystem(`
 entrypoint: a
@@ -281,4 +353,68 @@ agents:
 `);
   assert.equal(downgradeGrantsForRole(sys, 'builder').grants.data[0].capability, 'Write-bounded');
   assert.equal(downgradeGrantsForRole(sys, 'admin').grants.data[0].capability, 'Write-bounded');
+});
+
+// ── Wave 3: folder grants ───────────────────────────────────────────────────
+
+test('folder grant round-trips through parse → serialize → parse', () => {
+  const yaml = `
+version: "1"
+system: { name: T, domain: sales, visibility: Personal }
+entrypoint: a
+grants:
+  data:
+    - { id: d1, capability: Read }
+    - { folder: { path: /contracts, scope: personal }, capability: Read }
+  files:
+    - { folder: { path: /invoices, scope: domain }, capability: Write-bounded }
+agents:
+  - { id: a, role: r, agent_md: "", memory_md: "" }
+`;
+  const sys = parseSystem(yaml);
+  // The folder grant carries an empty id + a normalised {path,scope}.
+  const fg = sys.grants.data.find((g) => g.folder)!;
+  assert.equal(fg.id, '');
+  assert.equal(fg.folder!.path, '/contracts');
+  assert.equal(fg.folder!.scope, 'personal');
+  assert.equal(sys.grants.files[0].folder!.path, '/invoices');
+  assert.equal(sys.grants.files[0].folder!.scope, 'domain');
+  assert.equal(sys.grants.files[0].capability, 'Write-bounded');
+  // Item grant is still present alongside the folder grant.
+  assert.ok(sys.grants.data.some((g) => g.id === 'd1' && !g.folder));
+  // Byte-stable across a second round-trip.
+  const round = serializeSystem(sys);
+  assert.equal(serializeSystem(parseSystem(round)), round);
+});
+
+test('back-compat: a pre-Wave-3 system.yaml stays byte-stable (no grants.files key)', () => {
+  const yaml = serializeSystem(parseSystem(`
+version: "1"
+system: { name: T, domain: sales, visibility: Personal }
+entrypoint: a
+grants:
+  tools: [search_knowledge]
+  data: [{ id: d1, capability: Read }]
+agents:
+  - { id: a, role: r, agent_md: "", memory_md: "" }
+`));
+  // No folder grant anywhere ⇒ the additive `files` key is NEVER emitted.
+  assert.ok(!yaml.includes('files:'), 'grants.files omitted when empty');
+  // And a re-parse + re-serialize is identical (stable).
+  assert.equal(serializeSystem(parseSystem(yaml)), yaml);
+});
+
+test('a Write-bounded folder grant is builder-gated like an item grant', () => {
+  const sys = parseSystem(`
+entrypoint: a
+grants:
+  data:
+    - { folder: { path: /x, scope: personal }, capability: Write-bounded }
+agents:
+  - { id: a, role: r, agent_md: "", memory_md: "" }
+`);
+  // A creator introducing a direct-write folder grant is rejected at the save boundary.
+  assert.throws(() => assertGrantsWithinRole(sys, 'creator'), /Write-bounded|direct/i);
+  // Runtime downgrade folds it to held-for-approval for a non-builder owner.
+  assert.equal(downgradeGrantsForRole(sys, 'creator').grants.data[0].capability, 'Write-approval');
 });

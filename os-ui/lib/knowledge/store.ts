@@ -5,18 +5,23 @@ import {
   type Workflow,
   type WorkflowMeta,
   type DomainKnowledge,
+  type DomainSection,
   type Visibility,
   KnowledgeError,
   parseWorkflow,
   serializeWorkflow,
   emptyDomainKnowledge,
+  reconcileSections,
 } from './schema.ts';
 import { canPromote, roleAtLeast } from '../core/session.ts';
 import type { Role } from '../core/session.ts';
 import { osMirror } from '../infra/os-mirror.ts';
 import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
+import { canManageArtifact, type ArtifactScope } from '../governance/edit-scope.ts';
+import { type ManualScope, resolveManual } from './manual.ts';
 
 export type { ArtifactVersion };
+export type { ManualScope };
 
 /**
  * Knowledge workflow store — the mock Forgejo repo behind the Knowledge tab
@@ -135,6 +140,10 @@ const mirror = osMirror({
 // canonical `md` + `tacit` is snapshotted on every meaningful edit + on restore.
 const versions = versionLog('knowledge-workflow');
 
+// The general DOMAIN-knowledge card (the pinned operating manual) rides the SAME
+// version log primitive, keyed by domain, snapshotted on every meaningful edit.
+const domainVersions = versionLog('domain-knowledge');
+
 function writeThrough(rec: WorkflowRecord): void {
   mirror.writeThrough(rec.id, rec);
 }
@@ -146,7 +155,7 @@ function snapshotState(rec: WorkflowRecord): { md: string; tacit: string } {
 
 export async function ensureHydrated(): Promise<void> {
   const s = ks();
-  if (!s.hydration) s.hydration = Promise.all([hydrate(), versions.ensureHydrated()]).then(() => {});
+  if (!s.hydration) s.hydration = Promise.all([hydrate(), versions.ensureHydrated(), domainVersions.ensureHydrated()]).then(() => {});
   return s.hydration;
 }
 
@@ -176,6 +185,7 @@ export function __resetStore(): void {
   s.hydration = null;
   mirror.__reset();
   versions.__reset();
+  domainVersions.__reset();
 }
 
 // --------------------------------------------------------------- scoping -----
@@ -196,8 +206,13 @@ function canView(rec: WorkflowRecord, user: Principal): boolean {
 }
 
 function canEdit(rec: WorkflowRecord, user: Principal): boolean {
-  if (rec.owner === user.id) return true;
-  return roleAtLeast(user.role, 'builder') && user.domains.includes(rec.domain);
+  // Fail-closed edit-scope: owner always; a Personal draft is owner-only to MANAGE
+  // (no admin/domain_admin mutates another user's private workflow, even though a
+  // Builder+ may view it). A Shared / Marketplace workflow admits an in-domain
+  // domain_admin or a platform admin. (Closes the gap where any in-domain Builder
+  // could mutate another's workflow.)
+  const scope: ArtifactScope = rec.visibility === 'Personal' ? 'personal' : rec.visibility === 'Marketplace' ? 'certified' : 'shared';
+  return canManageArtifact(user, { owner: rec.owner, domain: rec.domain, scope });
 }
 
 function requireView(id: string, user: Principal): WorkflowRecord {
@@ -280,6 +295,7 @@ export function createWorkflow(
     status: 'draft',
     version: '1',
     rules: [],
+    actors: [],
     steps: [],
     body: '',
   };
@@ -296,6 +312,26 @@ export function createWorkflow(
   ks().workflows.set(id, rec);
   writeThrough(rec);
   return rec;
+}
+
+/**
+ * Governed offboard support: transfer this owner's PERSONAL-lane records to a new
+ * owner (used by lib/platform-admin/offboard.ts when a user is offboarded with
+ * reassignment). Only personal, owner-only artifacts move; shared/domain/certified
+ * are untouched. Returns the count moved. Only the workflows map is touched —
+ * domain knowledge is domain-scoped, not personal.
+ */
+export function reassignOwner(fromId: string, toId: string): number {
+  let moved = 0;
+  for (const rec of ks().workflows.values()) {
+    if (rec.owner !== fromId) continue;
+    if (rec.visibility !== 'Personal') continue; // personal lane only
+    rec.owner = toId;
+    rec.updatedAt = now();
+    writeThrough(rec);
+    moved++;
+  }
+  return moved;
 }
 
 export type WorkflowPatch = {
@@ -339,7 +375,16 @@ export function updateWorkflow(
 
 export function deleteWorkflow(id: string, user: Principal): void {
   const rec = requireEdit(id, user);
-  if (rec.status === 'live') fail('Cannot delete a published workflow — unpublish it first', 400);
+  // OS-wide lifecycle: Delete is reachable only after Archive (the UI exposes
+  // Delete solely on an archived artifact). A live workflow is still shared with
+  // the domain, so it may NOT be deleted directly — archive it first. But once
+  // archived it is out of every working list and safe to permanently remove,
+  // regardless of its prior published/live tier. Blocking live-AND-archived was
+  // the bug that made every published workflow undeletable (it could be archived
+  // but never removed, so the tile persisted forever).
+  if (rec.status === 'live' && !rec.archived) {
+    fail('Archive this published workflow before deleting it', 400);
+  }
   mirror.deleteThrough(id);
   versions.purge(id);
   ks().workflows.delete(id);
@@ -352,9 +397,11 @@ export function deleteWorkflow(id: string, user: Principal): void {
  */
 export function publishWorkflow(id: string, user: Principal): WorkflowRecord {
   if (!canPromote(user.role, 'Personal')) {
-    fail('Only builders and admins can publish workflows', 403);
+    fail('Only domain admins and admins can publish workflows', 403);
   }
-  const rec = requireEdit(id, user);
+  // The APPROVER authority is `canPromote` (above) — an approver need not be the
+  // artifact owner, so gate on VIEW here, not edit (which is owner/domain_admin-only).
+  const rec = requireView(id, user);
   if (rec.status === 'live') fail('Workflow is already published', 400);
 
   // Patch the frontmatter in the md to reflect the new state.
@@ -380,7 +427,8 @@ export function certifyWorkflow(id: string, user: Principal): WorkflowRecord {
   if (!canPromote(user.role, 'Shared')) {
     fail('Only admins can certify workflows to the marketplace', 403);
   }
-  const rec = requireEdit(id, user);
+  // Approver authority is the canPromote gate above — not artifact ownership.
+  const rec = requireView(id, user);
   if (rec.status !== 'live') fail('Workflow must be published before marketplace certification', 400);
   if (rec.visibility === 'Marketplace') fail('Workflow is already in the marketplace', 400);
 
@@ -407,6 +455,11 @@ export type DomainKnowledgePatch = {
   sections?: { id: string; content: string }[];
 };
 
+/** The versioned slice of a domain-knowledge card — its guided sections. */
+function snapshotDomain(dk: DomainKnowledge): { sections: DomainSection[] } {
+  return { sections: dk.sections.map((s) => ({ ...s })) };
+}
+
 export function updateDomainKnowledge(
   domain: string,
   user: Principal,
@@ -417,15 +470,166 @@ export function updateDomainKnowledge(
   const dk = ks().domainKnowledge.get(domain) ?? emptyDomainKnowledge(domain);
 
   if (patch.sections) {
-    for (const s of patch.sections) {
+    // Snapshot the PRIOR card before overwriting it, but only if this edit
+    // actually changes something (no version churn on a no-op save).
+    const changes = patch.sections.some((s) => {
       const sec = dk.sections.find((x) => x.id === s.id);
-      if (sec) sec.content = s.content;
+      return sec !== undefined && sec.content !== s.content;
+    });
+    if (changes) {
+      domainVersions.record(domain, user.id, snapshotDomain(dk), 'edit domain knowledge');
+      for (const s of patch.sections) {
+        const sec = dk.sections.find((x) => x.id === s.id);
+        if (sec) sec.content = s.content;
+      }
+      dk.updatedAt = now();
     }
   }
 
+  ks().domainKnowledge.set(domain, dk);
+  return dk;
+}
+
+/** Version history for a domain-knowledge card, newest first (view-scoped, in-domain). */
+export function listDomainKnowledgeVersions(domain: string, user: Principal): ArtifactVersion[] {
+  if (!user.domains.includes(domain)) fail('Not permitted to view knowledge for this domain', 403);
+  ensureSeeded();
+  return domainVersions.list(domain);
+}
+
+/**
+ * Restore a prior version of a domain-knowledge card's sections. Auditable +
+ * reversible: the CURRENT card is snapshotted as a new version first, THEN the
+ * chosen version is applied. Edit-scoped (in-domain) — mirrors
+ * `restoreWorkflowVersion` / `restorePersonalKnowledgeVersion`.
+ */
+export function restoreDomainKnowledgeVersion(
+  domain: string,
+  user: Principal,
+  version: number,
+): DomainKnowledge {
+  if (!user.domains.includes(domain)) fail('Not permitted to edit knowledge for this domain', 403);
+  ensureSeeded();
+  const snap = domainVersions.get(domain, version);
+  if (!snap) fail(`Version ${version} not found`, 404);
+  const state = snap.state as { sections?: DomainSection[] };
+  const restored = state.sections;
+  // Reject a corrupt snapshot rather than go live with it.
+  if (!Array.isArray(restored) || restored.some((s) => typeof s?.content !== 'string')) {
+    fail(`Version ${version} has no restorable source`, 422);
+  }
+  const dk = ks().domainKnowledge.get(domain) ?? emptyDomainKnowledge(domain);
+  // Snapshot the live card first so the restore can itself be undone.
+  domainVersions.record(domain, user.id, snapshotDomain(dk), `restore of v${version}`);
+  // Apply restored content onto the current section template (keeps ids/titles stable).
+  for (const sec of dk.sections) {
+    const from = restored.find((s) => s.id === sec.id);
+    if (from) sec.content = from.content;
+  }
   dk.updatedAt = now();
   ks().domainKnowledge.set(domain, dk);
   return dk;
+}
+
+// ------------------------------------ Operating Model (My/Domain/Company) ----
+// The Operating Model tab renders the SAME guided-sections card at three scopes,
+// each backed by a `DomainKnowledge` record keyed by a reserved storage key
+// (`user:<id>`, the real domain, or `tenant`). These wrappers resolve the key +
+// per-scope gating (see lib/knowledge/manual.ts) then reuse the exact domain-card
+// primitives above, so version history + restore work identically for all three.
+// Governance is enforced HERE (server-side), never trusted from the client.
+
+function fail403(): never {
+  fail('Not permitted', 403);
+}
+
+export function getManual(scope: ManualScope, user: Principal, domain?: string): DomainKnowledge {
+  const r = resolveManual(scope, user, domain);
+  if (!r.canView) fail403();
+  ensureSeeded();
+  const raw = ks().domainKnowledge.get(r.key) ?? emptyDomainKnowledge(r.key);
+  // Migrate old 4-section cards (overview/goals/context/glossary) to the canonical
+  // 7-section shape (general/strategy/business/organization/architecture/data/glossary)
+  // on every read — no data loss, version history preserved, no schema migration needed.
+  return reconcileSections(raw);
+}
+
+export function updateManual(
+  scope: ManualScope,
+  user: Principal,
+  patch: DomainKnowledgePatch,
+  domain?: string,
+): DomainKnowledge {
+  const r = resolveManual(scope, user, domain);
+  if (!r.canEdit) fail403();
+  ensureSeeded();
+  const dk = ks().domainKnowledge.get(r.key) ?? emptyDomainKnowledge(r.key);
+  if (patch.sections) {
+    const changes = patch.sections.some((s) => {
+      const sec = dk.sections.find((x) => x.id === s.id);
+      return sec !== undefined && sec.content !== s.content;
+    });
+    if (changes) {
+      domainVersions.record(r.key, user.id, snapshotDomain(dk), `edit ${scope} operating manual`);
+      for (const s of patch.sections) {
+        const sec = dk.sections.find((x) => x.id === s.id);
+        if (sec) sec.content = s.content;
+      }
+      dk.updatedAt = now();
+    }
+  }
+  ks().domainKnowledge.set(r.key, dk);
+  // Always return the reconciled (new 7-section) shape to the caller.
+  return reconcileSections(dk);
+}
+
+export function listManualVersions(
+  scope: ManualScope,
+  user: Principal,
+  domain?: string,
+): ArtifactVersion[] {
+  const r = resolveManual(scope, user, domain);
+  if (!r.canView) fail403();
+  ensureSeeded();
+  return domainVersions.list(r.key);
+}
+
+export function restoreManualVersion(
+  scope: ManualScope,
+  user: Principal,
+  version: number,
+  domain?: string,
+): DomainKnowledge {
+  const r = resolveManual(scope, user, domain);
+  if (!r.canEdit) fail403();
+  ensureSeeded();
+  const snap = domainVersions.get(r.key, version);
+  if (!snap) fail(`Version ${version} not found`, 404);
+  const state = snap.state as { sections?: DomainSection[] };
+  const restored = state.sections;
+  if (!Array.isArray(restored) || restored.some((s) => typeof s?.content !== 'string')) {
+    fail(`Version ${version} has no restorable source`, 422);
+  }
+  const dk = ks().domainKnowledge.get(r.key) ?? emptyDomainKnowledge(r.key);
+  domainVersions.record(r.key, user.id, snapshotDomain(dk), `restore of v${version}`);
+  // Restore onto the reconciled template — handles both old and new section ids.
+  const reconciled = reconcileSections(dk);
+  for (const sec of reconciled.sections) {
+    const from = restored.find((s) => s.id === sec.id);
+    if (from) sec.content = from.content;
+    else {
+      // Try migration mapping for old-shaped snapshots (overview→general etc.)
+      const legacyId = Object.entries({ overview: 'general', goals: 'strategy', context: 'business', glossary: 'glossary' })
+        .find(([, newId]) => newId === sec.id)?.[0];
+      if (legacyId) {
+        const legacySec = restored.find((s) => s.id === legacyId);
+        if (legacySec) sec.content = legacySec.content;
+      }
+    }
+  }
+  reconciled.updatedAt = now();
+  ks().domainKnowledge.set(r.key, reconciled);
+  return reconciled;
 }
 
 // ----------------------------------------------- tacit (sibling tacit.md) ----

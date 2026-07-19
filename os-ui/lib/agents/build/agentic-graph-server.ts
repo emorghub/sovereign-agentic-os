@@ -2,6 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
+import { config } from '@/lib/core/config';
 import { roleModel } from '@/lib/models/roles';
 import { inputBudget, modelContext } from '@/lib/models/context-windows';
 import type { CurrentUser } from '@/lib/core/auth';
@@ -12,7 +13,8 @@ import type { ToolSpec, AgenticStep, LlmCall } from '@/lib/assistant/agentic';
 import { loadBuildSpec } from '@/lib/tabs/build-spec';
 import { parseSystem, type System } from '../system-schema.ts';
 import { compile } from '../langgraph-compile.ts';
-import { runAgenticGraph, runNode, type AgenticGraphResult } from './agentic-graph.ts';
+import { runAgenticGraph, runNode, type AgenticGraphResult, type AgenticGraphDeps } from './agentic-graph.ts';
+import { liveEmbedder } from '@/lib/infra/context/librarian-live.ts';
 import {
   grantedToolSpecs,
   grantedToolExecutor,
@@ -122,6 +124,9 @@ const OS_TEAM_RULES = [
   '- You may use ONLY the tools you are granted; consume granted resources by reference,',
   '  never a raw secret.',
   '- Prefer real action over description: use your tools to actually do the work.',
+  '- Aggregate/compute with a SINGLE SQL query (GROUP BY / window functions) rather',
+  '  than fetching raw rows to "compute manually"; never re-run a query whose result',
+  '  you already have — reason over the result you already fetched.',
 ].join('\n');
 
 /** The distinct OS tabs a system's granted MCP tools live under (for context grounding). */
@@ -166,6 +171,14 @@ export type RunOsTeamInput = {
   llm?: LlmCall;
   /** Injected in tests; the governed executor deps (authorize/enqueue/handleRpc/trace). */
   toolDeps?: OsToolDeps;
+  /**
+   * LIVE PROGRESS hooks (optional) — forwarded straight to the graph executor so the
+   * run route can stream what is happening right now. Absent → the team runs silently
+   * (the fire-and-wait path). See {@link AgenticGraphDeps}.
+   */
+  onNodeStart?: AgenticGraphDeps['onNodeStart'];
+  onStep?: AgenticGraphDeps['onStep'];
+  onNodeComplete?: AgenticGraphDeps['onNodeComplete'];
 };
 
 /**
@@ -181,21 +194,33 @@ export type RunOsTeamInput = {
 export async function runOsTeam(input: RunOsTeamInput): Promise<AgenticGraphResult> {
   const sys = parseSystem(input.yaml);
   const ir = compile(sys);
+  // Live embedder for the Context Librarian handoff: the predecessor's material is
+  // kept whole by RELEVANCE to the downstream node's need. Degrades to the keepRows
+  // handoff automatically when the embedder falls back to the offline hash.
+  const embedder = liveEmbedder();
   return runAgenticGraph(ir, input.messages, {
     llm: input.llm ?? liteLlmCaller(),
     toolSpecsFor: (node) => grantedToolSpecs(input.user, sys, node.tools),
     callTool: grantedToolExecutor(input.user, sys, input.systemId, input.toolDeps),
+    embed: embedder.embed,
+    embedSource: embedder.lastSource,
     preamble: osPreamble(sys),
     reasoningModel: roleModel('reasoning'),
     // ACT/tool-calling fallback model (a per-agent pin still wins). The `tools`
     // role defaults to Qwen for clean OpenAI tool_calls; the harmony-format
     // light default mangles tool names. Admin-overridable.
     execModel: roleModel('tools'),
-    maxIterations: input.maxIterations,
+    // Each TEAM node gets the higher per-node cap (an evaluator/recommender doing
+    // per-campaign work needs more than the single-agent 20). Caller override wins.
+    maxIterations: input.maxIterations ?? config.agentTeamNodeMaxSteps,
     // Bound every node to the smaller live window; cap each node's own output.
     budget: handoffBudget(),
     maxOutputTokens: modelContext(roleModel('tools')).reservedOutput,
     disabled: input.disabledAgents,
+    // LIVE PROGRESS: forwarded to the streaming run route (no-op when unset).
+    onNodeStart: input.onNodeStart,
+    onStep: input.onStep,
+    onNodeComplete: input.onNodeComplete,
   });
 }
 

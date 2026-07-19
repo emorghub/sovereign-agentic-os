@@ -14,6 +14,8 @@ import {
   certifyWorkflow,
   getDomainKnowledge,
   updateDomainKnowledge,
+  listDomainKnowledgeVersions,
+  restoreDomainKnowledgeVersion,
   archiveWorkflow,
   unarchiveWorkflow,
   listWorkflowVersions,
@@ -23,6 +25,8 @@ import {
 
 const participant = { id: 'amir', domains: ['sales'], role: 'creator' as const };
 const builder = { id: 'bea', domains: ['sales'], role: 'builder' as const };
+// Promoting Personal→Shared now requires domain_admin+; `dom` is the in-domain approver.
+const dom = { id: 'dana', domains: ['sales'], role: 'domain_admin' as const };
 const admin = { id: 'sara', domains: ['sales', 'finance'], role: 'admin' as const };
 const outsider = { id: 'kenji', domains: ['finance'], role: 'builder' as const };
 
@@ -44,7 +48,7 @@ test('a created draft appears under Mine for its owner', () => {
 test('a published workflow is visible to its domain', () => {
   __resetStore();
   const rec = createWorkflow(builder, { title: 'Customer Onboarding', domain: 'sales' });
-  publishWorkflow(rec.id, builder);
+  publishWorkflow(rec.id, dom);
   const groups = listWorkflows(builder);
   const all = [...groups.mine, ...groups.domain, ...groups.marketplace];
   assert.ok(all.some((w) => w.title === 'Customer Onboarding'), 'Customer Onboarding should be visible');
@@ -53,7 +57,7 @@ test('a published workflow is visible to its domain', () => {
 test('own Shared (published) workflow groups under Domain, not Mine', () => {
   __resetStore();
   const rec = createWorkflow(builder, { title: 'Refund Handling', domain: 'sales' });
-  publishWorkflow(rec.id, builder); // Personal draft → Shared live
+  publishWorkflow(rec.id, dom); // Personal draft → Shared live
   const groups = listWorkflows(builder);
   assert.ok(groups.domain.some((w) => w.id === rec.id), 'own Shared workflow belongs under Domain');
   assert.ok(!groups.mine.some((w) => w.id === rec.id), 'own Shared workflow is NOT under Mine');
@@ -113,28 +117,34 @@ test('participant CANNOT publish (publish gate)', () => {
   assert.throws(() => publishWorkflow(draft.id, participant), /builder|admin/i);
 });
 
-test('builder CAN publish: draft → live (Personal → Shared)', () => {
+test('a plain builder can NO LONGER publish (Personal→Shared needs domain_admin)', () => {
+  __resetStore();
+  const rec = createWorkflow(builder, { title: 'Builder Blocked', domain: 'sales' });
+  assert.throws(() => publishWorkflow(rec.id, builder), /domain admin/i);
+});
+
+test('domain_admin CAN publish: draft → live (Personal → Shared)', () => {
   __resetStore();
   const rec = createWorkflow(builder, { title: 'To Publish', domain: 'sales' });
   assert.equal(rec.status, 'draft');
-  const published = publishWorkflow(rec.id, builder);
+  const published = publishWorkflow(rec.id, dom);
   assert.equal(published.status, 'live');
   assert.equal(published.visibility, 'Shared');
-  assert.ok(published.publishedBy === builder.id);
+  assert.ok(published.publishedBy === dom.id);
 });
 
 test('cannot publish an already-live workflow', () => {
   __resetStore();
   const rec = createWorkflow(builder, { title: 'Double-publish', domain: 'sales' });
-  publishWorkflow(rec.id, builder);
-  assert.throws(() => publishWorkflow(rec.id, builder), /already published/i);
+  publishWorkflow(rec.id, dom);
+  assert.throws(() => publishWorkflow(rec.id, dom), /already published/i);
 });
 
 test('only admin can certify to Marketplace', () => {
   __resetStore();
   const rec = createWorkflow(builder, { title: 'For Market', domain: 'sales' });
-  publishWorkflow(rec.id, builder);
-  assert.throws(() => certifyWorkflow(rec.id, builder), /admin/i);
+  publishWorkflow(rec.id, dom);
+  assert.throws(() => certifyWorkflow(rec.id, dom), /admin/i);
   const certified = certifyWorkflow(rec.id, admin);
   assert.equal(certified.visibility, 'Marketplace');
 });
@@ -147,37 +157,117 @@ test('delete removes a draft', () => {
   assert.ok(!groups.mine.some((w) => w.id === rec.id));
 });
 
-test('cannot delete a live workflow', () => {
+test('cannot delete a live workflow while it is unarchived (must archive first)', () => {
   __resetStore();
   const rec = createWorkflow(builder, { title: 'Published', domain: 'sales' });
-  publishWorkflow(rec.id, builder);
-  assert.throws(() => deleteWorkflow(rec.id, builder), /unpublish/i);
+  publishWorkflow(rec.id, dom);
+  assert.throws(() => deleteWorkflow(rec.id, builder), /archive/i);
 });
 
-test('getDomainKnowledge returns the empty domain-knowledge template (4 sections)', () => {
+test('archived-live delete regression: an ARCHIVED published workflow deletes from the LIST source-of-truth for its owner, is denied for a non-owner non-admin, and is then gone', () => {
+  // Reproduces the reported bug: a published (Shared/live) workflow could be
+  // archived but NEVER deleted — the guard blocked all `live` records — so the
+  // archived tile persisted forever. Delete must physically remove it from the
+  // authoritative list store (ks().workflows, surfaced by listWorkflows), not
+  // just soft-hide it.
+  __resetStore();
+  const rec = createWorkflow(builder, { title: 'Undeletable', domain: 'sales' });
+  publishWorkflow(rec.id, dom); // Personal draft → Shared LIVE
+  archiveWorkflow(rec.id, builder);
+
+  // Still present in the LIST (as archived), not yet gone.
+  assert.ok(
+    listWorkflows(builder, { includeArchived: true }).domain.some((w) => w.id === rec.id),
+    'archived-live workflow is still listed before delete',
+  );
+
+  // A non-owner non-admin from another domain cannot delete it.
+  assert.throws(() => deleteWorkflow(rec.id, outsider), /not permitted/i);
+
+  // The owner deletes the archived-live workflow — it is physically gone.
+  deleteWorkflow(rec.id, builder);
+  assert.throws(() => getWorkflow(rec.id, builder), /not found/i);
+  // Gone from the LIST source-of-truth in every scope, archived or not.
+  const all = listWorkflows(builder, { includeArchived: true });
+  assert.ok(![...all.mine, ...all.domain, ...all.marketplace].some((w) => w.id === rec.id));
+});
+
+test('getDomainKnowledge returns the empty domain-knowledge template (7 sections)', () => {
   __resetStore();
   const dk = getDomainKnowledge('sales');
   assert.equal(dk.domain, 'sales');
-  assert.equal(dk.sections.length, 4);
+  assert.equal(dk.sections.length, 7);
   // The section TEMPLATE is structural; a fresh tenant has no content yet.
-  assert.equal(dk.sections.find((s) => s.id === 'overview')?.content, '');
+  assert.equal(dk.sections.find((s) => s.id === 'general')?.content, '');
 });
 
 test('updateDomainKnowledge patches section content', () => {
   __resetStore();
   updateDomainKnowledge('sales', builder, {
-    sections: [{ id: 'overview', content: 'Updated overview.' }],
+    sections: [{ id: 'general', content: 'Updated general.' }],
   });
   const dk = getDomainKnowledge('sales');
-  assert.equal(dk.sections.find((s) => s.id === 'overview')?.content, 'Updated overview.');
+  assert.equal(dk.sections.find((s) => s.id === 'general')?.content, 'Updated general.');
 });
 
 test('outsider cannot update domain knowledge', () => {
   __resetStore();
   assert.throws(
-    () => updateDomainKnowledge('sales', outsider, { sections: [{ id: 'overview', content: 'x' }] }),
+    () => updateDomainKnowledge('sales', outsider, { sections: [{ id: 'general', content: 'x' }] }),
     /permitted/i,
   );
+});
+
+test('updateDomainKnowledge snapshots the prior card; restore reverts + is itself versioned', () => {
+  __resetStore();
+  assert.equal(listDomainKnowledgeVersions('sales', builder).length, 0, 'no history before first edit');
+
+  updateDomainKnowledge('sales', builder, { sections: [{ id: 'general', content: 'v1 general' }] });
+  updateDomainKnowledge('sales', builder, { sections: [{ id: 'general', content: 'v2 general' }] });
+
+  const history = listDomainKnowledgeVersions('sales', builder);
+  assert.equal(history.length, 2);
+  assert.equal(history[0].version, 2, 'newest first');
+  assert.equal(history[0].author, builder.id);
+  assert.equal(history[1].version, 1);
+
+  // A no-op save (same content) does NOT churn a new version.
+  updateDomainKnowledge('sales', builder, { sections: [{ id: 'general', content: 'v2 general' }] });
+  assert.equal(listDomainKnowledgeVersions('sales', builder).length, 2);
+
+  // Restore v1 (prior of the first edit = empty template) → content reverts AND
+  // the pre-restore card is snapshotted as v3, so restore is auditable + reversible.
+  restoreDomainKnowledgeVersion('sales', builder, 1);
+  assert.equal(getDomainKnowledge('sales').sections.find((s) => s.id === 'general')?.content, '');
+  const after = listDomainKnowledgeVersions('sales', builder);
+  assert.equal(after.length, 3);
+  assert.equal(after[0].version, 3);
+  assert.match(after[0].summary, /restore of v1/);
+
+  // Restoring an unknown version 404s.
+  assert.throws(() => restoreDomainKnowledgeVersion('sales', builder, 99), /not found/i);
+});
+
+test('domain-knowledge history is view-scoped; restore is edit-scoped (outsider rejected)', () => {
+  __resetStore();
+  updateDomainKnowledge('sales', builder, { sections: [{ id: 'general', content: 'shared' }] });
+
+  // An outsider (finance) is not in the sales domain → cannot view OR restore.
+  assert.throws(() => listDomainKnowledgeVersions('sales', outsider), /permitted/i);
+  assert.throws(() => restoreDomainKnowledgeVersion('sales', outsider, 1), /permitted/i);
+
+  // A same-domain creator can VIEW history but restore still enforces in-domain.
+  assert.doesNotThrow(() => listDomainKnowledgeVersions('sales', participant));
+  assert.doesNotThrow(() => restoreDomainKnowledgeVersion('sales', participant, 1));
+});
+
+test('restoreDomainKnowledgeVersion rejects a corrupt snapshot', () => {
+  __resetStore();
+  updateDomainKnowledge('sales', builder, { sections: [{ id: 'general', content: 'ok' }] });
+  // Corrupt v1's snapshot in place, then attempt a restore → 422.
+  const v = listDomainKnowledgeVersions('sales', builder)[0];
+  (v.state as { sections: unknown }).sections = [{ id: 'general', content: 123 }];
+  assert.throws(() => restoreDomainKnowledgeVersion('sales', builder, 1), /no restorable source/i);
 });
 
 // ------------------------------------------ archive / delete / versions -------
@@ -251,7 +341,7 @@ test('archive / delete / restore obey edit authz (viewer is rejected 403)', () =
   __resetStore();
   // A published workflow is Shared → visible to same-domain participants.
   const rec = createWorkflow(builder, { title: 'Governed', domain: 'sales' });
-  publishWorkflow(rec.id, builder); // now Shared(live)
+  publishWorkflow(rec.id, dom); // now Shared(live)
   const view0 = getWorkflow(rec.id, builder);
   updateWorkflow(rec.id, builder, { md: view0.md + '\n<!-- e -->', sha: view0.sha });
 

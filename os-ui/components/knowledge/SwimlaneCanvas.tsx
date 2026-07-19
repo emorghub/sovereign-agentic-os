@@ -18,11 +18,48 @@ import type { Gap } from '@/lib/knowledge/gaps';
  * step; the inspector lists the jump-to-build action.
  */
 
+// Internal actors use the warm house palette (teal / navy / gold). External
+// actors (Customer / Partner) use cooler, muted tones + a dashed lane outline so a
+// step that leaves the organisation reads as external at a glance — quietly, not loudly.
 const ACTOR_FILL: Record<string, string> = {
   Human: 'var(--teal)',
   Software: 'var(--navy)',
   Agent: 'var(--gold)',
+  Customer: '#5b7a99', // muted slate-blue (cool, external)
+  Partner: '#8a6f9e', // muted mauve (cool, external)
 };
+
+const EXTERNAL_ACTOR = new Set(['Customer', 'Partner']);
+
+// Wrap a step title onto up to `maxLines` lines that fit the box width by whole
+// words (usable ~172px at 13px ≈ 24 chars/line). The last line is ellipsised only
+// if the title still overflows — so titles up to ~3 words × lines show in FULL, and
+// the SVG <title> tooltip always holds the complete text. Keeps the box Apple-clean.
+const TITLE_CHARS_PER_LINE = 24;
+const TITLE_MAX_LINES = 3;
+function wrapTitle(title: string): string[] {
+  const words = title.trim().split(/\s+/);
+  const lines: string[] = [];
+  let line = '';
+  for (const w of words) {
+    const next = line ? `${line} ${w}` : w;
+    if (next.length <= TITLE_CHARS_PER_LINE) {
+      line = next;
+    } else {
+      if (line) lines.push(line);
+      // A single word longer than a line: hard-slice it so it can't overflow.
+      line = w.length > TITLE_CHARS_PER_LINE ? w.slice(0, TITLE_CHARS_PER_LINE - 1) + '…' : w;
+    }
+    if (lines.length === TITLE_MAX_LINES) break;
+  }
+  if (lines.length < TITLE_MAX_LINES && line) lines.push(line);
+  // If words remain beyond the last drawable line, mark the overflow with an ellipsis.
+  const drawn = lines.join(' ').replace(/…$/, '').split(/\s+/).length;
+  if (drawn < words.length && lines.length > 0 && !lines[lines.length - 1].endsWith('…')) {
+    lines[lines.length - 1] = lines[lines.length - 1] + '…';
+  }
+  return lines.length ? lines : [''];
+}
 
 export default function SwimlaneCanvas({
   workflow,
@@ -52,6 +89,13 @@ export default function SwimlaneCanvas({
           <span><span className="swim-dot" style={{ background: 'var(--teal)' }} /> Human</span>
           <span><span className="swim-dot" style={{ background: 'var(--navy)' }} /> Software</span>
           <span><span className="swim-dot" style={{ background: 'var(--gold)' }} /> Agent</span>
+          <span className="swim-legend-sep" aria-hidden="true" />
+          <span title="External actor — outside the organisation">
+            <span className="swim-dot ext" style={{ background: ACTOR_FILL.Customer, borderColor: ACTOR_FILL.Customer }} /> Customer
+          </span>
+          <span title="External actor — outside the organisation">
+            <span className="swim-dot ext" style={{ background: ACTOR_FILL.Partner, borderColor: ACTOR_FILL.Partner }} /> Partner
+          </span>
         </div>
       </div>
 
@@ -70,9 +114,11 @@ export default function SwimlaneCanvas({
               </marker>
             </defs>
 
-            {/* Lane backgrounds + labels (one vertical column per actor) */}
+            {/* Lane backgrounds + labels (one vertical column per actor).
+                External lanes (Customer / Partner) get a dashed outline + an
+                "external" caption so the boundary of the organisation is legible. */}
             {layout.lanes.map((lane) => (
-              <g key={lane.actor} className="swim-lane">
+              <g key={lane.actor} className={`swim-lane${lane.external ? ' external' : ''}`}>
                 <rect
                   x={lane.x + 4}
                   y={4}
@@ -80,9 +126,10 @@ export default function SwimlaneCanvas({
                   height={layout.height - 8}
                   rx={8}
                   fill={ACTOR_FILL[lane.actor]}
-                  fillOpacity={0.05}
+                  fillOpacity={lane.external ? 0.035 : 0.05}
                   stroke={ACTOR_FILL[lane.actor]}
-                  strokeOpacity={0.18}
+                  strokeOpacity={lane.external ? 0.45 : 0.18}
+                  strokeDasharray={lane.external ? '5 4' : undefined}
                 />
                 <text
                   x={lane.x + lane.width / 2}
@@ -93,6 +140,18 @@ export default function SwimlaneCanvas({
                 >
                   {lane.actor.toUpperCase()}
                 </text>
+                {lane.external && (
+                  <text
+                    x={lane.x + lane.width / 2}
+                    y={22}
+                    dy={11}
+                    textAnchor="middle"
+                    className="swim-lane-ext"
+                    fill={ACTOR_FILL[lane.actor]}
+                  >
+                    external
+                  </text>
+                )}
               </g>
             ))}
 
@@ -115,39 +174,55 @@ export default function SwimlaneCanvas({
             {layout.blocks.map((b) => {
               const selected = b.id === selectedStepId;
               const fill = ACTOR_FILL[b.actor] ?? 'var(--gold)';
+              // Wrap the title onto up to 3 lines (whole words) so it shows in FULL
+              // inside the box; the actor + meta lines flow below it. Full title also
+              // stays in the SVG <title> tooltip.
+              const titleLines = wrapTitle(b.title);
+              const TITLE_TOP = 20;          // baseline of the first title line
+              const TITLE_LINE_H = 16;
+              const actorY = TITLE_TOP + titleLines.length * TITLE_LINE_H + 2;
+              const metaY = actorY + 18;
+              const actorLine = b.actorName ? `${b.actor}: ${b.actorName}` : b.actor;
+              const ACTOR_MAX = 26;
+              const actorDisplay = actorLine.length > ACTOR_MAX ? `${actorLine.slice(0, ACTOR_MAX)}…` : actorLine;
+              const editLabel = canEdit ? ' — click to edit' : '';
               return (
                 <g
                   key={b.id}
                   transform={`translate(${b.x},${b.y})`}
-                  className={`swim-block${selected ? ' selected' : ''}`}
+                  className={`swim-block${selected ? ' selected' : ''}${canEdit ? ' editable' : ''}`}
                   onClick={() => onSelectStep?.(b.id)}
                   role="button"
+                  aria-label={`${b.title}${editLabel}`}
                   tabIndex={0}
                   onKeyDown={(ev) => {
                     if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); onSelectStep?.(b.id); }
                   }}
                 >
+                  {/* Native SVG tooltip — shows full title + actor on hover */}
+                  <title>{b.title} ({actorLine}){editLabel}</title>
                   <rect width={b.w} height={b.h} rx={9} className="swim-rect" stroke={fill} />
                   <rect x={0} y={0} width={4} height={b.h} rx={2} fill={fill} />
-                  <text x={14} y={22} className="swim-block-title">
-                    {b.title.length > 22 ? `${b.title.slice(0, 22)}…` : b.title}
+                  <text x={14} y={TITLE_TOP} className="swim-block-title">
+                    {titleLines.map((ln, i) => (
+                      <tspan key={i} x={14} dy={i === 0 ? 0 : TITLE_LINE_H}>{ln}</tspan>
+                    ))}
                   </text>
-                  <text x={14} y={40} className="swim-block-actor" fill={fill}>
-                    {b.actorName ? `${b.actor}: ${b.actorName}` : b.actor}
-                  </text>
-                  <text x={14} y={62} className="swim-block-meta">
+                  <text x={14} y={actorY} className="swim-block-actor" fill={fill}>{actorDisplay}</text>
+                  <text x={14} y={metaY} className="swim-block-meta">
                     {b.inputs > 0 ? `${b.inputs}in ` : ''}
                     {b.outputs > 0 ? `${b.outputs}out ` : ''}
                     {b.links > 0 ? `· ${b.links} link${b.links === 1 ? '' : 's'}` : ''}
                   </text>
-                  {b.hasHardRule ? <text x={b.w - 12} y={22} textAnchor="end" className="swim-mark hard">🔒</text> : null}
-                  {b.hasTacit ? <text x={b.w - 12} y={40} textAnchor="end" className="swim-mark tacit">✎</text> : null}
+                  {b.hasHardRule ? <text x={b.w - 12} y={TITLE_TOP} textAnchor="end" className="swim-mark hard">🔒</text> : null}
+                  {b.hasTacit ? <text x={b.w - 12} y={actorY} textAnchor="end" className="swim-mark tacit">✎</text> : null}
                   {b.gaps > 0 ? (
-                    <g>
-                      <text x={b.w - 12} y={62} textAnchor="end" className="swim-mark gap">⚠ {b.gaps}</text>
-                      <title>{b.gaps} link{b.gaps === 1 ? '' : 's'} reference a missing entity — open the step to jump-to-build</title>
-                    </g>
+                    <text x={b.w - 12} y={metaY} textAnchor="end" className="swim-mark gap">⚠ {b.gaps}</text>
                   ) : null}
+                  {/* Small edit pencil badge — only shown in editable mode on hover */}
+                  {canEdit && (
+                    <text x={b.w - 10} y={b.h - 8} textAnchor="end" className="swim-edit-badge">✎</text>
+                  )}
                 </g>
               );
             })}
@@ -176,9 +251,12 @@ const SwimStyles = `
   flex-wrap: wrap;
 }
 .swim-hint { font-size: 12px; color: var(--text-muted); }
-.swim-legend { display: flex; gap: 14px; font-size: 11px; color: var(--text-muted); }
+.swim-legend { display: flex; gap: 14px; font-size: 11px; color: var(--text-muted); flex-wrap: wrap; align-items: center; }
 .swim-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .swim-dot { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+/* External actors: dashed-ring dot echoes their dashed swimlane. */
+.swim-dot.ext { background: transparent !important; border: 1.5px dashed; }
+.swim-legend-sep { width: 1px; height: 12px; background: var(--border-strong); }
 .swim-scroll { overflow-y: auto; overflow-x: auto; max-height: 72vh; }
 .swim-empty { padding: 28px; text-align: center; font-size: 13px; }
 .swim-svg { display: block; }
@@ -189,17 +267,39 @@ const SwimStyles = `
   letter-spacing: 1.2px;
   opacity: 0.8;
 }
-.swim-block { cursor: pointer; }
+.swim-lane-ext {
+  font-family: var(--font-body);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.swim-block { cursor: default; }
+.swim-block.editable { cursor: pointer; }
 .swim-rect {
   fill: var(--bg);
   stroke-width: 1.4;
-  transition: filter 0.14s;
+  transition: stroke-width 0.12s, filter 0.12s;
 }
-.swim-block:hover .swim-rect { filter: brightness(1.02); stroke-width: 2; }
-.swim-block.selected .swim-rect { stroke-width: 2.5; filter: drop-shadow(0 0 6px rgba(200,162,74,0.3)); }
+/* Editable hover: raise stroke, add soft glow so it reads as interactive */
+.swim-block.editable:hover .swim-rect {
+  stroke-width: 2.2;
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.12));
+}
+.swim-block.selected .swim-rect { stroke-width: 2.5; filter: drop-shadow(0 0 7px rgba(200,162,74,0.35)); }
 .swim-block-title { font-size: 13px; font-weight: 600; fill: var(--text); font-family: var(--font-body); }
 .swim-block-actor { font-size: 11px; font-weight: 500; }
 .swim-block-meta { font-size: 10.5px; fill: var(--text-faint); }
 .swim-mark { font-size: 11px; }
 .swim-mark.gap { fill: var(--danger); font-weight: 600; }
+/* Edit pencil badge — invisible at rest, appears on hover */
+.swim-edit-badge {
+  font-size: 11px;
+  fill: var(--text-faint);
+  opacity: 0;
+  transition: opacity 0.12s;
+  pointer-events: none;
+}
+.swim-block.editable:hover .swim-edit-badge { opacity: 0.7; }
 `;

@@ -11,6 +11,7 @@ import {
 } from '@/lib/core/artifact-model';
 import { canPromote } from '@/lib/core/session';
 import { roleRank } from '@/lib/governance/roles';
+import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
 import type { CurrentUser } from '@/lib/core/auth';
 import { osMirror } from '@/lib/infra/os-mirror';
 import { type ArtifactVersion, versionLog } from '@/lib/core/versioning';
@@ -149,6 +150,20 @@ async function getCache(): Promise<Map<string, Artifact>> {
 
 // ------------------------------------------------------------- Scoping rules --
 
+/** Map the Personal/Shared/Certified visibility onto the shared edit-scope tier.
+ *  Personal is owner-private → only the owner manages it (no admin, no domain_admin). */
+function scopeOf(a: Pick<Artifact, 'visibility' | 'origin'>): ArtifactScope {
+  // A Certified COPY the user pulled in is their own Personal item.
+  if (a.origin === 'certified-copy') return 'personal';
+  if (a.visibility === 'Personal') return 'personal';
+  if (a.visibility === 'Certified') return 'certified';
+  return 'shared';
+}
+/** The arg the shared edit-scope gate reads for an artifact. */
+function manageArg(a: Artifact): { owner: string; domain: string; scope: ArtifactScope } {
+  return { owner: a.owner, domain: a.domain, scope: scopeOf(a) };
+}
+
 /**
  * Workspace view for a user on the normal tabs: their own Personal artifacts +
  * every Shared artifact in their domain + any Certified COPIES they have added.
@@ -258,6 +273,35 @@ export async function promoteArtifact(artId: string, user: CurrentUser): Promise
   return a;
 }
 
+/**
+ * Demotion (revoke sharing): the reverse of {@link promoteArtifact}, one step down:
+ * Certified → Shared (admin only) → Personal (owner or in-domain builder/admin).
+ * The role gate mirrors who could have promoted it; the effect seam is the primary
+ * gate, this is defence-in-depth. Never deletes the artifact — only lowers its tier.
+ */
+export async function demoteArtifact(artId: string, user: CurrentUser): Promise<Artifact> {
+  const map = await getCache();
+  const a = map.get(artId);
+  if (!a) throw withStatus(new Error('Artifact not found'), 404);
+  if (a.origin === 'certified-copy') throw withStatus(new Error('Certified copies cannot be demoted'), 400);
+  if (!user.domains.includes(a.domain)) {
+    throw withStatus(new Error('You can only revoke sharing on artifacts in a domain you belong to'), 403);
+  }
+  if (a.visibility === 'Certified') {
+    if (user.role !== 'admin') throw withStatus(new Error('Revoking from the Marketplace requires an admin'), 403);
+    a.visibility = 'Shared';
+  } else if (a.visibility === 'Shared') {
+    if (!canManageArtifact(user, manageArg(a))) {
+      throw withStatus(new Error('Unsharing requires the owner, an in-domain domain admin, or an admin'), 403);
+    }
+    a.visibility = 'Personal';
+  } else throw withStatus(new Error('Already Personal — nothing to revoke'), 400);
+  a.updatedAt = now();
+  map.set(a.id, a);
+  writeThrough(a);
+  return a;
+}
+
 /** Add a Certified Marketplace artifact into the caller's own workspace. */
 export async function addFromMarketplace(artId: string, user: CurrentUser): Promise<Artifact> {
   // Security: importing a cross-domain Certified item into your workspace is a
@@ -301,9 +345,7 @@ export async function updateArtifact(
   const map = await getCache();
   const a = map.get(artId);
   if (!a) throw withStatus(new Error('Artifact not found'), 404);
-  const isOwner = a.owner === user.id;
-  const isDomainAdmin = user.role === 'admin' && user.domains.includes(a.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to edit this artifact'), 403);
+  if (!canManageArtifact(user, manageArg(a))) throw withStatus(new Error('Not permitted to edit this artifact'), 403);
   // Snapshot the PRIOR editable state before overwriting it, so the edit is
   // restorable from the version history.
   versions.record(a.id, user.id, snapshotState(a), 'edit');
@@ -322,9 +364,7 @@ export async function archiveArtifact(artId: string, user: CurrentUser, archived
   const map = await getCache();
   const a = map.get(artId);
   if (!a) throw withStatus(new Error('Artifact not found'), 404);
-  const isOwner = a.owner === user.id;
-  const isDomainAdmin = user.role === 'admin' && user.domains.includes(a.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to archive this artifact'), 403);
+  if (!canManageArtifact(user, manageArg(a))) throw withStatus(new Error('Not permitted to archive this artifact'), 403);
   a.archived = archived;
   a.updatedAt = now();
   map.set(a.id, a);
@@ -350,9 +390,7 @@ export async function restoreArtifactVersion(artId: string, user: CurrentUser, v
   const map = await getCache();
   const a = map.get(artId);
   if (!a) throw withStatus(new Error('Artifact not found'), 404);
-  const isOwner = a.owner === user.id;
-  const isDomainAdmin = user.role === 'admin' && user.domains.includes(a.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to edit this artifact'), 403);
+  if (!canManageArtifact(user, manageArg(a))) throw withStatus(new Error('Not permitted to edit this artifact'), 403);
   const snap = versions.get(artId, version);
   if (!snap) throw withStatus(new Error(`Version ${version} not found`), 404);
   const restored = snap.state as ArtifactSnapshot;
@@ -371,9 +409,7 @@ export async function deleteArtifact(artId: string, user: CurrentUser): Promise<
   const map = await getCache();
   const a = map.get(artId);
   if (!a) return;
-  const isOwner = a.owner === user.id;
-  const isDomainAdmin = user.role === 'admin' && user.domains.includes(a.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to delete this artifact'), 403);
+  if (!canManageArtifact(user, manageArg(a))) throw withStatus(new Error('Not permitted to delete this artifact'), 403);
   map.delete(artId);
   deleteThrough(artId);
   versions.purge(artId);

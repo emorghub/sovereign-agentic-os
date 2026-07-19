@@ -5,6 +5,7 @@ import 'server-only';
 import { config } from '@/lib/core/config';
 import type { CurrentUser } from '@/lib/core/auth';
 import { canPromote, roleAtLeast } from '@/lib/core/session';
+import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
 import type { Visibility } from '@/lib/core/artifact-model';
 import {
   createArtifact,
@@ -27,13 +28,14 @@ import type {
   AppManifest,
   AppSurface,
   ConsumedResource,
+  SurfaceDeclaration,
 } from '@/lib/software/model';
 import { generateAndCompile } from '@/lib/software/auto-mcp';
-import { parseAppManifest, renderAppYaml, defaultOpenApi, detectSurface } from '@/lib/software/metadata';
+import { parseAppManifest, renderAppYaml, defaultOpenApi, resolveSurface } from '@/lib/software/metadata';
 import { osMirror } from '@/lib/infra/os-mirror';
 import { type ArtifactVersion, versionLog } from '@/lib/core/versioning';
 import { listGitVersions, restoreGitVersion, shaForVersion, type GitVersion } from '@/lib/core/git-versioning';
-import type { ForgejoClient, ForgejoCommit, ForgejoCommitFiles } from '@/lib/agents/build/live';
+import type { ForgejoClient, ForgejoCommit, ForgejoCommitFiles } from '@/lib/infra/forgejo';
 
 /**
  * App registry — the home of record for every application built in the Software
@@ -120,8 +122,14 @@ export type App = {
   };
   /** Parsed app.yaml / OpenAPI convention (metadata fidelity). */
   manifest: AppManifest;
-  /** Detected UI/API surface (inferred from what was built; drives the monitor). */
+  /** Resolved UI/API surface — a declaration wins, else inferred from what was built. */
   surface: AppSurface;
+  /**
+   * The creator's EXPLICIT surface declaration (`create_software` arg or `app.yaml`
+   * `surface:`), when given. Intent: it wins over the heuristic on every re-detect,
+   * so a UI app declared up front never regresses to "API" as the code changes.
+   */
+  declaredSurface?: SurfaceDeclaration;
   /** Governed resources the app actually consumes at run time (no raw creds). */
   consumes: ConsumedResource[];
   /** Whether "Use as Data" has snapshotted app data into a Bronze dataset. */
@@ -254,6 +262,14 @@ function nextjsSupabaseTemplate(): Template {
             private: true,
             scripts: { dev: 'next dev', build: 'next build', start: 'next start' },
             dependencies: { next: '^15.0.0', react: '^19.0.0', 'react-dom': '^19.0.0', '@supabase/supabase-js': '^2.45.0' },
+            // Seeded so `next build` type-checks the .tsx source without Next's
+            // first-run auto-install (which needs network the DinD runner lacks).
+            devDependencies: {
+              typescript: '^5.6.0',
+              '@types/node': '^22.0.0',
+              '@types/react': '^19.0.0',
+              '@types/react-dom': '^19.0.0',
+            },
           },
           null,
           2,
@@ -276,10 +292,47 @@ function nextjsSupabaseTemplate(): Template {
           '  using (owner = auth.uid()) with check (owner = auth.uid());\n',
       },
       {
+        path: 'app/layout.tsx',
+        content:
+          "export const metadata = { title: '" + name + "', description: 'Built by Sovereign Agentic OS.' };\n" +
+          '\n' +
+          'export default function RootLayout({ children }: { children: React.ReactNode }) {\n' +
+          '  return (\n' +
+          '    <html lang="en">\n' +
+          '      <body>{children}</body>\n' +
+          '    </html>\n' +
+          '  );\n' +
+          '}\n',
+      },
+      {
+        path: 'app/page.tsx',
+        content:
+          'export default function Page() {\n' +
+          '  return (\n' +
+          '    <main style={{ fontFamily: \'system-ui, sans-serif\', maxWidth: 640, margin: \'4rem auto\', padding: \'0 1.5rem\' }}>\n' +
+          '      <h1>' + name + '</h1>\n' +
+          '      <p>Built by Sovereign Agentic OS.</p>\n' +
+          '    </main>\n' +
+          '  );\n' +
+          '}\n',
+      },
+      {
         path: 'Dockerfile',
         content:
           '# Next.js app — built by Sovereign Agentic OS CI -> Harbor -> Argo CD.\n' +
-          'FROM node:22-alpine\nWORKDIR /app\nCOPY . .\nRUN npm ci || true\nEXPOSE 8080\nCMD ["npm","run","start"]\n',
+          '# Single stage: install, build, then serve Next\'s standalone output on 8080.\n' +
+          'FROM node:22-alpine\n' +
+          'WORKDIR /app\n' +
+          '# No lockfile is seeded, so use npm install; do NOT swallow errors.\n' +
+          'COPY package.json ./\n' +
+          'RUN npm install\n' +
+          'COPY . .\n' +
+          'RUN npm run build\n' +
+          '# next start reads PORT/HOSTNAME; the runner probes 8080 on 0.0.0.0.\n' +
+          'ENV PORT=8080\n' +
+          'ENV HOSTNAME=0.0.0.0\n' +
+          'EXPOSE 8080\n' +
+          'CMD ["npm","run","start"]\n',
       },
       {
         path: '.forgejo/workflows/ci.yml',
@@ -403,7 +456,11 @@ function snapshotState(a: App): { designDecisions: string; dataDescriptions: str
 }
 
 function isOwnerOrAdminApp(a: App, user: CurrentUser): boolean {
-  return a.owner === user.id || (user.role === 'admin' && user.domains.includes(a.domain));
+  // Fail-closed edit-scope: owner always; a Personal app is owner-only (no admin/
+  // domain_admin reaches another user's private app). A Shared / Certified app
+  // admits an in-domain domain_admin or a platform admin.
+  const scope: ArtifactScope = a.visibility === 'Personal' ? 'personal' : a.visibility === 'Certified' ? 'certified' : 'shared';
+  return canManageArtifact(user, { owner: a.owner, domain: a.domain, scope });
 }
 
 async function getCache(): Promise<Map<string, App>> {
@@ -414,7 +471,13 @@ async function getCache(): Promise<Map<string, App>> {
   for (const app of docs as App[]) {
     // Back-compat: apps persisted before surface-detection get one inferred
     // from their scaffold so the monitor drives off surface, never `template`.
-    if (!app.surface) app.surface = detectSurface(templateFiles(app.template, app.name, app.slug));
+    // A persisted declaration (intent) still wins over the heuristic.
+    if (!app.surface) {
+      app.surface = resolveSurface(
+        templateFiles(app.template, app.name, app.slug),
+        app.declaredSurface,
+      );
+    }
     map.set(app.id, app);
     // Re-hydrate the in-process MCP grant so agents can call it after a restart.
     if (app.connectionId) rehydrateConnection(app);
@@ -500,7 +563,18 @@ async function scaffoldRepo(
     data: config.forgejoPassword,
   });
   const seeded: string[] = [];
-  for (const f of tpl.files(name, slug)) {
+  // Seed the SOURCE first (Dockerfile + manifests + app.yaml …) and the Actions
+  // workflow LAST, exactly like the proven demo-app seed: each contents-API PUT is
+  // its own commit, and the commit that ADDS `.forgejo/workflows/ci.yml` is the
+  // push that first triggers CI. If the workflow lands before the Dockerfile, that
+  // trigger fires against a tree with no build context and the run cannot build an
+  // image — so the workflow must be the final file committed.
+  const isWorkflow = (p: string) => p.startsWith('.forgejo/workflows/');
+  const ordered = [
+    ...tpl.files(name, slug).filter((f) => !isWorkflow(f.path)),
+    ...tpl.files(name, slug).filter((f) => isWorkflow(f.path)),
+  ];
+  for (const f of ordered) {
     const r = await forgejoWrite(`/repos/${owner}/${slug}/contents/${f.path}`, {
       content: b64(f.content),
       message: `seed ${f.path}`,
@@ -762,10 +836,13 @@ export async function getAppForUser(appId: string, user: CurrentUser): Promise<A
 
 export async function createApp(
   user: CurrentUser,
-  input: { name: string; description?: string; template?: AppTemplateKey; domain?: string },
+  input: { name: string; description?: string; template?: AppTemplateKey; domain?: string; surface?: SurfaceDeclaration },
 ): Promise<App> {
   const map = await getCache();
   const tpl = TEMPLATES[input.template ?? 'nextjs-supabase'] ?? TEMPLATES['nextjs-supabase'];
+  // An explicit surface declaration (intent) wins over the scaffold's heuristic.
+  const declaredSurface: SurfaceDeclaration | undefined =
+    input.surface === 'ui' || input.surface === 'api' || input.surface === 'both' ? input.surface : undefined;
   const name = (input.name ?? '').trim() || 'Untitled app';
   const slug = slugify(name);
   const domain = input.domain && user.domains.includes(input.domain) ? input.domain : user.domains[0];
@@ -855,9 +932,11 @@ export async function createApp(
       owner: user.id,
       description,
     }),
-    // The scaffold's surface, detected from the seed files. Re-detected on every
-    // commit + at deploy as the agent builds, so it stays honest to the code.
-    surface: detectSurface(tpl.files(name, slug)),
+    // The scaffold's surface: a declaration (intent) wins, else detected from the
+    // seed files. Re-resolved on every commit + at deploy — the declaration stays
+    // authoritative, so a declared UI app never regresses to "API" as code changes.
+    surface: resolveSurface(tpl.files(name, slug), declaredSurface),
+    declaredSurface,
     consumes: [],
     usedAsData: dataArtifactId !== null,
     createdAt: t,
@@ -880,6 +959,26 @@ export async function createApp(
   });
 
   return app;
+}
+
+/**
+ * Governed offboard support: transfer this owner's PERSONAL-lane records to a new
+ * owner (used by lib/platform-admin/offboard.ts when a user is offboarded with
+ * reassignment). Only personal, owner-only artifacts move; shared/domain/certified
+ * are untouched. Returns the count moved.
+ */
+export async function reassignOwner(fromId: string, toId: string): Promise<number> {
+  const map = await getCache();
+  let moved = 0;
+  for (const a of map.values()) {
+    if (a.owner !== fromId) continue;
+    if (a.visibility !== 'Personal') continue; // personal lane only
+    a.owner = toId;
+    a.updatedAt = now();
+    writeThrough(a);
+    moved++;
+  }
+  return moved;
 }
 
 // --------------------------------------------------------------- Build chat ---
@@ -913,9 +1012,8 @@ export async function updateAppDocs(
   const map = await getCache();
   const a = map.get(appId);
   if (!a) throw withStatus(new Error('App not found'), 404);
-  const isOwner = a.owner === user.id;
-  const isDomainAdmin = user.role === 'admin' && user.domains.includes(a.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to edit this app'), 403);
+  // Fail-closed edit-scope: owner, domain_admin of the owning domain, or admin.
+  if (!isOwnerOrAdminApp(a, user)) throw withStatus(new Error('Not permitted to edit this app'), 403);
   // Snapshot prior state before any mutation; skip version churn on no-op edits.
   const changed =
     (patch.designDecisions !== undefined && patch.designDecisions !== a.designDecisions) ||
@@ -950,7 +1048,7 @@ export async function promoteApp(appId: string, user: CurrentUser): Promise<App>
   let next: Visibility;
   if (a.visibility === 'Personal') {
     if (!canPromote(user.role, 'Personal')) {
-      throw withStatus(new Error('Promoting to Shared requires a Builder or Administrator'), 403);
+      throw withStatus(new Error('Promoting to Shared requires a Domain admin or Administrator'), 403);
     }
     next = 'Shared';
   } else if (a.visibility === 'Shared') {

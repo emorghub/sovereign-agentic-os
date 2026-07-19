@@ -6,9 +6,10 @@
 import { useState } from 'react';
 import { useApi } from '@/lib/useApi';
 import { useUser } from '@/lib/useUser';
+import { canManageArtifact } from '@/lib/governance/edit-scope';
 import NewSystemPanel from './NewSystemPanel';
 import { roleAtLeast } from '@/lib/core/session';
-import { SCOPE_GROUPS, groupByScope, scopeCounts, type ScopeKey } from '@/lib/core/scopes';
+import { SCOPE_GROUPS, groupByScope, scopeCounts, visibilityLabel, type ScopeKey } from '@/lib/core/scopes';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import type { Visibility } from '@/lib/core/lifecycle';
@@ -34,7 +35,8 @@ type Summary = {
 type Groups = { mine: Summary[]; domain: Summary[]; marketplace: Summary[] };
 
 const visClass = (v: string) => (v === 'Shared' ? 'vis-shared' : v === 'Marketplace' ? 'vis-certified' : 'vis-personal');
-const visLabel = (v: string) => (v === 'Shared' ? 'Shared in Domain' : v);
+// Display label from the OS-wide scope vocabulary: Shared→Domain, Marketplace→Company, Personal→My.
+const visLabel = (v: string) => visibilityLabel(v);
 
 /** Systems visibility → the OS-wide lifecycle visibility (drives the delete gate). */
 const lcVis = (v: Summary['visibility']): Visibility =>
@@ -62,9 +64,9 @@ export default function SystemsList({ onOpen }: { onOpen: (id: string) => void }
     }
   };
 
-  // A system is the caller's to manage when it's in the "Mine" group (owner) or
-  // the caller is an in-domain Admin (the server enforces this either way).
-  const canManage = (s: Summary) => !!user && (s.owner === user.id || (user.role === 'admin' && user.domains.includes(s.domain)));
+  // A system is the caller's to manage when they are the owner, an in-domain
+  // domain_admin, or an admin (the server enforces this either way).
+  const canManage = (s: Summary) => !!user && canManageArtifact(user, { owner: s.owner, domain: s.domain });
 
   const card = (s: Summary, kind: 'open' | 'install') => (
     <div className="card" key={s.id}>
@@ -141,13 +143,13 @@ export default function SystemsList({ onOpen }: { onOpen: (id: string) => void }
         <div className="row" style={{ marginLeft: 'auto', gap: 8, alignItems: 'center' }}>
           <button
             className="btn ghost"
-            style={{ padding: '4px 12px', opacity: showArchived ? 1 : 0.7 }}
+            style={{ opacity: 1 }}
             onClick={() => setShowArchived((v) => !v)}
             title="Archived systems are hidden by default"
           >
             {showArchived ? 'Hide archived' : 'Show archived'}
           </button>
-          <button className="btn ghost" style={{ padding: '4px 12px' }} onClick={reload} disabled={loading}>
+          <button className="btn ghost" onClick={reload} disabled={loading}>
             {loading ? <span className="spin" /> : 'Refresh'}
           </button>
         </div>
@@ -167,7 +169,7 @@ export default function SystemsList({ onOpen }: { onOpen: (id: string) => void }
             <div className="stub-page" style={{ padding: 24 }}>
               {scope === 'mine' || scope === 'all'
                 ? 'No agent systems yet — create one above.'
-                : scope === 'shared' ? 'Nothing shared in your domain yet.' : 'Nothing in the marketplace yet.'}
+                : scope === 'shared' ? 'Nothing in your domain yet.' : 'Nothing company-wide yet.'}
             </div>
           ) : (
             <div className="grid">{visible.map((s) => card(s, kindFor(s)))}</div>

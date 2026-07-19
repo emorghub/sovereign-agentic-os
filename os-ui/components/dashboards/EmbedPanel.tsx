@@ -3,8 +3,8 @@
  */
 'use client';
 
-import { useEffect, useState } from 'react';
-import ToolEmbed from '@/components/ToolEmbed';
+import { useEffect, useRef, useState } from 'react';
+import { embedDashboard } from '@superset-ui/embedded-sdk';
 import { postJson } from './shared';
 import type { DashboardSummary, EmbedResponse } from './shared';
 
@@ -27,6 +27,7 @@ export default function EmbedPanel({ dashboard, supersetUrl }: { dashboard: Dash
   const [embed, setEmbed] = useState<EmbedResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const mountRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -41,6 +42,35 @@ export default function EmbedPanel({ dashboard, supersetUrl }: { dashboard: Dash
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [dashboard.id, region]);
+
+  // Live: mount the real Superset Embedded SDK, handing it the already-minted per-viewer
+  // guest token (RLS baked in, R3). Re-runs when the token re-mints (region switch); the
+  // cleanup unmounts the previous iframe so we never stack embeds.
+  //
+  // supersetDomain is the SAME-ORIGIN reverse proxy (`<os-origin>/tools/superset`), NOT the
+  // cross-origin public console. Superset ships `X-Frame-Options: SAMEORIGIN` + a Talisman
+  // CSP with no `frame-ancestors`, so a cross-origin iframe (os.* framing superset.*) is
+  // blocked by the browser. Routing through `/tools/superset` (lib/tool-proxy.ts) makes the
+  // iframe same-origin — the proxy strips X-Frame-Options and pins `frame-ancestors 'self'`
+  // — eliminating the CSP / third-party-cookie problems entirely. The SDK sets the iframe
+  // src to `${supersetDomain}/embedded/<uuid>` and uses the origin of supersetDomain as its
+  // postMessage targetOrigin, so an absolute same-origin URL is required (a bare path throws).
+  useEffect(() => {
+    const node = mountRef.current;
+    if (!embed || embed.mode !== 'live' || !embed.embeddedId || !node) return;
+    const supersetDomain = `${window.location.origin}/tools/superset`;
+    let unmount: (() => void) | undefined;
+    embedDashboard({
+      id: embed.embeddedId,
+      supersetDomain,
+      mountPoint: node,
+      fetchGuestToken: () => Promise.resolve(embed.token),
+      dashboardUiConfig: { hideTitle: true },
+    })
+      .then((instance) => { unmount = instance.unmount; })
+      .catch(() => { /* live mount failed — the token/RLS summary above still stands */ });
+    return () => { unmount?.(); };
+  }, [embed]);
 
   return (
     <div className="agent-editor" style={{ marginTop: 16 }}>
@@ -91,14 +121,18 @@ export default function EmbedPanel({ dashboard, supersetUrl }: { dashboard: Dash
           {embed.mode === 'live' ? (
             <div style={{ marginTop: 14 }}>
               <div className="hint" style={{ marginTop: 0, marginBottom: 8 }}>
-                Live: the guest token above is minted per viewer (~{embed.expiresInSeconds}s ttl + refresh).
-                The Superset console opens below; the per-dashboard <strong>Embedded SDK</strong> mount is wired at deploy.
+                Live: the dashboard below is mounted via the Superset <strong>Embedded SDK</strong> with the
+                per-viewer guest token above (~{embed.expiresInSeconds}s ttl + refresh).
               </div>
-              <ToolEmbed url={supersetUrl} title="Superset (console)" toolKey="superset" />
+              <div
+                ref={mountRef}
+                style={{ minHeight: 480, borderRadius: 8, overflow: 'hidden' }}
+              />
             </div>
           ) : (
             <div className="hint" style={{ marginTop: 10 }}>
-              Offline mock — Superset isn’t reachable, so the embed is summarised above instead of mounted.
+              Offline mock — the live embed couldn’t be mounted, so it’s summarised above instead.
+              {embed.reason ? <> ({embed.reason})</> : ' (Superset isn’t reachable from here.)'}
             </div>
           )}
         </>

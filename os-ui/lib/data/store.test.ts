@@ -19,13 +19,17 @@ import {
   buildGoldJoin,
   archiveDataset,
   unarchiveDataset,
+  isDatasetArchived,
   deleteDataset,
+  moveDataset,
   setDocs,
   listDatasetVersions,
   restoreDatasetVersion,
   type Principal,
 } from './store.ts';
 import { DatasetError } from './dataset-schema.ts';
+import { cubeName, cubeViewName, CUBE_ARTIFACT } from './metrics.ts';
+import { listFolders as folderList, __resetStore as resetFolders } from '../folders/index.ts';
 
 const amir: Principal = { id: 'amir', domains: ['sales'], role: 'creator' }; // Creator
 const bea: Principal = { id: 'bea', domains: ['sales'], role: 'builder' };
@@ -336,6 +340,16 @@ test('archive hides a dataset from the working lists; unarchive restores it', ()
   assert.equal(listDatasets(amir).mine[0].archived, false);
 });
 
+test('isDatasetArchived exposes the record-level flag (view-scoped) so the detail can offer Restore', () => {
+  __resetStore();
+  const d = createDataset(amir, { name: 'Scratch' });
+  assert.equal(isDatasetArchived(d.id, amir), false);
+  archiveDataset(d.id, amir);
+  assert.equal(isDatasetArchived(d.id, amir), true, 'archived flag is visible to the owner');
+  unarchiveDataset(d.id, amir);
+  assert.equal(isDatasetArchived(d.id, amir), false, 'restore clears the flag');
+});
+
 test('SECURITY: archive/unarchive/delete are edit-scoped (a non-owner viewer is 403)', () => {
   __resetStore();
   // A promoted sales asset amir authored — kenji (finance) cannot even see it,
@@ -347,6 +361,50 @@ test('SECURITY: archive/unarchive/delete are edit-scoped (a non-owner viewer is 
   // The owner may; an in-domain admin may too.
   assert.equal(archiveDataset(id, amir).archived, true);
   assert.equal(unarchiveDataset(id, sara).archived, false);
+});
+
+test('FOLDER: moveDataset is edit-scoped, normalises, and reflects in the summary', () => {
+  __resetStore();
+  const id = seedOrders(); // amir-owned private dataset (personal lane)
+  // The owner may move it; the path is normalised.
+  const moved = moveDataset(id, amir, 'contracts/');
+  assert.equal(moved.folder, '/contracts');
+  // The tile summary carries the new folder for the rail/grid filter.
+  assert.equal(listDatasets(amir).mine[0].folder, '/contracts');
+  // A non-owner, non-admin in the same domain cannot move it (fail-closed 403).
+  assert.throws(() => moveDataset(id, bea, '/elsewhere'), (e: DatasetError) => e.status === 403);
+  // NEW manage-rights rule: a PRIVATE (personal) dataset is owner-only — not even a
+  // platform admin may move (manage) another user's private data.
+  assert.throws(() => moveDataset(id, sara, '/legal'), (e: DatasetError) => e.status === 403);
+  // Moving back to root serializes without a folder key (byte-stable) — folder is '/'.
+  assert.equal(moveDataset(id, amir, '/').folder, '/');
+});
+
+test('FOLDER: moving into a folder upserts an explicit registry row (persists when empty)', () => {
+  __resetStore();
+  resetFolders();
+  const id = seedOrders();
+  moveDataset(id, amir, '/contracts');
+  // The governed folder registry now holds a `tab:'data'` personal row for the path.
+  const rows = folderList(amir, 'data', 'personal');
+  assert.ok(rows.some((r) => r.path === '/contracts'), 'move must upsert the folder row');
+});
+
+test('LIFECYCLE: archive THEN delete — the owner purges an archived dataset; a non-owner non-admin is 403', () => {
+  __resetStore();
+  // The streamlined Data-tab lifecycle: archive first (reversible), then a physical
+  // delete of the ARCHIVED artifact. Delete must not require live state, and must
+  // authorize via the SAME edit-scope rule as everywhere else.
+  const id = seedOrders(); // amir-owned, bronze+silver built
+  archiveDataset(id, amir);
+  assert.equal(listDatasets(amir, { includeArchived: true }).mine[0].archived, true);
+  // A non-owner, non-admin in the same domain cannot delete the archived dataset.
+  assert.throws(() => deleteDataset(id, bea), (e: DatasetError) => e.status === 403);
+  // The owner can — even while archived — and it purges the record for good.
+  const deleted = deleteDataset(id, amir);
+  assert.equal(deleted.id, id);
+  assert.equal(listDatasets(amir, { includeArchived: true }).mine.length, 0);
+  assert.throws(() => getDataset(id, amir), (e: DatasetError) => e.status === 404);
 });
 
 test('delete permanently removes a dataset; a missing dataset is 404', () => {
@@ -414,4 +472,28 @@ test('VERSIONS: a missing version number is refused (404)', () => {
   const d = createDataset(amir, { name: 'Orders' });
   setDocs(d.id, amir, { description: 'x' });
   assert.throws(() => restoreDatasetVersion(d.id, amir, 99), (e: DatasetError) => e.status === 404);
+});
+
+// ------------------------------------------------------ #155 domain-namespaced cube ---
+
+test('#155 same dataset name is still BLOCKED within a domain (409)', () => {
+  createDataset(amir, { name: 'Sales' }); // sales domain
+  assert.throws(
+    () => createDataset(bea, { name: 'Sales' }), // also sales — collides
+    (e: DatasetError) => e.status === 409,
+  );
+});
+
+test('#155 the SAME name is now ALLOWED across domains, with DISTINCT cube identities', () => {
+  const salesDs = createDataset(amir, { name: 'Sales' }); // sales
+  const finDs = createDataset(kenji, { name: 'Sales' }); // finance — no longer collides
+  // Both created (no throw), and each carries the namespaced cube identity marker.
+  assert.equal(salesDs.cubeNamespaced, true);
+  assert.equal(finDs.cubeNamespaced, true);
+  // Their cube name / view / model file are all distinct — no shared cube/view/file.
+  assert.notEqual(cubeName(salesDs), cubeName(finDs));
+  assert.notEqual(cubeViewName(salesDs), cubeViewName(finDs));
+  assert.notEqual(CUBE_ARTIFACT(salesDs), CUBE_ARTIFACT(finDs));
+  assert.equal(cubeName(salesDs), 'sales__sales');
+  assert.equal(cubeName(finDs), 'finance__sales');
 });

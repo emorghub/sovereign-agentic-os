@@ -5,7 +5,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useUser } from '@/lib/useUser';
-import { anchorAttr, ANCHORS } from '@/lib/tutorials/anchors';
+import { canManageArtifact } from '@/lib/governance/edit-scope';
+import { anchorAttr, ANCHORS } from '@/lib/tutorials';
 import LineagePanel from './LineagePanel';
 import RefinePanel from './RefinePanel';
 import GoldJoinPanel from './GoldJoinPanel';
@@ -14,6 +15,8 @@ import BronzePanel from './BronzePanel';
 import MetricsPanel from './MetricsPanel';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
+import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
+import type { FiledApproval } from '@/lib/governance/approval-notice';
 import DomainTag from '@/components/DomainTag';
 import type { Visibility } from '@/lib/core/lifecycle';
 
@@ -113,7 +116,10 @@ function formatDate(iso: string): string {
 
 const TIER_BADGE: Record<Dataset['tier'], string> = { dataset: 'vis-personal', asset: 'vis-shared', product: 'vis-certified' };
 const TIER_WORD: Record<Dataset['tier'], string> = { dataset: 'Personal dataset', asset: 'Data asset', product: 'Data product' };
-const VIS_WORD: Record<string, string> = { private: 'Private', domain: 'Domain', shared: 'Shared in Domain', public: 'Public' };
+// Display words for a dataset's stored visibility. Core (lib/core/scopes.ts) is the
+// source of truth for scope vocabulary; these lowercase keys are this tab's own field
+// values, mirrored to the same nouns ("Shared"→"Domain").
+const VIS_WORD: Record<string, string> = { private: 'Private', domain: 'Domain', shared: 'Domain', public: 'Public' };
 
 /** "Show the code" — the same Forgejo-versioned files the panels + agent edit.
  *  Inlined from DatasetStepper so the dbt SQL editor lives in the detail. */
@@ -210,6 +216,7 @@ export default function DatasetDetail({
   onOpenStepper: (id: string) => void;
 }) {
   const { user } = useUser();
+  const { notifyApprovalFiled } = useApprovalNotifier();
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [checks, setChecks] = useState<DataCheck[]>([]);
   const [loadErr, setLoadErr] = useState('');
@@ -310,9 +317,11 @@ export default function DatasetDetail({
       });
       const data = await res.json();
       if (!res.ok) { setShareErr(data.error ?? 'Could not request promotion'); return; }
+      const approval = data.approval as FiledApproval | undefined;
+      if (approval?.id) notifyApprovalFiled(approval, 'dataset', () => { void Promise.all([loadPromote(), load()]); });
       await Promise.all([loadPromote(), load()]);
     } catch (e) { setShareErr((e as Error).message); } finally { setShareBusy(false); }
-  }, [datasetId, loadPromote, load]);
+  }, [datasetId, loadPromote, load, notifyApprovalFiled]);
 
   // An Admin certifies a Shared asset to the marketplace directly; a Creator/Builder
   // files a certification request for an Admin to approve.
@@ -324,9 +333,13 @@ export default function DatasetDetail({
       });
       const data = await res.json();
       if (!res.ok) { setShareErr(data.error ?? 'Could not certify'); return; }
+      // A Creator/Builder's certify REQUEST files an approval (admin gate); an
+      // Admin's direct certify returns { dataset } and skips the notice.
+      const approval = data.approval as FiledApproval | undefined;
+      if (approval?.id) notifyApprovalFiled(approval, 'dataset', () => { void Promise.all([loadPromote(), load()]); });
       await Promise.all([loadPromote(), load()]);
     } catch (e) { setShareErr((e as Error).message); } finally { setShareBusy(false); }
-  }, [datasetId, loadPromote, load]);
+  }, [datasetId, loadPromote, load, notifyApprovalFiled]);
 
   // Best-effort: surface this dataset's OpenMetadata entry (deep link) from the
   // catalog union. A missing catalog/OM never blocks the detail view.
@@ -462,7 +475,7 @@ export default function DatasetDetail({
   const fqn = layer ? physicalFqn(dataset, layer) : null;
   const cubeReady = isCubeReady(dataset);
   const published = !!dataset.certification;
-  const canEdit = !!user && (user.id === dataset.owner || (user.role === 'admin' && user.domains?.includes(dataset.domain)));
+  const canEdit = !!user && canManageArtifact(user, { owner: dataset.owner, domain: dataset.domain });
   // Certification (asset → marketplace) is Admin-only; only an Admin certifies directly.
   const isAdmin = user?.role === 'admin';
 
@@ -938,7 +951,7 @@ export default function DatasetDetail({
                 <div className="row" style={{ marginTop: 8 }}>
                   <button className="btn" disabled={shareBusy || !!(promote && !promote.gate.ok)} onClick={requestPromote}
                     title={promote && !promote.gate.ok ? 'Complete the transparency gate first' : 'A domain Builder approves this and moves it into Trino'}>
-                    {shareBusy ? <span className="spin" /> : 'Promote to Shared →'}
+                    {shareBusy ? <span className="spin" /> : 'Promote to Domain →'}
                   </button>
                 </div>
               </>
@@ -960,7 +973,7 @@ export default function DatasetDetail({
         )
       ) : dataset.tier === 'asset' ? (
         <div className="gate-check gate-ok" style={{ marginTop: 4 }}>
-          <span className="badge vis-shared">Shared in Domain</span>{' '}
+          <span className="badge vis-shared">Domain</span>{' '}
           <span className="muted" style={{ fontSize: 13 }}>
             Promoted data asset in <strong>Trino/Iceberg</strong> ({dataset.domain} domain).
           </span>
@@ -973,7 +986,7 @@ export default function DatasetDetail({
               {isAdmin ? (
                 <button className="btn" disabled={shareBusy} onClick={() => certifyAsset('certify')}
                   title="Certify this asset as a data product and list it in the marketplace">
-                  {shareBusy ? <span className="spin" /> : 'Promote to Marketplace →'}
+                  {shareBusy ? <span className="spin" /> : 'Certify to Company →'}
                 </button>
               ) : canEdit ? (
                 <button className="btn ghost" disabled={shareBusy} onClick={() => certifyAsset('request')}
@@ -988,7 +1001,7 @@ export default function DatasetDetail({
         </div>
       ) : dataset.tier === 'product' ? (
         <div className="gate-check gate-ok" style={{ marginTop: 4 }}>
-          <span className="badge vis-certified">Certified</span>{' '}
+          <span className="badge vis-certified">Company</span>{' '}
           <span className="muted" style={{ fontSize: 13 }}>
             Certified data product — discoverable across the marketplace.
           </span>

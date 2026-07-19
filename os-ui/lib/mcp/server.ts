@@ -17,10 +17,12 @@ import { ensureHydrated as knowledgeHydrated } from '@/lib/knowledge/store';
 import { ensureHydrated as betsHydrated } from '@/lib/bigbets/store';
 import { principalFor } from '@/lib/governance/roles';
 import { readPrincipalFor } from '@/lib/data/store-fqn';
+import { sanitizeSingleStatement } from '@/lib/data/sql-guard';
 import { ALL_WRITE_TOOLS } from '@/lib/mcp/write-tools';
 import { DISCOVERY_TOOLS } from '@/lib/mcp/discovery-tools';
 import { governanceTools } from '@/lib/mcp/governance-tools';
 import { strategyReadTools } from '@/lib/mcp/strategy-tools';
+import { MANUAL_TOOLS } from '@/lib/mcp/manual-tools';
 import { marketplaceReadTools } from '@/lib/mcp/marketplace-tools';
 import { MONITORING_TOOLS } from '@/lib/mcp/monitoring-tools';
 import {
@@ -78,7 +80,11 @@ export type JsonSchema = {
 // wave adds `strategy` (pillars/value) + `monitoring` (runs/traces, read-only) as
 // full tabs alongside the marketplace/governance READ additions. `platform` lands
 // WHEN its tools ship (every declared tab must carry ≥1 tool — the tabs.test invariant).
-export const MCP_TABS = ['software', 'data', 'science', 'knowledge', 'agents', 'files', 'metrics', 'dashboards', 'bigbets', 'connections', 'governance', 'marketplace', 'strategy', 'monitoring'] as const;
+// `operating-manual` is the Plan-group tab that owns the My/Domain/Company
+// Operating Model — its four MCP tools (get/update/list-versions/restore) wrap the
+// governed manual store, so the tab now carries a real MCP surface. (The tab id + tool
+// identifiers keep the `manual` name for wire stability; the product name is "Operating Model".)
+export const MCP_TABS = ['software', 'data', 'science', 'knowledge', 'agents', 'files', 'metrics', 'dashboards', 'bigbets', 'connections', 'governance', 'marketplace', 'strategy', 'monitoring', 'operating-manual'] as const;
 export type McpTab = (typeof MCP_TABS)[number];
 export function isMcpTab(x: string): x is McpTab {
   return (MCP_TABS as readonly string[]).includes(x);
@@ -150,6 +156,12 @@ const PLATFORM_SCHEMAS: Record<string, JsonSchema> = {
       description: { type: 'string' },
       template: { type: 'string', description: "Template key (e.g. 'nextjs-supabase')." },
       domain: { type: 'string', description: 'Domain to create in (must be one of yours).' },
+      surface: {
+        type: 'string',
+        enum: ['ui', 'api', 'both'],
+        description:
+          "Declare the app's surface — 'ui' (serves a frontend), 'api' (headless / tool surface), or 'both'. Declaring it wins over auto-detection, so a UI app is never mislabelled as API. Omit to let the OS infer it from the code.",
+      },
     },
     required: ['name'],
   },
@@ -215,8 +227,14 @@ const crossTools: McpTool[] = [
       required: ['sql'],
     },
     call: async (user, args) => {
-      const sql = str(args.sql).trim();
-      if (!sql) fail('query_data needs a `sql` string', 400);
+      const rawSql = str(args.sql).trim();
+      if (!rawSql) fail('query_data needs a `sql` string', 400);
+      // Normalize a model's trailing `;` (Trino rejects a bare separator) before the
+      // governed read runs; a surviving internal `;` is a real multi-statement request
+      // → a clear, actionable error, NOT a Trino syntax stack trace.
+      const sanitized = sanitizeSingleStatement(rawSql);
+      if (!sanitized.ok) fail(sanitized.reason, 400);
+      const sql = sanitized.sql;
       // TWO distinct principals here:
       //  - TOOL-ACCESS authz (`agentic.authz`) is granted by DOMAIN/agent-key —
       //    `data.grants[<domain>]` holds `query` — so the access gate runs on the
@@ -380,6 +398,7 @@ export const ALL_MCP_TOOLS: McpTool[] = [
   ...DISCOVERY_TOOLS,
   ...governanceTools,
   ...strategyReadTools,
+  ...MANUAL_TOOLS,
   ...marketplaceReadTools,
   ...MONITORING_TOOLS,
   ...discoveryTools,

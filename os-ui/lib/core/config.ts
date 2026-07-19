@@ -233,15 +233,45 @@ export const config = {
   // fall back to the mock chat model so the loop still runs on a laptop.
   litellmReasoningModel: env('LITELLM_REASONING_MODEL', env('LITELLM_CHAT_MODEL', 'sovereign-reasoning')),
   litellmExecModel: env('LITELLM_EXEC_MODEL', env('LITELLM_CHAT_MODEL', 'sovereign-default')),
-  // Agent tool-calling (function-calling) model. Defaults to the reasoning tier
-  // (Qwen), which emits clean OpenAI `tool_calls`; the light default (gpt-oss-20b)
-  // uses the "harmony" response format whose tool calls parse unreliably. This is
-  // just the install baseline — admin-overridable via the `tools` model role.
-  litellmToolsModel: env('LITELLM_TOOLS_MODEL', env('LITELLM_REASONING_MODEL', 'sovereign-reasoning')),
+  // Agent tool-calling (function-calling) model — the EXEC/"fast" tier of the
+  // multi-agent graph (this role is used ONLY there; Ask-the-OS resolves its own
+  // model). Defaults to the STANDARD tier (gpt-oss-20b): cheap-first, so read-only
+  // gatherer nodes run fast/cheap while the Auto router still escalates genuine
+  // write/decide/synthesis nodes to the reasoning tier (Qwen). Previously this
+  // followed the reasoning model, so EVERY node — even fast gatherers — ran on the
+  // 235B model, the main token/latency sink of a team run. gpt-oss-20b's "harmony"
+  // tool-call framing is stripped defensively (lib/assistant/runtime.ts), so it
+  // degrades gracefully. Admin-overridable via LITELLM_TOOLS_MODEL / the `tools`
+  // role to pin tool-calling back to the reasoning model if desired.
+  litellmToolsModel: env('LITELLM_TOOLS_MODEL', env('LITELLM_EXEC_MODEL', 'sovereign-default')),
+  // ---- "Talk to <tab>" copilots (lib/talk) — cost tier + escalation. The five
+  // Context-tab copilots (Talk-to-Data/Knowledge/Files/Connections/Metrics) are the
+  // OS's highest-traffic reasoning surface. They now answer on the CHEAP `standard`
+  // tier by DEFAULT and escalate to the `reasoning` tier only when the standard
+  // answer comes back weak (empty / too short / low-confidence / errored). This cuts
+  // the reasoning-token share dramatically without hurting hard-answer quality.
+  //   • TALK_COPILOT_TIER — the model ROLE the copilots use first ('standard' |
+  //     'reasoning' | 'tools'). Never a bare model name: it resolves through
+  //     `roleModel(role)` so an admin's role override / env alias still applies.
+  //     Set to 'reasoning' to pin the old always-235B behaviour.
+  //   • TALK_ESCALATE_TO_REASONING — when true (default), a weak first answer is
+  //     retried ONCE on the reasoning tier. Set 'false' to disable escalation (pure
+  //     single-tier copilots). No-op when the primary tier already IS reasoning.
+  talkCopilotTier: (() => {
+    const v = env('TALK_COPILOT_TIER', 'standard').trim();
+    return v === 'reasoning' || v === 'standard' || v === 'tools' ? v : 'standard';
+  })() as 'reasoning' | 'standard' | 'tools',
+  talkEscalateToReasoning: env('TALK_ESCALATE_TO_REASONING', 'true').toLowerCase() !== 'false',
+
   // Ask-the-OS assistant: max PLAN→ACT tool-call rounds per turn. Raised from the
   // original 8 so multi-step builds (ingest → silver → gold → metric → publish) can
   // complete in one conversation. Tunable via env without a rebuild.
-  assistantMaxSteps: Number(env('ASSISTANT_MAX_STEPS', '')) || 20,
+  assistantMaxSteps: Number(env('ASSISTANT_MAX_STEPS', '')) || 30,
+  // Multi-agent TEAM runs: max PLAN→ACT tool-call rounds PER NODE. Higher than the
+  // single-agent cap because one analytical node (an evaluator scoring N campaigns,
+  // a recommender reasoning over a full scorecard) legitimately needs more rounds
+  // than a one-shot assistant turn. Single-agent runs keep `assistantMaxSteps`.
+  agentTeamNodeMaxSteps: Number(env('AGENT_TEAM_NODE_MAX_STEPS', '')) || 60,
   // LLM Gateway tab — the read-only, tenant-total usage/spend panel
   // (app/api/gateway/usage). The budget envelope is surfaced for the "budget
   // used" bar; it mirrors the chart's litellmAgentKey.maxBudget / budgetDuration
@@ -276,7 +306,7 @@ export const config = {
   // browser. terminalBrokerWsUrl is browser-reachable (ingress host on a deploy;
   // a `kubectl port-forward svc/terminal-broker 8090:8080` address locally). ----
   terminalEnabled: env('TERMINAL_ENABLED', '') === 'true',
-  terminalAllowedRoles: env('TERMINAL_ALLOWED_ROLES', 'builder,admin')
+  terminalAllowedRoles: env('TERMINAL_ALLOWED_ROLES', 'admin')
     .split(',')
     .map((r) => r.trim())
     .filter(Boolean),
@@ -318,6 +348,26 @@ export const config = {
   // rides in the JSON payload for audit + the Trino-OPA enforcement path).
   cubeEmbedAccessPolicy: env('CUBE_EMBED_ACCESS_POLICY', 'true') !== 'false',
 
+  // Cube SQL API (Postgres-wire) for Power BI / BI-tool consumption. When the operator
+  // enables `cube.sqlApi` (Helm) they set these to the exposed host + port so the
+  // /api/powerbi/connection-info route can hand a builder the exact PostgreSQL
+  // connection fields for THEIR domain. Defaults describe the in-cluster Service; an
+  // external ingress overrides CUBE_SQL_HOST/PORT. `enabled` gates the affordance so
+  // the UI/doc never advertise a port the operator hasn't opened.
+  cubeSqlApiEnabled: env('CUBE_SQL_API_ENABLED', 'false') === 'true',
+  cubeSqlHost: env('CUBE_SQL_HOST', 'cube-sql'),
+  cubeSqlPort: Number(env('CUBE_SQL_PORT', '15432')),
+  // The k8s Secret holding CUBEJS_SQL_PASSWORD — surfaced to builders as a reference
+  // (vault path), never dereferenced into any browser-visible JSON.
+  cubeSqlPasswordSecret: env('CUBE_SQL_PASSWORD_SECRET', 'cube-sql-secrets'),
+  // The Cube SQL API password itself — SERVER-ONLY. Mounted into os-ui from the
+  // `cube-sql-secrets` Secret. Used ONLY to fill the Superset import `passwords` map when
+  // a dashboard's dataset is built on the Cube SQL API (so the domain's `bi_<domain>`
+  // connection can actually read the view's rows). EMPTY by default ⇒ the Cube SQL
+  // dashboard path degrades honestly (no password ⇒ Superset connection can't read) until
+  // the operator mounts the secret. NEVER sent to the browser.
+  cubeSqlPassword: env('CUBE_SQL_PASSWORD', ''),
+
   // OpenMetadata (catalog & lineage): server-side REST API base. OFF by default
   // locally (~2.5 GB JVM) — the Data/Unstructured surfaces probe it and degrade
   // to the query-tool catalog / OpenSearch index when it's unreachable.
@@ -349,6 +399,49 @@ export const config = {
   mlflowUrl: base(env('MLFLOW_URL', 'http://mlflow:5000')),
   featureformUrl: base(env('FEATUREFORM_URL', 'http://featureform:7878')),
   kserveUrl: base(env('KSERVE_URL', 'http://kserve:80')),
+
+  // ---- Science TRAINING RUNTIME. A per-model batch/v1 Job (lib/science/training.ts)
+  // trains a small CPU sklearn model from the governed Gold product THROUGH Trino
+  // (a read-only BI/science principal), logs to MLflow and uploads the artifact to
+  // s3://mlflow/models/<model>/ for a per-model KServe InferenceService. These fill
+  // the injected TrainingRuntime; the AWS creds are pulled from the named Secret by
+  // the job (never inlined). Chart-set from the same values the seed hook uses. ---
+  mlTrainerImage: env('ML_TRAINER_IMAGE', 'sovereign-os/ml-trainer:0.1.0'),
+  awsCliImage: env('AWS_CLI_IMAGE', 'amazon/aws-cli:2.31.13'),
+  s3SecretName: env('S3_SECRET_NAME', 'object-storage-credentials'),
+  // (s3Region + s3Endpoint are defined above — reused by the trainer runtime.)
+  // The trainer reads Gold via the governed query engine (least-privilege read
+  // principal — the SAME Trino/OPA path the `query` tool uses, never a write role).
+  trinoHost: env('TRINO_HOST', 'trino'),
+  trinoPort: Number(env('TRINO_PORT', '8080')),
+  trinoReadUser: env('TRINO_SCIENCE_USER', 'science-reader'),
+  trinoCatalog: env('TRINO_CATALOG', 'iceberg'),
+
+  // ---- External-warehouse connectors (Phase 1, opt-in). GATED OFF by default:
+  // federating an external lakehouse (AWS Glue today) as a governed Trino catalog
+  // is code-complete + unit-tested but NOT yet validated against a live source, so
+  // nothing appears in the UI/runtime until an operator deliberately enables it.
+  // When ON, a "warehouse catalog" connection renders Trino catalog props, mirrors
+  // to OpenMetadata and exposes read-only federated datasets (import = CTAS reuses
+  // the existing materialize path). See docs/external-warehouse-connectors.md.
+  externalConnectorsEnabled: env('EXTERNAL_CONNECTORS_ENABLED', '').toLowerCase() === 'true',
+
+  // ---- External OpenMetadata connection (Phase 1, read/discover only). GATED
+  // OFF by default: modelling an EXTERNAL OpenMetadata instance as a first-class
+  // Connection (base URL + vaulted bot JWT + optional default OM Service) and
+  // folding its domains/data-products/tables into the catalog as DLS-scoped
+  // discovery context is code-complete + unit-tested but inert until an operator
+  // deliberately connects an OM. This is READ-ONLY by construction — no writes to
+  // OM in this phase. Distinct from the bundled in-cluster OM (openmetadataApiUrl
+  // above), which is unchanged. See docs/openmetadata-connectors.md (Phase 1).
+  openmetadataConnectEnabled: env('OPENMETADATA_CONNECT_ENABLED', '').toLowerCase() === 'true',
+
+  // ---- Folder grants (Wave 3 agent-grant kernel). The MAX number of folder
+  // grants one agent may carry — a folder grant resolves at run time to every
+  // item under it (lib/core/folders → resolveFolderGrant), so this bounds the
+  // fan-out of a single grant set. Admin-overridable; the default is a
+  // teaching-safe ceiling, not a hard product limit.
+  folderGrantBudget: Number(env('OS_FOLDER_GRANT_BUDGET', '')) || 50,
 
   // ---- Deployment identity (read-only, surfaced on Settings; non-secret) ----
   deploymentProfile: env('OS_PROFILE', 'local'),

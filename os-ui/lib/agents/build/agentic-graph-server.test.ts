@@ -96,6 +96,34 @@ test('runOsTeam: a MIXED data+knowledge team dispatches as the acting user (neve
   assert.match(res.finalText, /analysed 1 row/);
 });
 
+// --- FIX 2 (observability): the run carries per-node status + finalText ----------
+
+test('runOsTeam: each node run carries a derived STATUS and its finalText (the run-route response shape)', async () => {
+  const deps = spyDeps();
+  const res = await runOsTeam({
+    user: CREATOR,
+    yaml: mixedYaml(),
+    systemId: 'sys-mix',
+    messages: [{ role: 'user', content: 'How many rows?' }],
+    llm: toolCallingLlm('query_data'),
+    toolDeps: deps,
+    maxIterations: 3,
+  });
+
+  // The route maps res.runs[] 1:1 into nodes[]: node + model + status + finalText +
+  // steps. Prove every run object carries those fields the panel now renders.
+  for (const r of res.runs) {
+    assert.ok(typeof r.node === 'string' && r.node, 'node id present');
+    assert.ok(['ok', 'failed', 'denied'].includes(r.status), 'a derived status is present');
+    assert.ok(typeof r.result.finalText === 'string', 'the node finalText (its conclusion) is present');
+  }
+  // The single (successful) node analysed the rows → status ok, finalText carries it.
+  const analyst = res.runs.find((r) => r.node === 'analyst');
+  assert.ok(analyst, 'the analyst node ran');
+  assert.equal(analyst!.status, 'ok', 'a node with no errored tool is ok');
+  assert.match(analyst!.result.finalText, /analysed 1 row/, 'the node output is available per-node, not dropped');
+});
+
 // --- gate: os-team vs hermes fallback ----------------------------------------
 
 test('isAgenticOsTeam gates the live path: mixed + software true, hermes false', () => {
@@ -122,4 +150,35 @@ test('osPreamble grounds a mixed team in the OS rules (tab-agnostic, no software
   assert.match(pre, /RUNNING USER/);
   // A data+knowledge team must NOT carry the software build-spec preamble.
   assert.doesNotMatch(pre, /BUILD SPEC \(canonical/);
+});
+
+// --- LIVE PROGRESS (0.1.81): runOsTeam forwards the streaming callbacks ----------
+
+test('runOsTeam: forwards ordered node-started / tool-step / node-completed events (the stream source)', async () => {
+  const deps = spyDeps();
+  const events: { kind: string; node: string; extra?: unknown }[] = [];
+  const res = await runOsTeam({
+    user: CREATOR,
+    yaml: mixedYaml(),
+    systemId: 'sys-mix',
+    messages: [{ role: 'user', content: 'How many rows?' }],
+    llm: toolCallingLlm('query_data'),
+    toolDeps: deps,
+    maxIterations: 3,
+    onNodeStart: (ev) => events.push({ kind: 'node-started', node: ev.node, extra: { index: ev.index, total: ev.total } }),
+    onStep: (ev) => events.push({ kind: 'tool-step', node: ev.node, extra: { tool: ev.step.tool, isError: ev.step.isError } }),
+    onNodeComplete: (ev) => events.push({ kind: 'node-completed', node: ev.node, extra: ev.status }),
+  });
+
+  // Terminal event is a node-completed, and the events reconstruct the run's node list.
+  assert.equal(events[events.length - 1].kind, 'node-completed');
+  const completed = events.filter((e) => e.kind === 'node-completed').map((e) => e.node);
+  assert.deepEqual(completed, res.runs.map((r) => r.node), 'events rebuild the same per-node structure');
+
+  // The single node's tool step streamed, bracketed by its start and complete.
+  const iStart = events.findIndex((e) => e.kind === 'node-started');
+  const iStep = events.findIndex((e) => e.kind === 'tool-step');
+  const iDone = events.findIndex((e) => e.kind === 'node-completed');
+  assert.ok(iStart < iStep && iStep < iDone, 'the tool-step is bracketed by node start/complete');
+  assert.deepEqual(events[iStart].extra, { index: 1, total: res.runs.length });
 });

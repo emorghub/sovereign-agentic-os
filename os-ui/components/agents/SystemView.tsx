@@ -11,11 +11,15 @@ import GrantsRouting from './GrantsRouting';
 import BuildRunPanel from './BuildRunPanel';
 import MonacoFile from './MonacoFile';
 import RuntimeSelector from './RuntimeSelector';
+import SimpleBuilder from './SimpleBuilder';
+import RecurrenceEditor from './RecurrenceEditor';
+import { cronToRecurrence, describeRecurrence } from '@/lib/agents/cron-friendly';
 import { commitSystem } from './commitSystem';
 import { addAgent, addHandoffEdge, addSuperviseEdge, removeAgent, removeEdge, setEntrypoint, setNodePositions } from '@/lib/agents/canvas-edit';
 import type { Schedule, System } from '@/lib/agents/system-schema';
 import type { ModelInfo } from '@/lib/agents/routing';
 import { roleAtLeast, type Role } from '@/lib/core/session';
+import { promoteVerb, visibilityLabel } from '@/lib/core/scopes';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import type { Visibility } from '@/lib/core/lifecycle';
@@ -83,8 +87,31 @@ type RoutingData = { activities: string[]; tiers: Record<string, string>; table:
 
 type Panel = 'yaml' | 'grants' | 'build';
 
+/**
+ * Builder view mode. Simple = the guided, plain-fields flow for non-coders;
+ * Developer = today's canvas + Monaco + grants surface, unchanged. Both edit the
+ * SAME system.yaml through the SAME commit path — the toggle only changes the
+ * surface, never the source of truth.
+ */
+type ViewMode = 'simple' | 'developer';
+const MODE_KEY = 'agents.viewMode';
+
+/**
+ * The persisted mode, defaulting to Simple for EVERYONE (admins included) — the
+ * guided flow is the front door; Developer (canvas + Monaco system.yaml + grants
+ * table) is one click away and, once chosen, remembered per user via localStorage.
+ */
+function resolveInitialMode(_role: Role): ViewMode {
+  if (typeof window !== 'undefined') {
+    const saved = window.localStorage.getItem(MODE_KEY);
+    if (saved === 'simple' || saved === 'developer') return saved;
+  }
+  return 'simple';
+}
+
 const visClass = (v: string) => (v === 'Shared' ? 'vis-shared' : v === 'Marketplace' ? 'vis-certified' : 'vis-personal');
-const visLabel = (v: string) => (v === 'Shared' ? 'Shared in Domain' : v);
+// Display label from the OS-wide scope vocabulary: Shared→Domain, Marketplace→Company, Personal→My.
+const visLabel = (v: string) => visibilityLabel(v);
 
 /** Systems visibility → the OS-wide lifecycle visibility (drives the delete gate). */
 const lcVis = (v: SystemViewData['visibility']): Visibility =>
@@ -95,11 +122,19 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
   const { data: modelsData } = useApi<ModelsData>('/api/agents/models');
   const { data: routingData } = useApi<RoutingData>('/api/agents/routing');
 
-  const [panel, setPanel] = useState<Panel>('yaml');
+  // Developer tabs open on Build & run (the day-to-day surface); system.yaml is the
+  // last tab and a read-only source view unless the user clicks Edit (yamlEditing).
+  const [panel, setPanel] = useState<Panel>('build');
+  const [yamlEditing, setYamlEditing] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // View mode (Simple ⇄ Developer). Initialized from the persisted choice / role
+  // once the system's role is known; remembered in localStorage thereafter.
+  const [mode, setMode] = useState<ViewMode | null>(null);
+  const [catalog, setCatalog] = useState<string[] | null>(null);
   const [actErr, setActErr] = useState('');
   const [acting, setActing] = useState(false);
+  const [confirmDemote, setConfirmDemote] = useState(false);
   // Re-entry guard: state is async, so gate concurrent edits through a ref. This
   // serializes mutations so each one builds its diff from the freshly-reloaded
   // source — no stale-base lost update on rapid canvas/chip edits.
@@ -174,6 +209,29 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
     return () => window.removeEventListener('keydown', onKey);
   }, [undo, redo]);
 
+  // Initialize the view mode once the role is known (persisted choice wins, else
+  // role default). Runs once — later toggles are user-driven via setModePersisted.
+  const roleForMode = data?.role;
+  useEffect(() => {
+    if (mode === null && roleForMode) setMode(resolveInitialMode(roleForMode));
+  }, [mode, roleForMode]);
+
+  const setModePersisted = useCallback((next: ViewMode) => {
+    setMode(next);
+    try { window.localStorage.setItem(MODE_KEY, next); } catch { /* storage may be unavailable */ }
+  }, []);
+
+  // The role-scoped tool catalog (names only) — feeds Simple mode's suggestion
+  // chips so a creator is never offered a tool above their floor. Loaded once.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/agents/tool-catalog')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('catalog'))))
+      .then((b: { tools: { name: string }[] }) => { if (!cancelled) setCatalog(b.tools.map((t) => t.name)); })
+      .catch(() => { if (!cancelled) setCatalog([]); });
+    return () => { cancelled = true; };
+  }, []);
+
   const post = useCallback(
     async (path: string, body?: unknown) => {
       if (actingRef.current) return;
@@ -219,8 +277,21 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
     data.origin !== 'forked' &&
     ((data.visibility === 'Personal' && roleAtLeast(data.role, 'builder')) ||
       (data.visibility === 'Shared' && data.role === 'admin'));
-  const promoteLabel = data.visibility === 'Personal' ? 'Promote to Shared' : 'Publish to Marketplace';
+  // Display verbs from the OS-wide scope vocabulary (lib/core/scopes.ts):
+  // Personal → "Promote to Domain", Shared → "Certify to Company".
+  const promoteLabel = data.visibility === 'Personal' ? promoteVerb('Personal') : promoteVerb('Shared');
+  // Revoke sharing (demote), mirroring who could have promoted it: Marketplace→Shared
+  // is admin-only; Shared→Personal is the owner (canEdit) or an in-domain builder+.
+  const canDemote =
+    data.canEdit &&
+    data.origin !== 'forked' &&
+    ((data.visibility === 'Marketplace' && data.role === 'admin') ||
+      (data.visibility === 'Shared' && roleAtLeast(data.role, 'builder')));
+  const demoteLabel = data.visibility === 'Marketplace' ? 'Revoke from Company → Domain' : 'Unshare → My';
   const editable = data.canEdit && !acting;
+  // The mode to render NOW: the resolved state once known, else Simple — the
+  // universal default (never flash the Developer surface before the pref resolves).
+  const effectiveMode: ViewMode = mode ?? 'simple';
   const onConnect = (from: string, to: string) => {
     const fromAgent = sys.agents.find((a) => a.id === from);
     const isSupervisor = from === sys.entrypoint || (fromAgent?.members?.length ?? 0) > 0;
@@ -253,17 +324,51 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
           {!data.canEdit ? <span className="badge muted">read-only</span> : null}
         </div>
         <div className="system-actions">
+          <div className="mode-toggle" role="group" aria-label="Builder view mode">
+            <button
+              type="button"
+              className={effectiveMode === 'simple' ? 'active' : ''}
+              aria-pressed={effectiveMode === 'simple'}
+              onClick={() => setModePersisted('simple')}
+              title="Guided, plain-language builder"
+            >
+              Simple
+            </button>
+            <button
+              type="button"
+              className={effectiveMode === 'developer' ? 'active' : ''}
+              aria-pressed={effectiveMode === 'developer'}
+              onClick={() => setModePersisted('developer')}
+              title="Canvas, files and grants — the full surface"
+            >
+              Developer
+            </button>
+          </div>
           {acting ? <span className="spin" title="applying…" /> : null}
           {data.running ? (
             <button className="btn ghost sm" onClick={() => post('run', { stop: true })} disabled={!data.canEdit || acting}>Stop</button>
           ) : (
             <button className="btn sm" onClick={() => post('run', { prompt: 'Test invocation' })} disabled={!data.canEdit || acting}>Run</button>
           )}
-          <ScheduleControl systemId={systemId} schedule={data.schedule} canEdit={data.canEdit && !acting} onSaved={reloadAll} />
+          <ScheduleBadge schedule={data.schedule} />
           {canPromote ? (
             <button className="btn ghost sm" onClick={() => post('promote')} disabled={acting} title={`Governed publish step — ${promoteLabel}`}>
               {promoteLabel}
             </button>
+          ) : null}
+          {canDemote ? (
+            confirmDemote ? (
+              <>
+                <button className="btn sm" style={{ background: 'var(--danger, #b42318)' }} onClick={() => { setConfirmDemote(false); void post('demote'); }} disabled={acting}>
+                  {`Confirm — ${demoteLabel}`}
+                </button>
+                <button className="btn ghost sm" onClick={() => setConfirmDemote(false)} disabled={acting}>Cancel</button>
+              </>
+            ) : (
+              <button className="btn ghost sm" onClick={() => setConfirmDemote(true)} disabled={acting} title={`Revoke sharing — ${demoteLabel}`}>
+                {data.visibility === 'Marketplace' ? 'Revoke from Company' : 'Unshare'}
+              </button>
+            )
           ) : null}
           {/* OS-wide rule: live → Archive; only an ARCHIVED system exposes Delete.
               Real archived state drives which actions show. */}
@@ -276,7 +381,7 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
               archived={!!data.archived}
               api={`/api/agents/systems/${systemId}`}
               onChanged={() => { if (data.archived) onBack(); else void reloadAll(); }}
-              showVersions={false}
+              showVersions
               compact
             />
           ) : null}
@@ -287,14 +392,32 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
         {data.lastActivity ? <> · last activity {new Date(data.lastActivity).toLocaleString()}</> : null}
       </div>
 
+      {actErr ? <div className="error" style={{ marginBottom: 12 }}>{actErr}</div> : null}
+
+      {effectiveMode === 'simple' ? (
+        <SimpleBuilder
+          systemId={systemId}
+          system={sys}
+          canEdit={data.canEdit && !acting}
+          catalog={catalog}
+          buildRun={{
+            running: data.running,
+            lastBuild: data.lastBuild,
+            activity: data.activity,
+            lastRun: data.lastRun,
+            nodePath: runOrder(sys, data.disabledAgents),
+          }}
+          onCommit={(next) => commit(next, { snapshot: sys })}
+          onReload={reloadAll}
+        />
+      ) : (
+      <>
       <RuntimeSelector
         system={sys}
         canEdit={data.canEdit && !acting}
         hermesEnabled={data.hermesEnabled}
         onChange={(next) => mutate(next)}
       />
-
-      {actErr ? <div className="error" style={{ marginBottom: 12 }}>{actErr}</div> : null}
 
       <BuildChecklist system={sys} compileError={data.compileError} disabledAgents={data.disabledAgents} />
 
@@ -344,20 +467,44 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
       ) : null}
 
       <div className="tabstrip" style={{ marginTop: 18 }}>
-        <button className={panel === 'yaml' ? 'active' : ''} onClick={() => setPanel('yaml')}>system.yaml</button>
         <button className={panel === 'grants' ? 'active' : ''} onClick={() => setPanel('grants')}>Grants &amp; routing</button>
         <button className={panel === 'build' ? 'active' : ''} onClick={() => setPanel('build')}>Build &amp; run</button>
+        <button className={panel === 'yaml' ? 'active' : ''} onClick={() => setPanel('yaml')}>system.yaml</button>
       </div>
 
       <div style={{ marginTop: 14 }}>
         {panel === 'yaml' ? (
-          <MonacoFile systemId={systemId} path="system.yaml" canEdit={data.canEdit} height={420} reloadSignal={reloadKey} onSaved={reloadAll} />
+          <>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <span className="hint" style={{ marginTop: 0 }}>
+                The single source of truth behind the canvas, grants, and per-agent fields.
+                {yamlEditing ? ' Editing directly — changes commit like any other edit.' : ' Read-only view.'}
+              </span>
+              {data.canEdit ? (
+                <button className="btn ghost sm" onClick={() => setYamlEditing((v) => !v)}>
+                  {yamlEditing ? 'Done editing' : '✎ Edit YAML'}
+                </button>
+              ) : null}
+            </div>
+            <MonacoFile
+              systemId={systemId}
+              path="system.yaml"
+              canEdit={data.canEdit && yamlEditing}
+              height={420}
+              reloadSignal={reloadKey}
+              onSaved={reloadAll}
+              readOnlyHint="Viewing the source — click “Edit YAML” above to change it."
+            />
+          </>
         ) : null}
         {panel === 'grants' ? (
           <GrantsRouting systemId={systemId} system={sys} canEdit={data.canEdit} canDirectWrite={roleAtLeast(data.role, 'builder')} roles={{ reasoning: modelsData?.roles?.reasoning || 'sovereign-reasoning', standard: modelsData?.roles?.standard || 'sovereign-default' }} routing={routingData} onChanged={reloadAll} />
         ) : null}
         {panel === 'build' ? (
-          <BuildRunPanel systemId={systemId} running={data.running} canEdit={data.canEdit} lastBuild={data.lastBuild} activity={data.activity} lastRun={data.lastRun} onStateChange={reloadAll} />
+          <>
+            <TriggerEditor systemId={systemId} schedule={data.schedule} canEdit={data.canEdit && !acting} onSaved={reloadAll} />
+            <BuildRunPanel systemId={systemId} running={data.running} canEdit={data.canEdit} lastBuild={data.lastBuild} activity={data.activity} lastRun={data.lastRun} nodePath={runOrder(sys, data.disabledAgents)} onStateChange={reloadAll} />
+          </>
         ) : null}
       </div>
 
@@ -382,6 +529,8 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
           </aside>
         </div>
       ) : null}
+      </>
+      )}
     </div>
     </ConfirmProvider>
   );
@@ -392,6 +541,17 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
  * surfaces the exact blocker (from the server-side compile) as a to-fix item so a
  * non-technical builder knows what to do before Run/Build.
  */
+/**
+ * The likely run order (entrypoint first, then the other active agents in declared
+ * order) — used only to show an immediate in-progress node path on Run press, before
+ * the server reports the authoritative walk. Disabled agents are excluded.
+ */
+function runOrder(system: System, disabledAgents: string[]): string[] {
+  const active = system.agents.map((a) => a.id).filter((id) => !disabledAgents.includes(id));
+  const entry = system.entrypoint && active.includes(system.entrypoint) ? [system.entrypoint] : [];
+  return [...entry, ...active.filter((id) => id !== system.entrypoint)];
+}
+
 function BuildChecklist({ system, compileError, disabledAgents }: { system: System; compileError: string | null; disabledAgents: string[] }) {
   const items: { ok: boolean; text: string }[] = [];
   items.push({ ok: system.agents.length > 0, text: system.agents.length > 0 ? `${system.agents.length} agent${system.agents.length === 1 ? '' : 's'}` : 'Add at least one agent' });
@@ -417,15 +577,39 @@ function BuildChecklist({ system, compileError, disabledAgents }: { system: Syst
 
 type CronStatus = { ok: boolean; live: boolean; action: string; detail: string; name: string };
 
-function ScheduleControl({ systemId, schedule, canEdit, onSaved }: { systemId: string; schedule: Schedule; canEdit: boolean; onSaved: () => void | Promise<void> }) {
-  // Local optimistic mirrors of the server-owned schedule so the dropdown reflects
-  // the choice immediately (no snap-back during the round-trip) and the cron field
-  // re-syncs when the persisted value changes.
+const TRIGGER_MODES: { kind: Schedule['kind']; label: string; blurb: string }[] = [
+  { kind: 'manual', label: 'Manual', blurb: 'You run it by hand.' },
+  { kind: 'cron', label: 'On schedule', blurb: 'It runs automatically on a repeating schedule.' },
+  { kind: 'event', label: 'Called from system', blurb: 'Another system or the API triggers it on demand.' },
+];
+
+/** One-line, human summary of the current trigger for the read-only header badge. */
+function scheduleSummary(schedule: Schedule): string {
+  if (schedule.kind === 'manual') return 'Manual';
+  if (schedule.kind === 'event') return 'Called from system';
+  const r = schedule.cron ? cronToRecurrence(schedule.cron) : null;
+  return r ? `On schedule · ${describeRecurrence(r)}` : `On schedule · ${schedule.cron ?? ''}`.trim();
+}
+
+/** Read-only trigger badge for the header — DISPLAY only; editing lives in the editor. */
+function ScheduleBadge({ schedule }: { schedule: Schedule }) {
+  return (
+    <span className="badge" title="Trigger — edit under Build & run" style={{ whiteSpace: 'nowrap' }}>
+      {scheduleSummary(schedule)}
+    </span>
+  );
+}
+
+/**
+ * The FULL trigger editor for Developer mode — three-mode selector (Manual · On
+ * schedule · Called from system) plus the Outlook-style RecurrenceEditor for cron.
+ * Lives inside the Build & run panel (mirrors Simple mode's Run phase). Same
+ * `/schedule` route contract — RecurrenceEditor produces the cron string.
+ */
+function TriggerEditor({ systemId, schedule, canEdit, onSaved }: { systemId: string; schedule: Schedule; canEdit: boolean; onSaved: () => void | Promise<void> }) {
   const [kind, setKind] = useState<Schedule['kind']>(schedule.kind);
   const [cron, setCron] = useState(schedule.cron ?? '0 9 * * 1');
   const [busy, setBusy] = useState(false);
-  // The CronJob reconcile status (honest): a cron schedule only fires once a real
-  // CronJob is provisioned — surface when it was NOT (e.g. cluster unreachable).
   const [cronStatus, setCronStatus] = useState<CronStatus | null>(null);
   const [err, setErr] = useState('');
   useEffect(() => { setKind(schedule.kind); }, [schedule.kind]);
@@ -452,37 +636,57 @@ function ScheduleControl({ systemId, schedule, canEdit, onSaved }: { systemId: s
     }
   };
 
+  const pick = (next: Schedule['kind']) => {
+    if (next === kind) return;
+    setKind(next);
+    void save(next === 'cron' ? { kind: next, cron } : next === 'event' ? { kind: next, event: 'on_demand' } : { kind: next });
+  };
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-      <div className="row" style={{ gap: 6, alignItems: 'center' }}>
-        <select
-          value={kind}
-          disabled={!canEdit || busy}
-          onChange={(e) => {
-            const next = e.target.value as Schedule['kind'];
-            setKind(next);
-            void save(next === 'cron' ? { kind: next, cron } : next === 'event' ? { kind: next, event: 'on_demand' } : { kind: next });
-          }}
-          title="Schedule"
-        >
-          <option value="manual">manual</option>
-          <option value="cron">cron</option>
-          <option value="event">event</option>
-        </select>
-        {kind === 'cron' ? (
-          <form onSubmit={(e) => { e.preventDefault(); void save({ kind: 'cron', cron }); }}>
-            <input type="text" value={cron} onChange={(e) => setCron(e.target.value)} disabled={!canEdit || busy} style={{ width: 120 }} className="mono" />
-          </form>
-        ) : null}
+    <div className="sb-resources" style={{ marginBottom: 16 }}>
+      <h3 style={{ marginTop: 0, marginBottom: 10 }}>How is this system triggered?</h3>
+      <div className="tmpl-grid" role="group" aria-label="Trigger mode">
+        {TRIGGER_MODES.map((m) => (
+          <button
+            key={m.kind}
+            type="button"
+            className={`tmpl-card${kind === m.kind ? ' active' : ''}`}
+            aria-pressed={kind === m.kind}
+            disabled={!canEdit || busy}
+            onClick={() => pick(m.kind)}
+          >
+            <span className="tmpl-label">{m.label}</span>
+            <span className="tmpl-blurb">{m.blurb}</span>
+          </button>
+        ))}
       </div>
-      {err ? <span className="muted" style={{ fontSize: 11, color: 'var(--danger, #c0392b)' }}>{err}</span> : null}
+
+      {kind === 'cron' ? (
+        <div style={{ marginTop: 10 }}>
+          <RecurrenceEditor
+            cron={cron}
+            disabled={!canEdit || busy}
+            onChange={(next) => { setCron(next); void save({ kind: 'cron', cron: next }); }}
+          />
+        </div>
+      ) : null}
+
+      {kind === 'event' ? (
+        <div style={{ marginTop: 10 }} className="hint">
+          Trigger it from another system or the API with{' '}
+          <span className="mono">run_agent_system</span> (MCP) or{' '}
+          <span className="mono">POST /api/agents/systems/{systemId}/run</span>. No schedule is set — it runs when called.
+        </div>
+      ) : null}
+
+      {err ? <div className="error" style={{ marginTop: 8 }}>{err}</div> : null}
       {cronStatus && kind === 'cron' && !cronStatus.ok ? (
-        <span className="muted" style={{ fontSize: 11, color: 'var(--warn, #b7791f)' }} title={cronStatus.detail}>
+        <div className="hint" style={{ marginTop: 8, color: 'var(--warn, #b7791f)' }} title={cronStatus.detail}>
           ⚠ schedule saved but not scheduled — {cronStatus.detail}
-        </span>
+        </div>
       ) : null}
       {cronStatus && kind === 'cron' && cronStatus.ok && cronStatus.live ? (
-        <span className="muted" style={{ fontSize: 11 }}>✓ CronJob {cronStatus.action} — runs on schedule</span>
+        <div className="hint" style={{ marginTop: 8 }}>✓ CronJob {cronStatus.action} — runs on schedule</div>
       ) : null}
     </div>
   );

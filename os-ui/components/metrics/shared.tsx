@@ -23,6 +23,9 @@ export type MetricSummary = {
   type: string;
   /** Source domain — set on shared/marketplace metrics for provenance display. */
   domain?: string;
+  /** The folder this metric lives in (normalised path; `'/'` = root). Rides the metric
+   *  lifecycle overlay — a metric has no store row of its own. Defaults to `'/'`. */
+  folder: string;
   /** Soft-archived (retained, reversible). Absent/false = live. */
   archived?: boolean;
   /** FAIL-SOFT: set when this metric's model couldn't load — rendered inline so the
@@ -40,7 +43,9 @@ export type DefineResult = {
   measure: { name: string; type: string; sql: string };
   member: string;
   convergence: { ok: boolean; rows: CheckRow[] };
-  build: { rows: BuildRow[]; ok: boolean; member: string; mode: Mode };
+  build: { rows: BuildRow[]; ok: boolean; member: string; mode: Mode; pending?: boolean };
+  /** Saved, but its live value hasn't sync'd to the query engine yet (not an error). */
+  pending?: boolean;
   cube: string;
 };
 
@@ -73,7 +78,7 @@ export const TIER_BADGE: Record<MetricTier, string> = {
 export const TIER_WORD: Record<MetricTier, string> = {
   personal: 'Personal',
   domain: 'Domain',
-  marketplace: 'Marketplace',
+  marketplace: 'Company',
 };
 
 /** The leaf of a Cube member — `DailyRevenue.region` → `region`. */
@@ -138,20 +143,28 @@ export function ModeBadge({ mode }: { mode: Mode }) {
   return <span className={`badge ${mode === 'live' ? 'ok' : 'muted'}`}>{mode}</span>;
 }
 
-/** The metric Build report (cube → metric-explorer, apply→verify) + its mode. */
+/** The metric Build report (cube → metric-explorer, apply→verify) + its mode.
+ *  When the build is `pending` (Cube is up but the model-sync sidecar hasn't pushed the
+ *  just-defined measure yet), a not-yet-resolved row is SYNC LAG, not a failure — so it
+ *  renders as "syncing" (⟳), never a hard "✗ Build failed". The metric is already saved. */
 export function BuildRowsView({ build }: { build: DefineResult['build'] }) {
+  const header = build.ok ? '✓ Build passed' : build.pending ? '⟳ Build syncing' : '✗ Build failed';
   return (
     <div className="build-report">
       <div className="row" style={{ justifyContent: 'space-between' }}>
-        <strong>{build.ok ? '✓ Build passed' : '✗ Build failed'}</strong>
+        <strong>{header}</strong>
         <ModeBadge mode={build.mode} />
       </div>
-      {build.rows.map((r) => (
-        <div key={r.tool} className={`build-row ${r.status}`}>
-          <span className="build-tool">{r.status === 'ok' ? '✓' : '✗'} {r.tool}</span>
-          <span className="muted" style={{ fontSize: 12 }}>{r.error ?? r.detail}</span>
-        </div>
-      ))}
+      {build.rows.map((r) => {
+        // A failing row under a pending build is a sync-lag non-resolution, not an error.
+        const syncing = build.pending && r.status === 'fail';
+        return (
+          <div key={r.tool} className={`build-row ${syncing ? 'ok' : r.status}`}>
+            <span className="build-tool">{r.status === 'ok' ? '✓' : syncing ? '⟳' : '✗'} {r.tool}</span>
+            <span className="muted" style={{ fontSize: 12 }}>{syncing ? 'syncing — resolves shortly' : (r.error ?? r.detail)}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -38,13 +38,32 @@ import yaml from 'js-yaml';
  *   > tacit: Check section 4 — the date field is frequently missed.
  *
  * General domain knowledge is stored as a separate `DomainKnowledge` object with
- * four guided sections (overview / glossary / goals / context).
+ * seven guided sections (general / strategy / business / organization / architecture / data / glossary).
  */
 
 export type Visibility = 'Personal' | 'Shared' | 'Marketplace';
 export type WorkflowStatus = 'draft' | 'live';
-export type ActorType = 'Human' | 'Software' | 'Agent';
+/**
+ * Five actor categories. `Customer` and `Partner` are EXTERNAL actors (outside
+ * the organisation) — the swimlane renders their lanes visually distinct.
+ */
+export type ActorType = 'Human' | 'Software' | 'Agent' | 'Customer' | 'Partner';
 export type LinkType = 'data' | 'app' | 'agent' | 'file';
+
+/** Actor categories that live outside the organisation. */
+export const EXTERNAL_ACTORS: ActorType[] = ['Customer', 'Partner'];
+
+/**
+ * A first-class actor in the workflow's registry — a named, described entity.
+ * Steps reference an actor by its (category, name); the registry lets each actor
+ * carry a description and be picked from a dropdown rather than free-typed.
+ */
+export type Actor = {
+  id?: string;
+  name: string;
+  category: ActorType;
+  description?: string;
+};
 
 export type StepLink = {
   type: LinkType;
@@ -89,6 +108,12 @@ export type WorkflowMeta = {
   version: string;
   /** Workflow-level decision rules (soft + hard). */
   rules: WorkflowRule[];
+  /**
+   * The workflow's actor registry — first-class described actors. Derived from
+   * the steps' distinct (category, name) pairs on load when no `actors:` section
+   * is present, so old workflows gain a registry for free (back-compat).
+   */
+  actors: Actor[];
 };
 
 export type Workflow = WorkflowMeta & {
@@ -97,9 +122,22 @@ export type Workflow = WorkflowMeta & {
   body: string;
 };
 
-/** General domain knowledge — the pinned domain card; base context for every domain agent. */
+/** General domain knowledge — the pinned operating-model card; base context for every domain agent. */
+export type DomainSectionId =
+  | 'general'
+  | 'strategy'
+  | 'business'
+  | 'organization'
+  | 'architecture'
+  | 'data'
+  | 'glossary'
+  // Legacy section ids — carried forward during migration, never created fresh.
+  | 'overview'
+  | 'goals'
+  | 'context';
+
 export type DomainSection = {
-  id: 'overview' | 'glossary' | 'goals' | 'context';
+  id: DomainSectionId;
   title: string;
   content: string;
 };
@@ -122,7 +160,7 @@ export class KnowledgeError extends Error {
 
 // ---------------------------------------------------------------- constants ---
 
-const ACTOR_TYPES: ActorType[] = ['Human', 'Software', 'Agent'];
+export const ACTOR_TYPES: ActorType[] = ['Human', 'Software', 'Agent', 'Customer', 'Partner'];
 const LINK_TYPES: LinkType[] = ['data', 'app', 'agent', 'file'];
 const VISIBILITIES: Visibility[] = ['Personal', 'Shared', 'Marketplace'];
 const STATUSES: WorkflowStatus[] = ['draft', 'live'];
@@ -168,6 +206,48 @@ function parseWorkflowRule(raw: unknown): WorkflowRule | null {
   const rule: WorkflowRule = { id, text, hard: Boolean(raw.hard), scope };
   if (scope === 'step' && typeof raw.step_id === 'string') rule.step_id = raw.step_id;
   return rule;
+}
+
+function parseActor(raw: unknown): Actor | null {
+  if (!isRecord(raw)) return null;
+  const name = String(raw.name ?? '').trim();
+  const category = String(raw.category ?? '') as ActorType;
+  if (!name || !ACTOR_TYPES.includes(category)) return null;
+  const actor: Actor = { name, category };
+  const id = String(raw.id ?? '').trim();
+  if (id) actor.id = id;
+  const description = String(raw.description ?? '').trim();
+  if (description) actor.description = description;
+  return actor;
+}
+
+const actorKey = (category: ActorType, name: string) => `${category}::${name.trim().toLowerCase()}`;
+
+/**
+ * Derive an actor registry from the steps' distinct (category, name) pairs.
+ * Used as a back-compat fallback for workflows that predate the `actors:` section
+ * so they gain a registry for free. Merges any explicitly-declared actors first
+ * (those keep their description); a step whose (category, name) is already
+ * declared is not re-added.
+ */
+export function deriveActors(steps: WorkflowStep[], declared: Actor[] = []): Actor[] {
+  const out: Actor[] = [];
+  const seen = new Set<string>();
+  for (const a of declared) {
+    const key = actorKey(a.category, a.name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(a);
+  }
+  for (const s of steps) {
+    const name = s.actor_name.trim();
+    if (!name) continue; // unnamed steps don't seed a registry entry
+    const key = actorKey(s.actor, name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, category: s.actor });
+  }
+  return out;
 }
 
 // ------------------------------------------------------ step block parse -----
@@ -280,6 +360,15 @@ export function parseWorkflow(text: string): Workflow {
     : [];
 
   const body = norm.slice(fmMatch[0].length);
+  const steps = parseSteps(body);
+
+  // Actor registry: explicitly-declared `actors:` (if any) merged with the
+  // distinct (category, name) pairs found in the steps. A pre-registry workflow
+  // (no `actors:` section) therefore still gets a registry derived from its steps.
+  const declared: Actor[] = Array.isArray(front.actors)
+    ? (front.actors.map(parseActor).filter(Boolean) as Actor[])
+    : [];
+  const actors = deriveActors(steps, declared);
 
   return {
     id: String(front.id ?? '').trim() || 'untitled',
@@ -289,7 +378,8 @@ export function parseWorkflow(text: string): Workflow {
     status,
     version: String(front.version ?? '1'),
     rules,
-    steps: parseSteps(body),
+    actors,
+    steps,
     body,
   };
 }
@@ -308,6 +398,18 @@ export function serializeWorkflow(w: Workflow): string {
     frontDoc.rules = w.rules.map((r) => {
       const out: Record<string, unknown> = { id: r.id, text: r.text, hard: r.hard, scope: r.scope };
       if (r.step_id) out.step_id = r.step_id;
+      return out;
+    });
+  }
+  // Actor registry — its own frontmatter section, alongside `rules:`. Persisted
+  // in full so a registry entry survives even when no step references it yet
+  // (add-then-assign) or it carries no description. On load it's re-merged with
+  // the steps' distinct (category, name) pairs, so nothing is lost either way.
+  if ((w.actors ?? []).length > 0) {
+    frontDoc.actors = w.actors.map((a) => {
+      const out: Record<string, unknown> = { name: a.name, category: a.category };
+      if (a.id) out.id = a.id;
+      if (a.description) out.description = a.description;
       return out;
     });
   }
@@ -340,13 +442,73 @@ export function serializeWorkflow(w: Workflow): string {
 
 // ---------------------------------------------- domain knowledge helpers ----
 
-export const DOMAIN_SECTION_IDS = ['overview', 'glossary', 'goals', 'context'] as const;
+/**
+ * Canonical section ids for the Operating Model card (7 sections, fixed order).
+ * The old 4-section ids (overview / goals / context) are legacy and never created
+ * fresh; `glossary` survived intact.
+ */
+export const DOMAIN_SECTION_IDS = [
+  'general',
+  'strategy',
+  'business',
+  'organization',
+  'architecture',
+  'data',
+  'glossary',
+] as const;
+
 export const DOMAIN_SECTION_TITLES: Record<string, string> = {
-  overview: 'Overview',
+  general: 'General',
+  strategy: 'Strategy',
+  business: 'Business',
+  organization: 'Organization',
+  architecture: 'Architecture',
+  data: 'Data',
   glossary: 'Glossary',
-  goals: 'Goals',
-  context: 'Key Context',
 };
+
+/**
+ * Migration mapping: old 4-section ids → new canonical section ids.
+ * `glossary` is identity (survived unchanged).
+ */
+export const DOMAIN_SECTION_MIGRATION: Record<string, string> = {
+  overview: 'general',
+  goals: 'strategy',
+  context: 'business',
+  glossary: 'glossary',
+};
+
+/**
+ * Reconcile a stored DomainKnowledge card (potentially old 4-section shape) to the
+ * canonical 7-section shape. Migration rules:
+ *   overview → general, goals → strategy, context → business, glossary → glossary
+ * New sections (organization / architecture / data) start empty.
+ * If the card already has the new shape, it is returned with all 7 sections present
+ * (missing ones are filled as empty). No content is ever lost.
+ */
+export function reconcileSections(dk: DomainKnowledge): DomainKnowledge {
+  // Build a lookup of existing sections by id (old or new).
+  const byId: Record<string, string> = {};
+  for (const sec of dk.sections) {
+    byId[sec.id] = sec.content;
+  }
+
+  // Carry old-id content into the new id (only if the new id has no content yet).
+  for (const [oldId, newId] of Object.entries(DOMAIN_SECTION_MIGRATION)) {
+    if (oldId !== newId && oldId in byId && !(newId in byId)) {
+      byId[newId] = byId[oldId];
+    }
+  }
+
+  return {
+    ...dk,
+    sections: DOMAIN_SECTION_IDS.map((id) => ({
+      id,
+      title: DOMAIN_SECTION_TITLES[id],
+      content: byId[id] ?? '',
+    })),
+  };
+}
 
 export function emptyDomainKnowledge(domain: string): DomainKnowledge {
   return {

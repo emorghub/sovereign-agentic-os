@@ -48,10 +48,10 @@ const isAdmin = (role: Role) => rank(role) >= rank('admin');
 function roleBanner(user: CurrentUser): string {
   const gate = isBuilder(user.role)
     ? isAdmin(user.role)
-      ? 'You CAN approve promotions, deploys, AND certify to the marketplace / own cross-domain bets / administer users tenant-wide.'
+      ? 'You CAN approve promotions, deploys, AND certify to Company / own cross-domain bets / administer users tenant-wide.'
       : isDomainAdmin(user.role)
-        ? 'You CAN approve promotions/deploys AND administer users in your own domain(s) (roles up to builder). You CANNOT certify to the marketplace or appoint domain admins (Admin only).'
-        : 'You CAN approve Personal→Shared promotions and deploys in your domain(s). You CANNOT certify to the marketplace (Admin only) or administer users (Domain admin+).'
+        ? 'You CAN approve promotions/deploys AND administer users in your own domain(s) (roles up to builder). You CANNOT certify to Company or appoint domain admins (Admin only).'
+        : 'You CAN approve My→Domain promotions (promote to Domain) and deploys in your domain(s). You CANNOT certify to Company (Admin only) or administer users (Domain admin+).'
     : 'You are a CREATOR: you build/run your own work and FILE promotion requests, but you CANNOT promote/publish/approve. At a ⛔ step, hand off to a Builder.';
   return `— YOUR ROLE: ${user.role} in domain(s) [${user.domains.join(', ') || 'none'}]. ${gate} —`;
 }
@@ -60,7 +60,7 @@ const RULES = [
   'Standing rules:',
   '- DISCOVER before you create: reuse existing ids (read sovereign-os://my/* or call the list_* tool).',
   '- Use ONLY these OS tools for OS artifacts. Never fabricate an id, never invent a bypass.',
-  '- Tool errors are typed {code, reason, hint} — follow the hint (forbidden → ask a Builder or keep it Personal; conflict → already done, idempotent).',
+  '- Tool errors are typed {code, reason, hint} — follow the hint (forbidden → ask a Builder or keep it My-scope; conflict → already done, idempotent).',
   '- Everything runs AS you: OPA-checked, DLS-filtered, audit-traced.',
 ].join('\n');
 
@@ -93,7 +93,7 @@ export const PROMPTS: McpPrompt[] = [
   {
     name: 'author_and_publish_knowledge',
     title: 'Author & publish knowledge',
-    description: 'Capture a workflow (steps + rules + tacit), index it, and publish it Shared.',
+    description: 'Capture a workflow (steps + rules + tacit), index it, and publish it to Domain.',
     arguments: [arg('topic', 'What the workflow is about', true), arg('domain', 'Your domain')],
     tab: 'knowledge',
     minRole: 'creator',
@@ -103,7 +103,7 @@ export const PROMPTS: McpPrompt[] = [
       'Steps:',
       `1. whoami.`,
       `2. search_knowledge(query: "${a.topic || '<topic>'}") — dedupe before authoring.`,
-      '3. author_knowledge — steps (each with a Human/Software/Agent actor), rules (mark hard rules), and tacit context.',
+      '3. author_knowledge — steps (each with a Human/Software/Agent/Customer/Partner actor; Customer + Partner are external), an optional described actors registry, rules (mark hard rules), and tacit context.',
       '4. index_knowledge — so search returns it.',
       '5. search_knowledge again to verify it is retrievable (cite provenance).',
       '⛔ Builder+ only: publish_knowledge(workflowId) — draft→live + reindex. A creator STOPS here.',
@@ -112,7 +112,7 @@ export const PROMPTS: McpPrompt[] = [
   {
     name: 'connect_data_source',
     title: 'Connect a data source',
-    description: 'Create + test a Personal connection, then promote it to a shared domain source.',
+    description: 'Create + test a My-scope connection, then promote it to a Domain source.',
     arguments: [arg('system', 'The system to connect (e.g. Notion, Salesforce)', true), arg('kind', 'Template key')],
     tab: 'connections',
     minRole: 'creator',
@@ -122,9 +122,9 @@ export const PROMPTS: McpPrompt[] = [
       'Steps:',
       '1. whoami.',
       '2. list_connections — reuse an existing connection first.',
-      `3. create_connection(name, template${a.kind ? `: "${a.kind}"` : ''}, endpoint, credential) — Personal; credential is stored server-side, never returned.`,
+      `3. create_connection(name, template${a.kind ? `: "${a.kind}"` : ''}, endpoint, credential) — My-scope; credential is stored server-side, never returned.`,
       '4. test_connection(connId) — expect live | offline.',
-      '⛔ Builder+ only: promote_connection(connId) → shared domain source. A creator STOPS here.',
+      '⛔ Builder+ only: promote_connection(connId) → Domain source. A creator STOPS here.',
       '5. Consume it from an app with use_connection(appId, ref) — BY REFERENCE, never raw creds.',
     ].join('\n'),
   },
@@ -143,9 +143,9 @@ export const PROMPTS: McpPrompt[] = [
       '2. list_agent_systems — reuse before creating.',
       `3. search_knowledge — ground the agents in governed knowledge.`,
       `4. create_agent_system(name${a.domain ? `, domain: "${a.domain}"` : ''}${a.template ? `, template: "${a.template}"` : ''}).`,
-      '5. commit_agent_files — ONLY system.yaml, agents/<id>/AGENT.md, MEMORY.md (a whitelist). Sub-agent grants ⊆ system grants.',
+      '5. commit_agent_files — ONLY system.yaml, agents/<id>/AGENT.md, MEMORY.md (a whitelist). In system.yaml `grants`, declare what the team can use: CONTEXT (data · knowledge · metrics · connections · files-folders) and PLAN ITEMS (Operating Model · Pillars · Big Bets, via `plan`). Per item, set `capability`: Read (read-only) · Write-approval (read + propose) · Write-bounded (read + write); or grant a whole folder with `folder: {path, scope}`. Sub-agent grants ⊆ system grants.',
       '6. build_agent_system(systemId) — compile + verify (✓/✗ rows + Langfuse traces).',
-      '⛔ Sharing is the promote ladder: Builder→Shared, Admin→Marketplace. A creator keeps it Personal.',
+      '⛔ Sharing is the promote ladder: Builder→Domain, Admin→Company. A creator keeps it My.',
     ].join('\n'),
   },
   {
@@ -206,7 +206,7 @@ export const PROMPTS: McpPrompt[] = [
       '1. whoami + list_metrics.',
       '2. define_metric for any missing member.',
       `3. create_dashboard(name: "${a.name || '<name>'}", view, charts[]) — every chart binds a governed metric member.`,
-      '⛔ Widening the tier NEVER widens rows (per-viewer RLS). Sharing wider is a Builder/Admin step.',
+      '⛔ Widening the scope (My → Domain → Company) NEVER widens rows (per-viewer RLS). Sharing wider is a Builder/Admin step.',
     ].join('\n'),
   },
   {
@@ -263,7 +263,7 @@ export const PROMPTS: McpPrompt[] = [
       '5. Wire the score into a consumer through the same governed door:',
       '   • an AGENT: grant the system the predict tool in system.yaml (commit_agent_files) — its calls run grant-scoped, as the runner;',
       '   • an APP: consume by reference (use_data / the REST predict door) — never embed a model endpoint or secret.',
-      '⛔ Widening WHO can call the model is the promote ladder (Builder → Domain, Admin → Marketplace), always a human — an agent can never promote a model.',
+      '⛔ Widening WHO can call the model is the promote ladder (Builder → Domain, Admin → Company), always a human — an agent can never promote a model.',
     ].join('\n'),
   },
   {

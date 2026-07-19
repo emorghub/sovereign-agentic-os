@@ -22,6 +22,7 @@ const {
   removeAppInternal,
   listAppVersions,
   restoreAppVersion,
+  templateFiles,
 } = await import('./apps.ts');
 
 const APP_KEY = Symbol.for('soa.apps.cache');
@@ -138,4 +139,63 @@ test('version history: non-editor is rejected 403 on restore (view-list allowed)
     restoreAppVersion(app.id, viewer, 1),
     (e: Error & { status?: number }) => { assert.equal(e.status, 403); return true; },
   );
+});
+
+// -------------------------------------------------- runnable scaffold (task 132) --
+
+test('scaffold: nextjs-supabase seeds a runnable App Router app + a correct Dockerfile', () => {
+  const files = templateFiles('nextjs-supabase', 'Probe App', 'probe-app');
+  const byPath = (p: string) => files.find((f) => f.path === p);
+
+  // App Router source is present so `next build` has an app/ directory to compile.
+  const layout = byPath('app/layout.tsx');
+  const page = byPath('app/page.tsx');
+  assert.ok(layout, 'app/layout.tsx is seeded');
+  assert.ok(page, 'app/page.tsx is seeded');
+  assert.match(layout!.content, /<html/, 'layout renders <html>');
+  assert.match(layout!.content, /<body>\{children\}<\/body>/, 'layout renders children in <body>');
+  assert.match(page!.content, /Probe App/, 'page renders the app name');
+  assert.match(page!.content, /Sovereign Agentic OS/, 'page credits the OS');
+  assert.doesNotMatch(page!.content, /supabase/i, 'page makes no runtime Supabase call');
+
+  // Dockerfile: installs (not `npm ci`, no swallowed errors), builds, serves on 8080.
+  const docker = byPath('Dockerfile');
+  assert.ok(docker, 'Dockerfile is seeded');
+  assert.match(docker!.content, /RUN npm install/, 'uses npm install (no lockfile seeded)');
+  assert.doesNotMatch(docker!.content, /npm ci/, 'does not use npm ci');
+  assert.doesNotMatch(docker!.content, /\|\| true/, 'does not swallow install errors');
+  assert.match(docker!.content, /RUN npm run build/, 'runs next build');
+  assert.match(docker!.content, /ENV PORT=8080/, 'sets PORT=8080');
+  assert.match(docker!.content, /ENV HOSTNAME=0\.0\.0\.0/, 'binds 0.0.0.0');
+  assert.match(docker!.content, /EXPOSE 8080/, 'exposes 8080');
+
+  // package.json carries the TS devDeps so `next build` type-checks without network.
+  const pkg = byPath('package.json');
+  assert.ok(pkg, 'package.json is seeded');
+  const parsed = JSON.parse(pkg!.content) as { devDependencies?: Record<string, string> };
+  assert.ok(parsed.devDependencies?.typescript, 'typescript devDependency seeded');
+});
+
+// ------------------------------------------------------- surface declaration --
+
+test('createApp: a declared surface (ui) wins + is recorded on the app record', async () => {
+  __resetAppsCache();
+  // The 'service' scaffold would otherwise infer api-heavy; declaring ui wins.
+  const app = await createApp(user, { name: 'Declared UI', template: 'service', surface: 'ui' });
+  assert.equal(app.declaredSurface, 'ui', 'declaration recorded on the record');
+  assert.deepEqual(app.surface, { ui: true, api: false }, 'declaration wins → ui-only');
+});
+
+test('createApp: NO declaration → surface is inferred from the scaffold (back-compat)', async () => {
+  __resetAppsCache();
+  const app = await createApp(user, { name: 'Inferred', template: 'nextjs-supabase' });
+  assert.equal(app.declaredSurface, undefined, 'no declaration recorded');
+  // The nextjs scaffold has a web dep + page → ui true.
+  assert.equal(app.surface.ui, true, 'inferred ui from the scaffold');
+});
+
+test('createApp: an invalid surface arg is ignored → falls back to inference', async () => {
+  __resetAppsCache();
+  const app = await createApp(user, { name: 'Bad Surface', template: 'service', surface: 'nope' as never });
+  assert.equal(app.declaredSurface, undefined, 'invalid declaration dropped');
 });

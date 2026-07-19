@@ -5,13 +5,21 @@
  * The OS sidebar tab set. The first group is the canonical OS tab order
  * (os-application.md §4); every tab routes to a real surface in v1.0.
  *
- * Six sections:
- *   Ungrouped (entry): Home, Cockpit
- *   Plan:    Strategy, Big Bets, MCP, Tutorials
- *   Context: Knowledge, Files, Data, Connections, Metrics, Marketplace
- *   Build:   Agents, Software, Science, Dashboards
- *   Monitor: Governance (builder+), Monitoring, Components (admin), LLM Gateway
- *   Admin:   Admin (admin), Terminal (admin), Query (admin), About / Licenses (admin)
+ * Six sections (5 tabs each):
+ *   Ungrouped (entry): Home, Cockpit, Tutorials, MCP, About / Licenses
+ *   Plan:    Strategy, Big Bets, Operating Model, Workflows, Marketplace
+ *   Context: Knowledge, Files, Data, Connections, Metrics
+ *   Build:   Agents, Software, Science, Dashboards, Console (admin)
+ *   Govern:  Policies & Approvals (builder+), Monitoring (builder+), Components (admin), LLM Gateway (builder+), Admin (admin)
+ *
+ * The former Admin group (Admin, Terminal, Query, About / Licenses) was dissolved:
+ *   - About / Licenses moved to the Entry group (transparency — every user can read it).
+ *   - Admin moved to the Govern group.
+ *   - Terminal + Query merged into Console (/console), hosted in the Build group.
+ *   - Old /terminal and /admin-query routes redirect to /console.
+ *
+ * The former Monitor group was renamed Govern. The Governance tab was relabelled
+ * "Policies & Approvals" (route unchanged: /governance).
  *
  * The former Users / Gateway / Orchestration / Consoles / Workbench tabs were
  * consolidated: Users & Access lives in Admin (/platform), and the gateway /
@@ -36,11 +44,18 @@ export type TabGroup = {
 
 export const TAB_GROUPS: TabGroup[] = [
   {
-    // Entry points — ungrouped, always at the top
+    // Entry points — ungrouped, always at the top. About / Licenses lives here for
+    // transparency (every role can read it); the admin gate on the page itself was
+    // the only real constraint — moving it here keeps it accessible and honest.
     tabs: [
       { label: 'Home', icon: '◇', href: '/' },
       { label: 'Cockpit', icon: '◉', href: '/cockpit' },
-      { label: 'Marketplace', icon: '⊞', href: '/marketplace', role: 'Builder / Administrator' },
+      { label: 'Tutorials', icon: '◎', href: '/tutorials' },
+      // MCP setup UI is builder+/admin. Creators still CONNECT via MCP (the
+      // /api/mcp endpoint + their per-user token are unaffected) — only this
+      // configuration tab is hidden from the creator menu.
+      { label: 'MCP', icon: '⌗', href: '/mcp', role: 'Builder / Administrator', minRole: 'builder' },
+      { label: 'About / Licenses', icon: '©', href: '/about' },
     ],
   },
   {
@@ -48,11 +63,9 @@ export const TAB_GROUPS: TabGroup[] = [
     tabs: [
       { label: 'Strategy', icon: '▲', href: '/strategy' },
       { label: 'Big Bets', icon: '◆', href: '/big-bets' },
-      // MCP setup UI is builder+/admin. Creators still CONNECT via MCP (the
-      // /api/mcp endpoint + their per-user token are unaffected) — only this
-      // configuration tab is hidden from the creator menu.
-      { label: 'MCP', icon: '⌗', href: '/mcp', role: 'Builder / Administrator', minRole: 'builder' },
-      { label: 'Tutorials', icon: '◎', href: '/tutorials' },
+      { label: 'Operating Model', icon: '❧', href: '/operating-manual' },
+      { label: 'Workflows', icon: '⧉', href: '/workflows' },
+      { label: 'Marketplace', icon: '⊞', href: '/marketplace', role: 'Builder / Administrator' },
     ],
   },
   {
@@ -72,26 +85,30 @@ export const TAB_GROUPS: TabGroup[] = [
       { label: 'Software', icon: '⌘', href: '/software' },
       { label: 'Science', icon: '∿', href: '/science' },
       { label: 'Dashboards', icon: '▦', href: '/dashboards' },
+      // Console merges the former Terminal (/terminal) and Query (/admin-query)
+      // operator tools into one page with a Shell | Query switch. The tab is
+      // builder-visible so course participants get the GOVERNED Query surface
+      // (SQL over Trino/Cube, OPA/RLS-checked per-caller, audited). The raw
+      // Shell sub-panel INSIDE it stays admin-only (ConsoleClient gates it) —
+      // exposing the tab does NOT expose arbitrary command execution.
+      { label: 'Console', icon: '▶', href: '/console', role: 'Builder / Administrator', minRole: 'builder' },
     ],
   },
   {
-    heading: 'Monitor',
+    // Renamed Monitor → Govern. Tabs: relabelled Governance → Policies & Approvals
+    // (route /governance unchanged), plus Admin moved from the dissolved Admin group.
+    heading: 'Govern',
     tabs: [
-      // Governance (approvals / the sharing ladder) is oversight — it lives in Monitor.
-      // Builder+ (its own minRole) see it here.
-      { label: 'Governance', icon: '⚖', href: '/governance', role: 'Builder / Administrator', minRole: 'builder' },
+      { label: 'Policies & Approvals', icon: '⚖', href: '/governance', role: 'Builder / Administrator', minRole: 'builder' },
       { label: 'Monitoring', icon: '◷', href: '/monitoring', role: 'Builder / Administrator', minRole: 'builder' },
       { label: 'Components', icon: '▥', href: '/components', role: 'Administrator', minRole: 'admin' },
       { label: 'LLM Gateway', icon: '⌁', href: '/llm-gateway', role: 'Builder / Administrator', minRole: 'builder' },
-    ],
-  },
-  {
-    heading: 'Admin',
-    tabs: [
-      { label: 'Admin', icon: '❖', href: '/platform', role: 'Administrator', minRole: 'admin' },
-      { label: 'Terminal', icon: '▮', href: '/terminal', role: 'Administrator', minRole: 'admin' },
-      { label: 'Query', icon: '⌥', href: '/admin-query', role: 'Administrator', minRole: 'admin' },
-      { label: 'About / Licenses', icon: '©', href: '/about', role: 'Administrator', minRole: 'admin' },
+      // Admin (Platform) is builder-visible, but the page renders ONLY the tiles
+      // a builder is authorised for (fail-closed per-tile minRole). Every
+      // platform-admin tile stays admin-only, and each /platform sub-page's API
+      // is hard-gated by adminCtx()/requireAdmin — a builder sees only the
+      // self-service Settings tile and never reaches an admin control.
+      { label: 'Admin', icon: '❖', href: '/platform', role: 'Builder / Administrator', minRole: 'builder' },
     ],
   },
 ];

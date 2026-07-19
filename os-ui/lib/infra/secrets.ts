@@ -92,6 +92,38 @@ const DEFAULT_ALLOWLIST = [
   'accounts.google.com', // Google authorize endpoint
   'graph.microsoft.com', // OneDrive via Microsoft Graph
   'login.microsoftonline.com', // Microsoft OAuth authorize + token endpoints
+  // Connector wave — hand-built typed API clients (each host also added to the chart
+  // egressProxy.allowlist + Cilium FQDN policy on a real deploy).
+  'api.github.com', // GitHub REST + GraphQL (covered by github.com, listed explicitly)
+  'uploads.github.com', // GitHub release/asset uploads
+  'api.supabase.com', // Supabase Management API (projects/tables/migrations/advisors/logs)
+  'atlassian.net', // Jira + Confluence Cloud sites (*.atlassian.net via subdomain rule)
+  'api.atlassian.com', // Atlassian OAuth 3LO gateway (cloudId-scoped API)
+  'auth.atlassian.com', // Atlassian OAuth token endpoint
+  // Messaging + calendar wave — hand-built typed API clients (bot token / user-provided
+  // OAuth access token). Each host also added to the chart egressProxy.allowlist +
+  // Cilium FQDN policy on a real deploy.
+  'slack.com', // Slack Web API (slack.com/api) + www.slack.com
+  'gmail.googleapis.com', // Gmail API
+  'oauth2.googleapis.com', // Google OAuth token endpoint (token refresh follow-up)
+  // googleapis.com (above) already covers www.googleapis.com — Google Calendar API
+  // graph.microsoft.com (above) already covers Outlook + Teams over Microsoft Graph
+  // login.microsoftonline.com (above) already covers Microsoft OAuth token endpoint
+  // Cloud key-services wave — governance / identity / ML metadata connectors (each
+  // host also added to the chart egressProxy.allowlist + Cilium FQDN policy on a
+  // real deploy). Entra reuses graph.microsoft.com (already above) — no new host.
+  'purview.azure.com', // Microsoft Purview (<account>.purview.azure.com via subdomain rule)
+  'api.azureml.ms', // Azure AI Foundry / Azure ML data plane (<region>.api.azureml.ms)
+  'ml.azure.com', // Azure ML control-plane / OAuth audience host
+  'amazonaws.com', // AWS SageMaker (api.sagemaker.<region>.amazonaws.com via subdomain rule)
+  // Cloud key-services wave 2 — GCP identity/IAM governance + Snowflake ACCOUNT_USAGE
+  // governance (each host also added to the chart egressProxy.allowlist + Cilium FQDN
+  // policy on a real deploy — the operator's step, #176).
+  'cloudresourcemanager.googleapis.com', // GCP Cloud Resource Manager (list projects, getIamPolicy)
+  'iam.googleapis.com', // GCP IAM (service accounts)
+  'admin.googleapis.com', // GCP Admin SDK (optional org/directory reads — reserved)
+  // oauth2.googleapis.com (above) already covers the GCP JWT-bearer token exchange
+  'snowflakecomputing.com', // Snowflake SQL REST API (<account>.snowflakecomputing.com via subdomain rule)
 ];
 
 function allowlist(): string[] {

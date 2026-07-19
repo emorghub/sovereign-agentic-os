@@ -9,7 +9,7 @@ import { ALL_WRITE_TOOLS, __setRunOsTeamForTests } from './write-tools.ts';
 import { __resetStore as resetData } from '@/lib/data/store';
 import { __resetStore as resetAgents } from '@/lib/agents/store';
 import { __resetApprovals } from '@/lib/governance/approvals';
-import { _resetModels, upsertModel } from '@/lib/science/model-service';
+import { _resetModels, upsertModel } from '@/lib/science';
 import type { ServiceModel } from '@/lib/science/types';
 
 /**
@@ -24,7 +24,8 @@ import type { ServiceModel } from '@/lib/science/types';
  */
 
 const creator: CurrentUser = { id: 'cara', name: 'Cara', domains: ['sales'], role: 'creator' };
-const builder: CurrentUser = { id: 'ben', name: 'Ben', domains: ['sales'], role: 'builder' };
+// Ben is a domain_admin: rung-1 Personal→Shared approval (approve_promotion) now needs domain_admin+.
+const builder: CurrentUser = { id: 'ben', name: 'Ben', domains: ['sales'], role: 'domain_admin' };
 const outsider: CurrentUser = { id: 'dan', name: 'Dan', domains: ['ops'], role: 'creator' };
 
 function resetAll(): void {
@@ -95,6 +96,21 @@ test('ingest_dataset: ingests inline CSV as the caller and registers Bronze only
 
   const after = payload<{ versions: { bronze: { built: boolean } } }>(await call(builder, 'get_dataset', { datasetId: ds.id }));
   assert.equal(after.versions.bronze.built, true, 'Bronze dot lit only after a verified landing');
+});
+
+test('get_dataset surfaces the REAL physical FQN for a granted, built dataset (anti-#97 consumability)', async () => {
+  // The agent must NOT guess table names: once a layer is built, get_dataset's
+  // `queryable` names the exact iceberg.<schema>.<table> to hand to query_data.
+  resetAll();
+  const ds = payload(await call(builder, 'create_dataset', { name: 'Orders' }));
+  payload(await call(builder, 'ingest_dataset', { datasetId: ds.id, fileName: 'o.csv', content: 'order_id,net_amount\n1,10' }));
+
+  const view = payload<{ queryable: { available: boolean; layer: string; fqn: string } }>(
+    await call(builder, 'get_dataset', { datasetId: ds.id, layer: 'bronze' }),
+  );
+  assert.equal(view.queryable.available, true, 'a built layer resolves to a queryable FQN');
+  assert.equal(view.queryable.layer, 'bronze');
+  assert.match(view.queryable.fqn, /^iceberg\.personal_ben\.bronze_/, 'the real FQN, in the CALLER’s viewer-aware schema');
 });
 
 test('ingest_dataset: oversized in-band content → typed bad_request pointing to the UI upload', async () => {

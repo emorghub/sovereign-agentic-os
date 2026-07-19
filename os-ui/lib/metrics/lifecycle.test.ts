@@ -22,6 +22,8 @@ import {
   listMetricVersions,
   restoreMetricVersion,
   isMetricArchived,
+  moveMetric,
+  metricFolder,
 } from './lifecycle.ts';
 
 const amir: Principal = { id: 'amir', domains: ['sales'], role: 'builder' };
@@ -43,9 +45,35 @@ function seed(): string {
 function cubeMeasuresFor(datasetId: string): string[] {
   const d = getDataset(datasetId, amir);
   const payload = buildCubeModels([d]);
-  const model = payload.models.find((m) => m.name === 'orders');
+  // #155: a NEW dataset's cube is domain-namespaced (`sales__orders` for amir's sales domain).
+  const model = payload.models.find((m) => m.name === 'sales__orders');
   return model?.measures ?? [];
 }
+
+test('MOVE puts a metric in a folder (rides the overlay); folder survives archive/restore', () => {
+  const id = seed();
+  const mid = `${id}.revenue`;
+  assert.equal(metricFolder(mid), '/', 'a fresh metric is at the root');
+  moveMetric(mid, amir, 'north-star/');
+  assert.equal(metricFolder(mid), '/north-star', 'moved + normalised');
+  // Archiving must NOT lose the folder (writeFlag preserves the other half of the overlay).
+  archiveMetric(mid, amir);
+  assert.equal(metricFolder(mid), '/north-star', 'folder survives archive');
+  unarchiveMetric(mid, amir);
+  assert.equal(metricFolder(mid), '/north-star', 'folder survives restore');
+  // And the folder surfaces on the registry summary.
+  const groups = listMetrics(amir);
+  const summary = [...groups.mine, ...groups.domain, ...groups.marketplace].find((m) => m.id === mid);
+  assert.equal(summary?.folder, '/north-star');
+});
+
+test('MOVE is edit-scoped — a non-owner from another domain is rejected', () => {
+  const id = seed();
+  assert.throws(
+    () => moveMetric(`${id}.revenue`, mallory, '/theirs'),
+    (e: unknown) => (e as { status?: number }).status === 403 || (e as { status?: number }).status === 404,
+  );
+});
 
 test('DELETE physically de-registers the measure from the Cube model + honest report', () => {
   const id = seed();
@@ -54,7 +82,7 @@ test('DELETE physically de-registers the measure from the Cube model + honest re
   const report = deleteMetric(`${id}.revenue`, amir);
   assert.equal(report.recordDeleted, true);
   assert.equal(report.physical.length, 1);
-  assert.equal(report.physical[0].target, 'Orders.revenue');
+  assert.equal(report.physical[0].target, 'sales__Orders.revenue'); // #155: namespaced member
   assert.equal(report.physical[0].ok, true);
 
   // Physical de-registration: the measure is gone from /api/cube/models (falls back to

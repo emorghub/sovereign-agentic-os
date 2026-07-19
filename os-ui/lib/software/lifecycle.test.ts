@@ -6,10 +6,14 @@ import assert from 'node:assert/strict';
 import type { CurrentUser } from '@/lib/core/auth';
 import { createApp, deleteAppRepo } from '@/lib/software/apps';
 import { authorizeConnectionCall } from '@/lib/infra/agent-governed';
-import { archiveApp, unarchiveApp, deleteApp, useAsData, consumeResource, dependentsOf } from './lifecycle.ts';
-import { getAppByIdInternal } from '@/lib/software/apps';
+import { archiveApp, unarchiveApp, deleteApp, useAsData, consumeResource, dependentsOf, demoteApp } from './lifecycle.ts';
+import { getAppByIdInternal, promoteApp } from '@/lib/software/apps';
 
 const owner: CurrentUser = { id: 'carol', name: 'Carol', domains: ['ops'], role: 'creator' };
+const opsAdmin: CurrentUser = { id: 'dana', name: 'Dana', domains: ['ops'], role: 'admin' };
+const opsBuilder: CurrentUser = { id: 'eli', name: 'Eli', domains: ['ops'], role: 'builder' };
+// Promoting Personal→Shared now requires a domain_admin+ (the in-domain approver).
+const opsDomainAdmin: CurrentUser = { id: 'nadia', name: 'Nadia', domains: ['ops'], role: 'domain_admin' };
 
 async function expectStatus(p: Promise<unknown>, status: number, re?: RegExp) {
   await assert.rejects(p, (e: Error & { status?: number }) => {
@@ -60,6 +64,31 @@ test('delete is lineage-aware — blocked while a dependency is in use', async (
   // Deleting the consumer first is fine, then the dependency unblocks.
   assert.deepEqual(await deleteApp(consumer.id, owner), { deleted: true });
   assert.deepEqual(await deleteApp(dep.id, owner), { deleted: true });
+});
+
+test('DEMOTE: revoke sharing lowers Marketplace → Shared → Personal one step at a time', async () => {
+  const app = await createApp(owner, { name: 'Revocable App', template: 'service' });
+  await promoteApp(app.id, opsDomainAdmin); // Personal → Shared (domain_admin gate)
+  await promoteApp(app.id, opsAdmin);       // Shared → Certified/Marketplace
+  assert.equal((await getAppByIdInternal(app.id))!.visibility, 'Certified');
+  // Marketplace → Shared is admin-only.
+  await expectStatus(demoteApp(app.id, opsBuilder), 403, /Administrator/);
+  assert.equal((await demoteApp(app.id, opsAdmin)).visibility, 'Shared');
+  // Shared → Personal: a non-owner Builder is DENIED (fail-closed edit-scope);
+  // the owner (or an in-domain Domain admin / Admin) may unshare.
+  await expectStatus(demoteApp(app.id, opsBuilder), 403, /Domain admin|Administrator/);
+  assert.equal((await demoteApp(app.id, owner)).visibility, 'Personal');
+  await expectStatus(demoteApp(app.id, owner), 400, /already Personal/i);
+});
+
+test('DEMOTE is lineage-aware — revoke blocked while another app depends on it', async () => {
+  const dep = await createApp(owner, { name: 'Shared API', template: 'service' });
+  await promoteApp(dep.id, opsDomainAdmin); // → Shared (domain_admin gate)
+  const consumer = await createApp(owner, { name: 'Consumer', template: 'dashboard' });
+  await consumeResource(consumer.id, owner, { kind: 'app-mcp', ref: dep.mcpPrincipal, label: 'Shared API MCP', scope: 'read' });
+  // Unsharing the depended-on app is blocked (would orphan the consumer).
+  await expectStatus(demoteApp(dep.id, owner), 409, /Revoke blocked/);
+  assert.equal((await getAppByIdInternal(dep.id))!.visibility, 'Shared');
 });
 
 test('deleteAppRepo: PHYSICALLY deletes the per-app Forgejo repo, honest on 404 / unreachable', async () => {

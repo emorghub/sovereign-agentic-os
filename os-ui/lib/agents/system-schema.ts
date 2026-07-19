@@ -36,14 +36,38 @@ export type SafetyPreset = 'read-only' | 'read-propose' | 'read-bounded' | 'full
 export type Capability = 'Off' | 'Read' | 'Write-approval' | 'Write-bounded' | 'Blocked';
 
 /**
+ * Which medallion refinement layer a DATA grant reads. `gold` is the curated
+ * serving default (and the historic behaviour), so it is OMITTED on serialize and
+ * ASSUMED on parse — existing system.yaml stays byte-stable. Only DATA grants carry
+ * this; knowledge/metrics/connections have no layers.
+ */
+export type DataLayer = 'bronze' | 'silver' | 'gold';
+export const DATA_LAYERS: DataLayer[] = ['bronze', 'silver', 'gold'];
+
+/**
+ * A FOLDER grant target — grants EVERY item currently under `path` in the given
+ * scope tree (personal · domain), late-bound at run time by the folder-grant kernel
+ * (`lib/core/folders.resolveFolderGrant`). Present ONLY on a folder grant; an item
+ * grant leaves it undefined and carries a real `id`.
+ */
+export type FolderGrantTarget = { path: string; scope: 'personal' | 'domain' };
+
+/**
  * A per-artifact grant: an id plus the capability the agent holds on it.
  *  - `Read`           → read/query immediately
  *  - `Write-approval` → propose a write, HELD in the Governance queue for a human
  *  - `Write-bounded`  → immediate write, NO approval (builder-only; server-enforced)
  * The same shape governs data products, knowledge, metrics AND connections so the
- * grant model is uniform across every artifact type.
+ * grant model is uniform across every artifact type. `layer` is DATA-only: which
+ * medallion layer the team reads (default gold, the serving layer).
+ *
+ * A FOLDER grant sets `folder` and carries an empty `id` (`''`): it targets a whole
+ * folder subtree rather than one artifact, resolved to the concrete item ids it
+ * currently covers at run/build time (late-binding — new items under the folder are
+ * picked up automatically, and the resolved set can only ever be a SUBSET of what the
+ * owner may see). Item grants and folder grants share the SAME per-kind list.
  */
-export type ArtifactGrant = { id: string; capability: Capability };
+export type ArtifactGrant = { id: string; capability: Capability; layer?: DataLayer; folder?: FolderGrantTarget };
 /** Back-compat alias — connections have always carried a capability profile. */
 export type ConnectionGrant = ArtifactGrant;
 
@@ -53,6 +77,24 @@ export type Grants = {
   metrics: ArtifactGrant[];
   tools: string[];
   connections: ArtifactGrant[];
+  /**
+   * FOLDER grants for the Files tab. Files carry NO per-item grant list (file tools
+   * act over the caller's own DLS), so this list ONLY ever holds folder grants — an
+   * additive channel that leaves the existing tool-only Files grant intact. Omitted
+   * from `system.yaml` when empty so pre-Wave-3 files stay byte-stable.
+   */
+  files: ArtifactGrant[];
+  /**
+   * PLAN-ITEM grants — the Operating Manual (and, when generalised, Strategic Pillars
+   * / Big Bets) an agent may load as context. Each `id` encodes the plan target, not a
+   * free artifact id: an Operating Manual is `manual:my` · `manual:domain` · `manual:company`
+   * (the scope the caller may view via `resolveManual`). Granting one provisions the
+   * governed READ tool (`get_operating_manual`) — the SAME runtime path the tab uses —
+   * so the agent loads it under its own DLS/scope check; nothing is pre-injected. Read-
+   * only in the builder (a manual has no agent-authored write path). Additive + omitted
+   * from `system.yaml` when empty, so every pre-plan-grants system stays byte-stable.
+   */
+  plan: ArtifactGrant[];
 };
 
 export type AgentSpec = {
@@ -74,7 +116,14 @@ export type Schedule = { kind: 'manual' | 'cron' | 'event'; cron?: string; event
 
 export type System = {
   version: string;
-  system: { name: string; domain: string; visibility: Visibility };
+  system: {
+    name: string;
+    domain: string;
+    visibility: Visibility;
+    /** The team's stated purpose / success criteria in the author's own words (the
+     * Define description). Optional; drives the Evaluate judge's task rubric. */
+    description?: string;
+  };
   /** Execution engine (default `langgraph`). `hermes` = autonomous runtime. */
   runtime: Runtime;
   /** Write-back safety preset (default `read-only`, the safest). */
@@ -136,8 +185,11 @@ function strMap(v: unknown): Record<string, string> {
  * migrating the OLD shape on read: a bare `string[]` of ids (or a mixed list with
  * string entries) coerces each string to `{ id, capability: 'Read' }`. This keeps
  * every system.yaml saved before per-artifact access existed working unchanged.
+ *
+ * `allowLayer` (DATA only) parses + validates a medallion `layer` when present;
+ * `gold` (or absent) leaves the grant layer UNSET so the file stays byte-stable.
  */
-function parseArtifactGrants(v: unknown, where: string): ArtifactGrant[] {
+function parseArtifactGrants(v: unknown, where: string, allowLayer = false): ArtifactGrant[] {
   if (v === undefined || v === null) return [];
   if (!Array.isArray(v)) throw new SystemError(`system.yaml: '${where}' must be a list`);
   const out: ArtifactGrant[] = [];
@@ -145,6 +197,23 @@ function parseArtifactGrants(v: unknown, where: string): ArtifactGrant[] {
     // Back-compat: an old bare-string id ⇒ Read.
     if (typeof entry === 'string') {
       out.push({ id: entry, capability: 'Read' });
+      continue;
+    }
+    // FOLDER grant: an entry carrying a `folder: { path, scope }` targets a whole
+    // subtree (no artifact id). Resolved to concrete item ids at run/build time.
+    if (isRecord(entry) && isRecord(entry.folder)) {
+      const f = entry.folder;
+      if (typeof f.path !== 'string') {
+        throw new SystemError(`system.yaml: ${where} folder grant needs a string 'path'`);
+      }
+      const scope = f.scope === 'domain' ? 'domain' : 'personal';
+      const capability = (entry.capability ?? 'Read') as Capability;
+      if (!CAPABILITIES.includes(capability)) {
+        throw new SystemError(
+          `system.yaml: ${where} folder '${f.path}' has invalid capability '${String(entry.capability)}' (expected ${CAPABILITIES.join('|')})`,
+        );
+      }
+      out.push({ id: '', capability, folder: { path: f.path, scope } });
       continue;
     }
     if (!isRecord(entry) || typeof entry.id !== 'string') {
@@ -156,7 +225,18 @@ function parseArtifactGrants(v: unknown, where: string): ArtifactGrant[] {
         `system.yaml: ${where} '${entry.id}' has invalid capability '${String(entry.capability)}' (expected ${CAPABILITIES.join('|')})`,
       );
     }
-    out.push({ id: entry.id, capability });
+    const grant: ArtifactGrant = { id: entry.id, capability };
+    if (allowLayer && entry.layer !== undefined && entry.layer !== null) {
+      const layer = entry.layer as DataLayer;
+      if (!DATA_LAYERS.includes(layer)) {
+        throw new SystemError(
+          `system.yaml: ${where} '${entry.id}' has invalid layer '${String(entry.layer)}' (expected ${DATA_LAYERS.join('|')})`,
+        );
+      }
+      // Gold is the default/serving layer — never persist it, so files stay byte-stable.
+      if (layer !== 'gold') grant.layer = layer;
+    }
+    out.push(grant);
   }
   return out;
 }
@@ -164,29 +244,43 @@ function parseArtifactGrants(v: unknown, where: string): ArtifactGrant[] {
 function parseGrants(v: unknown): Grants {
   const g = isRecord(v) ? v : {};
   return {
-    data: parseArtifactGrants(g.data, 'grants.data'),
+    data: parseArtifactGrants(g.data, 'grants.data', true),
     knowledge: parseArtifactGrants(g.knowledge, 'grants.knowledge'),
     metrics: parseArtifactGrants(g.metrics, 'grants.metrics'),
     tools: strArray(g.tools, 'grants.tools'),
     connections: parseArtifactGrants(g.connections, 'grants.connections'),
+    // Files hold ONLY folder grants (no per-item list) — parsed with the same
+    // reader; a pre-Wave-3 file has no `grants.files` key ⇒ empty list.
+    files: parseArtifactGrants(g.files, 'grants.files'),
+    // Plan-item grants (Operating Manual, …) — same reader; absent ⇒ empty list.
+    plan: parseArtifactGrants(g.plan, 'grants.plan'),
   };
 }
 
-/** The four artifact grant lists, paired with a stable kind label for messages. */
+/** The artifact grant lists, paired with a stable kind label for messages. Includes
+ *  `files` (folder-only) so a Write-bounded folder grant is gated like any other. */
 function grantKinds(sys: System): { kind: string; arr: ArtifactGrant[] }[] {
   return [
     { kind: 'data', arr: sys.grants.data },
     { kind: 'knowledge', arr: sys.grants.knowledge },
     { kind: 'metric', arr: sys.grants.metrics },
     { kind: 'connection', arr: sys.grants.connections },
+    { kind: 'files', arr: sys.grants.files },
+    { kind: 'plan', arr: sys.grants.plan },
   ];
 }
 
-/** `kind:id` keys of every grant currently at `Write-bounded` (direct write). */
+/** A stable key for a grant — a folder grant keys on `folder:<scope>:<path>`, an item
+ *  grant on its id — so folder and item direct-writes never collide on an empty id. */
+function grantKey(g: ArtifactGrant): string {
+  return g.folder ? `folder:${g.folder.scope}:${g.folder.path}` : g.id;
+}
+
+/** `kind:key` keys of every grant currently at `Write-bounded` (direct write). */
 function directWriteKeys(sys: System): Set<string> {
   const keys = new Set<string>();
   for (const { kind, arr } of grantKinds(sys)) {
-    for (const g of arr) if (g.capability === 'Write-bounded') keys.add(`${kind}:${g.id}`);
+    for (const g of arr) if (g.capability === 'Write-bounded') keys.add(`${kind}:${grantKey(g)}`);
   }
   return keys;
 }
@@ -228,7 +322,7 @@ export function assertGrantsWithinRole(sys: System, role: Role, prev?: System): 
 export function downgradeGrantsForRole(sys: System, role: Role): System {
   if (roleAtLeast(role, 'builder')) return sys;
   const fix = (arr: ArtifactGrant[]): ArtifactGrant[] =>
-    arr.map((g) => (g.capability === 'Write-bounded' ? { id: g.id, capability: 'Write-approval' } : g));
+    arr.map((g) => (g.capability === 'Write-bounded' ? { ...g, capability: 'Write-approval' } : g));
   return {
     ...sys,
     grants: {
@@ -237,6 +331,8 @@ export function downgradeGrantsForRole(sys: System, role: Role): System {
       knowledge: fix(sys.grants.knowledge),
       metrics: fix(sys.grants.metrics),
       connections: fix(sys.grants.connections),
+      files: fix(sys.grants.files),
+      plan: fix(sys.grants.plan),
     },
   };
 }
@@ -349,6 +445,9 @@ export function parseSystem(input: string | Record<string, unknown>): System {
       name: typeof sysMeta.name === 'string' ? sysMeta.name : 'Untitled system',
       domain: typeof sysMeta.domain === 'string' ? sysMeta.domain : '',
       visibility,
+      ...(typeof sysMeta.description === 'string' && sysMeta.description.trim()
+        ? { description: sysMeta.description }
+        : {}),
     },
     runtime,
     safetyPreset,
@@ -363,6 +462,27 @@ export function parseSystem(input: string | Record<string, unknown>): System {
   };
 }
 
+/**
+ * Serialize `grants` in the ORIGINAL key order (data · knowledge · metrics · tools
+ * · connections), appending `files` ONLY when it holds a grant. Files' folder-grant
+ * list is additive and absent on every pre-Wave-3 system, so omitting the empty key
+ * keeps those `system.yaml` files byte-stable.
+ */
+function serializeGrants(g: Grants): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    data: g.data,
+    knowledge: g.knowledge,
+    metrics: g.metrics,
+    tools: g.tools,
+    connections: g.connections,
+  };
+  // Defensive: hand-rolled System literals may omit the additive `files` list.
+  if (g.files && g.files.length > 0) out.files = g.files;
+  // Additive plan-item grants — emitted only when present so pre-plan systems stay byte-stable.
+  if (g.plan && g.plan.length > 0) out.plan = g.plan;
+  return out;
+}
+
 /** Serialize a {@link System} back to canonical `system.yaml` text. */
 export function serializeSystem(sys: System): string {
   // Drop undefined/empty-ish keys for a clean, reviewable file.
@@ -371,7 +491,7 @@ export function serializeSystem(sys: System): string {
     system: sys.system,
     entrypoint: sys.entrypoint,
     state: sys.state,
-    grants: sys.grants,
+    grants: serializeGrants(sys.grants),
   };
   // Only emit runtime/safety when they differ from the safe defaults — keeps
   // existing LangGraph systems' files byte-stable.

@@ -25,7 +25,9 @@ export type ArtifactKind =
   | 'metric'
   | 'connection'
   | 'knowledge'
-  | 'bigbet';
+  | 'bigbet'
+  | 'pillar'
+  | 'model';
 
 /** Visibility tier — Shared/Certified artifacts affect others, so delete is gated harder. */
 export type Visibility = 'personal' | 'shared' | 'certified' | string;
@@ -41,6 +43,8 @@ const BACKING: Record<ArtifactKind, string> = {
   connection: 'purges its stored credential',
   knowledge: 'removes it from the search index',
   bigbet: 'deletes the bet and its plan',
+  pillar: 'deletes the strategic pillar and its targets',
+  model: 'tears down its serving endpoint and registry entry',
 };
 
 /** Human noun for a kind, for prose ("this dataset", "this app"). */
@@ -54,6 +58,8 @@ const NOUN: Record<ArtifactKind, string> = {
   connection: 'connection',
   knowledge: 'knowledge item',
   bigbet: 'big bet',
+  pillar: 'strategic pillar',
+  model: 'model',
 };
 
 export type ConfirmCopy = {
@@ -93,6 +99,38 @@ export function deleteCopy(kind: ArtifactKind, name: string, visibility: Visibil
     confirmLabel: 'Delete permanently',
     danger: true,
     confirmPhrase: shared ? name : undefined,
+  };
+}
+
+/**
+ * The SHARED folder-archive confirm — one copy every foldered tab (Files, Data,
+ * Knowledge, Metrics) uses, because they share the core folder primitive. Archiving a
+ * folder cascades to the N items inside it (reversible). `count` is how many items are
+ * under the folder (incl. subfolders).
+ */
+export function archiveFolderCopy(name: string, count: number): ConfirmCopy {
+  const items = count === 1 ? '1 item' : `${count} items`;
+  return {
+    title: `Archive folder “${name}”?`,
+    body:
+      `Archiving “${name}” also archives the ${items} inside it. ` +
+      `Move items out first if you want to keep them active. You can restore the folder later.`,
+    confirmLabel: 'Archive folder',
+    danger: false,
+  };
+}
+
+/** The SHARED folder physical-delete confirm — permanent, archived-only, cascades to
+ *  the items inside. One copy for every foldered tab. */
+export function deleteFolderCopy(name: string, count: number): ConfirmCopy {
+  const items = count === 1 ? 'the 1 item' : `all ${count} items`;
+  return {
+    title: `Delete folder “${name}” permanently?`,
+    body:
+      `This permanently deletes the folder “${name}” and ${items} inside it. ` +
+      `This cannot be undone.`,
+    confirmLabel: 'Delete permanently',
+    danger: true,
   };
 }
 

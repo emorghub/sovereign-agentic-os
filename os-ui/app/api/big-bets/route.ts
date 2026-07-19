@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { createBet, listBets, ensureHydrated } from '@/lib/bigbets/store';
-import { deriveBetName } from '@/lib/bigbets/model';
+import { deriveBetName } from '@/lib/bigbets';
 import { principal } from '@/lib/bigbets/server';
 import { deriveBet, completion } from '@/lib/bigbets/status';
 import { rollup } from '@/lib/bigbets/roadmap';
@@ -18,12 +18,13 @@ function fail(e: unknown) {
 }
 
 /** GET → the bets the caller may view, each with a headline rollup + realized value. */
-export async function GET() {
+export async function GET(req: Request) {
   try {
     await ensureHydrated();
     const user = await requireUser();
     const p = principal(user);
-    const bets = listBets(p).map((bet) => {
+    const includeArchived = new URL(req.url).searchParams.get('archived') === '1';
+    const bets = listBets(p, { includeArchived }).map((bet) => {
       const statuses = deriveBet(bet.components);
       const road = rollup(bet.components, statuses, bet.goLive);
       return {

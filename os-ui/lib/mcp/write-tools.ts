@@ -22,7 +22,7 @@ import {
   type PromotionRequest,
 } from '@/lib/data/store';
 import { runQualityChecks } from '@/lib/data/dq-run';
-import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data/dataset-schema';
+import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data';
 import { queryRun } from '@/lib/infra/governed';
 import { publishPromotionLive } from '@/lib/data/publish-server';
 import { enqueue, getApproval, decide, listApprovals } from '@/lib/governance/approvals';
@@ -43,7 +43,7 @@ import {
 } from '@/lib/data/transform';
 import { assetTarget } from '@/lib/data/store-fqn';
 import type { ExecuteIdentity } from '@/lib/infra/governed';
-import type { Layer, Quality, DataVisibility, Grant, ColumnDoc, DatasetUpstream } from '@/lib/data/dataset-schema';
+import type { Layer, Quality, DataVisibility, Grant, ColumnDoc, DatasetUpstream } from '@/lib/data';
 import { measureFromForm, measureMember, type MetricForm, type GuidedFilter, type GuidedWindow } from '@/lib/metrics/model';
 import type { MeasureType } from '@/lib/data/metrics';
 
@@ -53,17 +53,23 @@ import {
   updateTacit,
   getWorkflow,
   getDomainKnowledge,
+  archiveWorkflow,
+  deleteWorkflow,
 } from '@/lib/knowledge/store';
+import { knowledgeConsumers } from '@/lib/knowledge/consumers';
 import { fileArtifactPromotion, promoteThroughSeam, isLadderKind, type LadderKind } from '@/lib/governance/ladder';
 import { pendingHandle } from '@/lib/mcp/pending';
 import {
   serializeWorkflow,
+  deriveActors,
+  ACTOR_TYPES,
   type Workflow,
   type WorkflowStep,
   type WorkflowRule,
   type ActorType,
+  type Actor,
 } from '@/lib/knowledge/schema';
-import { indexWorkflow, indexDomain } from '@/lib/knowledge/index-pipeline';
+import { indexWorkflow, indexDomain, purgeKnowledgeUnits } from '@/lib/knowledge/index-pipeline';
 
 import {
   createFile,
@@ -75,24 +81,33 @@ import {
 import { reindexFile } from '@/lib/files/pipeline-server';
 import type { Sensitivity } from '@/lib/files/asset-schema';
 
-import { saveDashboard, getDashboard } from '@/lib/dashboards/store';
+import { saveDashboard } from '@/lib/dashboards/store';
 import { fromTiles, type ChartSpec } from '@/lib/dashboards/model';
+import { buildDashboard } from '@/lib/dashboards/build/server';
+import { claimsFromUser, delegate } from '@/lib/data/identity';
 
 import {
   createBet,
   getBet,
   updateBet,
   addComponent,
+  archiveBet,
+  unarchiveBet,
+  deleteBet,
+  restoreBetVersion,
+  setBetWorkflow,
+  wireComponents,
+  unwireComponents,
   canEdit as canEditBet,
   type CreateBetInput,
 } from '@/lib/bigbets/store';
-import { deriveBetName, type BigBet, type ValueBasis } from '@/lib/bigbets/model';
-import { registerLinkedArtifact, type LinkedArtifactInput } from '@/lib/bigbets/sources';
+import { getPillar } from '@/lib/strategy/pillars';
+import { deriveBetName, INTERPLAY_RELATIONS, type BigBet, type InterplayRelation, type Tab as BetTab, type ValueBasis } from '@/lib/bigbets';
+import { resolveLinkedComponent } from '@/lib/bigbets/attach-server';
 
 import {
   createSystem,
   writeFile as writeAgentFile,
-  getSystem as getAgentSystem,
   getSystemForEdit,
   getSystemForRun,
 } from '@/lib/agents/store';
@@ -144,7 +159,7 @@ function colDocs(v: unknown): ColumnDoc[] {
 
 function mapSteps(v: unknown): WorkflowStep[] {
   if (!Array.isArray(v)) return [];
-  const actors: ActorType[] = ['Human', 'Software', 'Agent'];
+  const actors: ActorType[] = ['Human', 'Software', 'Agent', 'Customer', 'Partner'];
   return v
     .map((s) => (typeof s === 'object' && s ? (s as Record<string, unknown>) : {}))
     .map((s, i): WorkflowStep => {
@@ -175,6 +190,21 @@ function mapRules(v: unknown): WorkflowRule[] {
       scope: r.scope === 'step' ? 'step' : 'workflow',
     }))
     .filter((r) => r.text);
+}
+
+function mapActors(v: unknown): Actor[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((a) => (typeof a === 'object' && a ? (a as Record<string, unknown>) : {}))
+    .map((a): Actor | null => {
+      const name = str(a.name).trim();
+      const category = ACTOR_TYPES.includes(str(a.category) as ActorType) ? (str(a.category) as ActorType) : 'Human';
+      if (!name) return null;
+      const actor: Actor = { name, category };
+      if (str(a.description).trim()) actor.description = str(a.description).trim();
+      return actor;
+    })
+    .filter((a): a is Actor => a !== null);
 }
 
 function normFiles(args: Record<string, unknown>): { path: string; content: string }[] {
@@ -634,7 +664,7 @@ export const knowledgeWriteTools: McpTool[] = [
     tab: 'knowledge',
     minRole: 'creator',
     description:
-      'Author a Personal (draft) knowledge workflow — the operating manual for a task: an optional markdown body, ordered `steps` (each with an actor and optional per-step `tacit` note), workflow `rules`, and an optional workflow-level `tacit` string (the TACIT.md companion — unstructured know-how that resists formalization: the gotchas, the "why", the tribal memory). Same governed store as the Knowledge tab. Publish it later with `publish_knowledge`.',
+      'Author a Personal (draft) knowledge workflow — the runbook for a task: an optional markdown body, ordered `steps` (each with an actor and optional per-step `tacit` note), workflow `rules`, an optional `actors` registry, and an optional workflow-level `tacit` string (the TACIT.md companion — unstructured know-how that resists formalization: the gotchas, the "why", the tribal memory). Actors have five categories — Human · Software · Agent · Customer · Partner — where Customer and Partner are EXTERNAL (outside the organisation). The optional `actors` array lets you describe each actor once (name · category · description) and steps reference them by name; if you omit it, a registry is derived from the steps automatically. Same governed store as the Knowledge tab. Publish it later with `publish_knowledge`.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -648,8 +678,12 @@ export const knowledgeWriteTools: McpTool[] = [
             type: 'object',
             properties: {
               title: { type: 'string' },
-              actor: { type: 'string', enum: ['Human', 'Software', 'Agent'] },
-              actor_name: { type: 'string' },
+              actor: {
+                type: 'string',
+                enum: ['Human', 'Software', 'Agent', 'Customer', 'Partner'],
+                description: 'Actor category. Customer and Partner are EXTERNAL (outside the organisation).',
+              },
+              actor_name: { type: 'string', description: 'Actor name; matches an `actors[].name` when a registry is supplied.' },
               inputs: { type: 'array', items: { type: 'string' } },
               outputs: { type: 'array', items: { type: 'string' } },
               tacit: {
@@ -659,6 +693,20 @@ export const knowledgeWriteTools: McpTool[] = [
               },
             },
             required: ['title'],
+          },
+        },
+        actors: {
+          type: 'array',
+          description:
+            'Optional actor registry — describe each actor once so steps can reference it by name. Five categories: Human · Software · Agent · Customer · Partner (Customer and Partner are external). Omit to derive a registry from the steps automatically.',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'e.g. "Loan Officer", "Salesforce API", "Campaign Optimizer".' },
+              category: { type: 'string', enum: ['Human', 'Software', 'Agent', 'Customer', 'Partner'] },
+              description: { type: 'string', description: 'One line on this actor\'s role — applies to every category, e.g. "Salesforce API — nightly REST ingestion".' },
+            },
+            required: ['name', 'category'],
           },
         },
         rules: {
@@ -677,9 +725,15 @@ export const knowledgeWriteTools: McpTool[] = [
         {
           title: 'Refund handling',
           domain: 'support',
+          actors: [
+            { name: 'Support Agent', category: 'Human', description: 'Front-line agent who verifies the order.' },
+            { name: 'Billing System', category: 'Software', description: 'Issues the refund via the payments API.' },
+            { name: 'Customer', category: 'Customer', description: 'Requests the refund (external).' },
+          ],
           steps: [
-            { title: 'Verify order', actor: 'Human', outputs: ['Verified order'], tacit: 'Check section 4 — the date field is frequently missed by new agents.' },
-            { title: 'Issue refund', actor: 'Software', inputs: ['Verified order'] },
+            { title: 'Request refund', actor: 'Customer', actor_name: 'Customer', outputs: ['Refund request'] },
+            { title: 'Verify order', actor: 'Human', actor_name: 'Support Agent', outputs: ['Verified order'], tacit: 'Check section 4 — the date field is frequently missed by new agents.' },
+            { title: 'Issue refund', actor: 'Software', actor_name: 'Billing System', inputs: ['Verified order'] },
           ],
           rules: [{ text: 'Refunds over 500 EUR need a manager', hard: true }],
           tacit: '## Edge cases\nHigh-value refunds (> 1 000 EUR) route to the finance team even on weekends — the on-call number is in the finance Notion.\n\n## Cultural note\nThe support team uses "RT" as shorthand for "refund ticket" in Slack.',
@@ -694,9 +748,19 @@ export const knowledgeWriteTools: McpTool[] = [
       const body = str(args.markdown);
       const steps = mapSteps(args.steps);
       const rules = mapRules(args.rules);
-      if (body || steps.length || rules.length) {
+      const declaredActors = mapActors(args.actors);
+      // Registry = declared actors (with descriptions) merged with the distinct
+      // (category, name) pairs found in the steps, so both explicit and implied
+      // actors are captured.
+      const actors = deriveActors(steps, declaredActors);
+      if (body || steps.length || rules.length || actors.length) {
         const view = getWorkflow(rec.id, p);
-        const w: Workflow = { ...view.workflow, steps: steps.length ? steps : view.workflow.steps, rules: rules.length ? rules : view.workflow.rules };
+        const w: Workflow = {
+          ...view.workflow,
+          steps: steps.length ? steps : view.workflow.steps,
+          rules: rules.length ? rules : view.workflow.rules,
+          actors: actors.length ? actors : view.workflow.actors,
+        };
         // serializeWorkflow emits frontmatter + step blocks (including > tacit: blockquotes
         // for any step with a tacit note); splice the prose body back in right after the
         // frontmatter so it round-trips through the store.
@@ -714,9 +778,9 @@ export const knowledgeWriteTools: McpTool[] = [
   {
     name: 'publish_knowledge',
     tab: 'knowledge',
-    minRole: 'builder',
+    minRole: 'domain_admin',
     description:
-      'Publish a draft workflow Personal → Shared (draft→live) and re-index it for retrieval. Builder+ only (the creator lockdown). This is the compat "approve half" of the ladder: the flip runs THROUGH the governance effect seam (no direct publish back door). Idempotency: publishing an already-live workflow returns a `conflict`.',
+      'Publish a draft workflow My → Domain (draft→live) and re-index it for retrieval. Domain-admin+ only (the My→Domain approval gate). This is the "approve half" of the ladder: the flip runs THROUGH the governance effect seam (no direct publish back door). Idempotency: publishing an already-live workflow returns a `conflict`.',
     inputSchema: {
       type: 'object',
       properties: { workflowId: { type: 'string', description: 'Draft workflow id to publish.' } },
@@ -761,6 +825,59 @@ export const knowledgeWriteTools: McpTool[] = [
       const workflow = await indexWorkflow(view.workflow, { owner: view.owner, tacit: view.tacit, updatedAt: view.updatedAt });
       const domain = await indexDomain(getDomainKnowledge(view.domain));
       return { workflow, domain };
+    },
+  },
+  {
+    name: 'retire_knowledge',
+    tab: 'knowledge',
+    minRole: 'creator',
+    description:
+      'RETIRE a knowledge workflow you can edit — the Knowledge tab’s lifecycle: `archive` (the default: reversible soft-hide, retains the record + history, unarchive with author_knowledge’s sibling flow) or `delete` (PHYSICAL + irreversible: removes the record, its version history, and purges its indexed units from OpenSearch + the offline mirror so it stops being retrievable). Same governed store the Knowledge tab + `/api/knowledge/workflows/[id]` call. LINEAGE-AWARE: blocked with a typed 409 if any App or Agent system still consumes it (never orphan a live dependency) — remove those uses first. Role gate (edit scope, re-checked in-lib): the OWNER may retire their own Personal/unshared workflow; a SHARED/domain workflow needs a same-domain Builder+ (the Knowledge edit gate). Physical `delete` additionally refuses a still-published (`live`) workflow — archive/unpublish it first (mirrors the store). Idempotency: retiring a missing workflow is a typed not_found.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workflowId: { type: 'string', description: 'The knowledge workflow id to retire.' },
+        action: {
+          type: 'string',
+          enum: ['archive', 'delete'],
+          description: 'archive = reversible soft-hide (default); delete = physical, irreversible removal + index purge.',
+        },
+      },
+      required: ['workflowId'],
+      examples: [
+        { workflowId: 'wf_ab12cd' },
+        { workflowId: 'wf_ab12cd', action: 'delete' },
+      ],
+    },
+    call: async (user, args) => {
+      const id = str(args.workflowId).trim();
+      if (!id) fail('retire_knowledge needs a `workflowId`', 400);
+      const action = str(args.action).trim() || 'archive';
+      if (action !== 'archive' && action !== 'delete') {
+        fail("retire_knowledge `action` must be 'archive' or 'delete'", 400);
+      }
+      const p = P(user);
+      // View-scope + existence guard first (typed 403/404) so a lineage/role message
+      // never leaks a workflow the caller can't even see.
+      const view = getWorkflow(id, p);
+      // LINEAGE GUARD (mirrors the app-delete dependentsOf check): refuse to orphan a
+      // live consumer. Runs for BOTH archive and delete — retiring an in-use workflow,
+      // reversibly or not, breaks the consumers' context handover.
+      const consumers = await knowledgeConsumers(id, p);
+      if (consumers.length > 0) {
+        const names = consumers.map((c) => `${c.by} (${c.kind})`).join(', ');
+        fail(`retire blocked — this workflow is still consumed by: ${names}. Remove those uses first.`, 409);
+      }
+      if (action === 'archive') {
+        const rec = archiveWorkflow(id, p); // edit-gated in-lib (owner or same-domain Builder+)
+        return { id: rec.id, title: rec.title, action: 'archive', archived: rec.archived, reversible: true };
+      }
+      // PHYSICAL delete: edit-gated + refuses a live workflow in-lib. On success, purge
+      // the indexed units so a deleted workflow stops being retrievable (best-effort +
+      // honest — the record is already gone; report if the index purge couldn't run).
+      deleteWorkflow(id, p);
+      const indexPurged = await purgeKnowledgeUnits(id);
+      return { id, title: view.title, action: 'delete', deleted: true, indexPurged, reversible: false };
     },
   },
 ];
@@ -824,7 +941,7 @@ export const promotionTools: McpTool[] = [
     extraTabs: ['files'],
     minRole: 'creator',
     description:
-      'FILE a rung-1 promotion request (Personal → a governed DOMAIN asset) for ANY ownable artifact: a dataset, file, knowledge workflow, connection, dashboard, model, app or agent system. Path: the promote step of every tab’s golden path — the ONE governed ladder. Before: create + document the artifact. After: a Builder/Admin in the domain runs `decide_approval` (or `approve_promotion` for dataset/file). Governance: OWNER-ONLY trigger — edit rights are not enough; it does NOT promote, it enqueues the governed request and returns the pending handle. Certification (Domain→Marketplace) is the separate `request_certification`. Idempotency: filing while a request is pending returns the existing handle.',
+      'FILE a rung-1 promotion request (My → a governed DOMAIN asset) for ANY ownable artifact: a dataset, file, knowledge workflow, connection, dashboard, model, app or agent system. Path: the promote step of every tab’s golden path — the ONE governed ladder. Before: create + document the artifact (creating in My scope needs no approval; only this promotion up a scope is gated). After: a domain admin (or tenant admin) in the domain runs `decide_approval` (or `approve_promotion` for dataset/file). Governance: OWNER-ONLY trigger — edit rights are not enough; it does NOT promote, it enqueues the governed request and returns the pending handle. Certification (Domain → Company) is the separate `request_certification`. Idempotency: filing while a request is pending returns the existing handle.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -866,12 +983,13 @@ export const promotionTools: McpTool[] = [
         const approval = enqueue({
           kind: 'dataset_promote',
           title: `Promote “${req.datasetName}” to a data asset`,
-          detail: `${user.id} requests promoting ${req.datasetName} into ${req.target} (visibility: ${req.visibility}). A domain Builder must approve.`,
+          detail: `${user.id} requests promoting ${req.datasetName} into ${req.target} (visibility: ${req.visibility}). A domain admin must approve.`,
           agent: user.id,
           domain: req.domain,
           requestedBy: user.id,
           tool: 'data_promote',
           payload: req as unknown as Record<string, unknown>,
+          approverRole: 'domain_admin',
         });
         return pendingHandle(approval, { artifactKind: kind, target: req.target, domain: req.domain });
       }
@@ -879,12 +997,13 @@ export const promotionTools: McpTool[] = [
       const approval = enqueue({
         kind: 'file_promote',
         title: `Share “${req.fileName}” with the ${req.domain} domain`,
-        detail: `${user.id} requests promoting ${req.fileName} into ${req.target} (visibility: ${req.visibility}). A domain Builder must approve.`,
+        detail: `${user.id} requests promoting ${req.fileName} into ${req.target} (visibility: ${req.visibility}). A domain admin must approve.`,
         agent: user.id,
         domain: req.domain,
         requestedBy: user.id,
         tool: 'file_promote',
         payload: req as unknown as Record<string, unknown>,
+        approverRole: 'domain_admin',
       });
       return pendingHandle(approval, { artifactKind: kind, target: req.target, domain: req.domain });
     },
@@ -893,9 +1012,9 @@ export const promotionTools: McpTool[] = [
     name: 'approve_promotion',
     tab: 'data',
     extraTabs: ['files'],
-    minRole: 'builder',
+    minRole: 'domain_admin',
     description:
-      'APPLY a filed promotion request (dataset or file) — the Builder/Admin half of the split. Path: the approve step of the Data/Files golden paths. Before: a creator filed `request_promotion`. Governance: Builder+ AND in the asset’s domain (both re-checked in-lib); a creator is refused with a typed forbidden. Idempotency: an already-decided request returns a `conflict`.',
+      'APPLY a filed promotion request (dataset or file) — the Domain-admin/Admin half of the split. Path: the approve step of the Data/Files golden paths. Before: a creator filed `request_promotion`. Governance: domain_admin+ AND in the asset’s domain (both re-checked in-lib); a creator/builder is refused with a typed forbidden. Idempotency: an already-decided request returns a `conflict`.',
     inputSchema: {
       type: 'object',
       properties: { approvalId: { type: 'string', description: 'The approval id from request_promotion.' } },
@@ -1041,7 +1160,7 @@ export const dashboardWriteTools: McpTool[] = [
     tab: 'dashboards',
     minRole: 'creator',
     description:
-      'Create (or replace) a dashboard you own — tiles/charts that reference GOVERNED metric members. Same governed store as the Dashboards tab. Sharing it wider is a separate Builder/Admin governance step.',
+      'Create (or replace) a dashboard you own — tiles/charts that reference GOVERNED metric members. Runs in YOUR My scope with no approval, and imports to Superset so it EMBEDS LIVE end-to-end (no offline placeholder; a best-effort offline-mock only if Superset is unreachable). Same governed path as the Dashboards tab. Sharing it wider is the separate governed promote ladder (owner files request_promotion → a domain admin approves).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1076,9 +1195,22 @@ export const dashboardWriteTools: McpTool[] = [
       const charts = (Array.isArray(args.charts) ? args.charts : []) as ChartSpec[];
       if (!charts.length) fail('a dashboard needs at least one chart on a governed metric', 400);
       const id = str(args.id).trim() || `dash_${slug(name)}_${rand()}`;
-      const spec = fromTiles(name, view, charts);
+      // Scope the dashboard's Cube SQL connection (`bi_<domain>`) to the caller's domain —
+      // the endpoint that serves the Cube view's rows.
+      const spec = fromTiles(name, view, charts, user.domains[0]);
       const rec = saveDashboard(P(user), id, spec);
-      return { id: rec.id, tier: rec.tier, spec: rec.spec };
+      // Import to Superset (mirrors /api/dashboards/build): run the superset/embed/report/
+      // alert Build as the caller so the dashboard actually exists to embed. Best-effort —
+      // buildDashboard falls back to the honest offline-mock when Superset is unreachable,
+      // and we never fail the create on a live-path error.
+      let build: Awaited<ReturnType<typeof buildDashboard>> | undefined;
+      try {
+        const token = delegate(claimsFromUser({ id: user.id, domains: user.domains, role: user.role }), 'domain');
+        build = await buildDashboard(spec, token, rec.id);
+      } catch {
+        // dashboard is saved regardless; Superset import is a best-effort side-effect
+      }
+      return { id: rec.id, tier: rec.tier, spec: rec.spec, build };
     },
   },
 ];
@@ -1090,32 +1222,38 @@ export const bigbetWriteTools: McpTool[] = [
     tab: 'bigbets',
     minRole: 'creator',
     description:
-      'Frame a Big Bet — an initiative roadmap over real OS components. A creator files a draft; a Builder/Admin owns an active bet (cross-domain bets are Admin-only). Same governed store as the Big Bets tab.',
+      'Frame a Big Bet — an initiative roadmap over real OS components — under a REAL strategy pillar it rolls up to. A creator files a draft; a Builder/Admin owns an active bet (cross-domain bets are Admin-only). Same governed store as the Big Bets tab. Containment: `pillarId` is REQUIRED and re-resolved through canViewPillar FIRST — a pillar you cannot see is a typed not_found/forbidden, so a bet can never be filed under an unseen pillar. Before: list_pillars (pick the pillar this bet delivers). After: attach_component to hang real artifacts, get_big_bet to read the derived status back.',
     inputSchema: {
       type: 'object',
       properties: {
         problem: { type: 'string', description: 'The problem statement (the bet’s name is derived from it unless `name` given).' },
+        pillarId: { type: 'string', description: 'The strategy pillar this bet rolls up to (REQUIRED, from list_pillars — must be one you can view).' },
         owner: { type: 'string', description: 'Who owns the problem (goes into the problem statement’s "who").' },
         solution: { type: 'string', description: 'Optional solution idea.' },
-        pillarId: { type: 'string', description: 'Strategy pillar id (default pillar_retention).' },
-        metricId: { type: 'string', description: 'North-star metric id (default metric_nrr).' },
+        metricId: { type: 'string', description: 'Optional north-star metric id to associate.' },
         targetValue: { type: 'number', description: 'Value target.' },
         goLive: { type: 'string', description: 'Planned go-live YYYY-MM-DD (default +8 weeks).' },
         domain: { type: 'string', description: 'One of YOUR domains; defaults to your first.' },
         name: { type: 'string', description: 'Optional explicit display name.' },
       },
-      required: ['problem'],
-      examples: [{ problem: 'Churn is rising among SMB accounts', owner: 'ben', solution: 'Proactive health-score outreach', pillarId: 'pillar_retention', targetValue: 250000 }],
+      required: ['problem', 'pillarId'],
+      examples: [{ problem: 'Churn is rising among SMB accounts', pillarId: 'pillar_ab12cd3', owner: 'ben', solution: 'Proactive health-score outreach', targetValue: 250000 }],
     },
     call: async (user, args) => {
       const problem = str(args.problem).trim();
       if (!problem) fail('create_big_bet needs a `problem` statement', 400);
+      const pillarId = str(args.pillarId).trim();
+      if (!pillarId) fail('create_big_bet needs a `pillarId` (from list_pillars)', 400);
+      // Containment: re-resolve the pillar through its own canViewPillar gate
+      // FIRST — an id you cannot see is a typed not_found/forbidden.
+      await getPillar(user, pillarId);
+      const metricId = str(args.metricId).trim();
       const input: CreateBetInput = {
         name: str(args.name).trim() || deriveBetName(problem),
         problem: { who: str(args.owner), need: problem, obstacle: '', impact: '' },
         solution: str(args.solution) || undefined,
-        pillarId: str(args.pillarId) || 'pillar_retention',
-        metricId: str(args.metricId) || 'metric_nrr',
+        pillarId,
+        metricId: metricId || undefined,
         targetValue: num(args.targetValue),
         goLive: str(args.goLive) || defaultGoLive(),
         domain: str(args.domain) || undefined,
@@ -1157,37 +1295,11 @@ export const bigbetWriteTools: McpTool[] = [
       const bet = getBet(betId, p); // view guard (403/404)
       if (!canEditBet(bet, p)) fail('Not permitted to edit this bet', 403);
 
-      // Re-resolve the component through ITS OWN canView gate — a forged/unseen id
-      // is a typed not_found/forbidden BEFORE anything is attached.
-      let art: LinkedArtifactInput;
-      if (kind === 'dataset') {
-        const d = getDataset(id, p);
-        const anyBuilt = d.versions.bronze.built || d.versions.silver.built || d.versions.gold.built;
-        art = {
-          id: d.id, tab: 'data', title: d.name, domain: d.domain,
-          visibility: d.tier === 'dataset' ? 'personal' : d.tier === 'asset' ? 'shared' : 'marketplace',
-          // Data's ready verb is `certified` — a promoted asset/product has passed it.
-          lifecycle: d.tier !== 'dataset' ? 'certified' : anyBuilt ? 'building' : 'draft',
-        };
-      } else if (kind === 'dashboard') {
-        const d = getDashboard(id, p);
-        art = {
-          id: d.id, tab: 'dashboard', title: d.spec.name, domain: d.domain,
-          visibility: d.tier === 'personal' ? 'personal' : d.tier === 'domain' ? 'shared' : 'marketplace',
-          lifecycle: d.tier === 'personal' ? 'draft' : 'published',
-        };
-      } else {
-        const s = getAgentSystem(id, p);
-        art = {
-          id: s.id, tab: 'agent', title: s.name, domain: s.domain,
-          visibility: s.visibility === 'Personal' ? 'personal' : s.visibility === 'Shared' ? 'shared' : 'marketplace',
-          // Agents' ready verb is `live` — reached only by the governed promote.
-          lifecycle: s.visibility === 'Personal' ? 'draft' : 'live',
-        };
-      }
-      // Record the REFERENCE CARD in the bet's cross-tab registry (the per-tab
-      // store stays the source of truth), then link through the store's own door.
-      registerLinkedArtifact(art);
+      // Re-resolve the component through ITS OWN canView gate (shared helper) — a
+      // forged/unseen id is a typed not_found/forbidden BEFORE anything is attached.
+      // Map the legacy kind names to their tab: dataset→data, agent-system→agent.
+      const LEGACY_TAB: Record<string, BetTab> = { dataset: 'data', dashboard: 'dashboard', 'agent-system': 'agent' };
+      const art = await resolveLinkedComponent(LEGACY_TAB[kind], id, user);
       const plannedReady = str(args.plannedReady).trim() || new Date(Date.now() + 28 * 86400000).toISOString().slice(0, 10);
       const { ref } = addComponent(betId, { ...p, kind: 'human' }, {
         tab: art.tab,
@@ -1197,6 +1309,136 @@ export const bigbetWriteTools: McpTool[] = [
         weight: typeof args.weight === 'number' ? args.weight : undefined,
       });
       return { betId, refId: ref.id, artifactId: ref.artifactId, tab: ref.tab, title: art.title, plannedReady: ref.plannedReady, origin: ref.origin };
+    },
+  },
+  // ---- SOLUTION BLUEPRINT (the runtime interplay graph over a bet's components) --
+  // The anchor workflow + typed interplay edges the Design canvas renders. Distinct
+  // from the roadmap dependsOn (build order) — these describe how the FINISHED pieces
+  // work together at run time. All three are edit-gated in the store (the owner edits;
+  // cross-domain bets are Admin-only), no new role floor invented.
+  {
+    name: 'attach_bet_component',
+    tab: 'bigbets',
+    minRole: 'creator',
+    description:
+      'ATTACH any of the NINE kinds of real OS component to a Big Bet you may edit — a dataset, dashboard, agent system, knowledge workflow, metric, file, ML model, software app or connection. Superset of `attach_component` (which handles dataset/dashboard/agent only). The bet records a REFERENCE (id · planned-ready date), never a copy; progress is DERIVED from the component’s real lifecycle. Purpose: build out the solution in the Big Bets Design wizard — the anchor workflow (attach a `knowledge` kind, then set_bet_workflow), the solution components (agent/software/ml/dashboard) and the context (data/metric/knowledge/files/connection). Before: the component must exist — pick it from the matching list_* tool. After: wire_bet_components to draw the interplay, get_bet_solution to read the blueprint back. Governance: runs AS YOU — the bet edit gate is the store’s own, and EVERY component id is re-resolved through its OWN tab’s canView gate FIRST (an id you cannot see is a typed not_found/forbidden), so a forged id can never attach an unseen component. Idempotency: re-attaching the same artifact adds a second reference — check get_bet_solution first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        betId: { type: 'string', description: 'The Big Bet to attach to (from list_big_bets).' },
+        kind: { type: 'string', enum: ['data', 'metric', 'dashboard', 'software', 'agent', 'ml', 'knowledge', 'files', 'connection'], description: 'Which tab the component id lives in.' },
+        id: { type: 'string', description: 'The component id YOU can see (a dataset/dashboard/agent/knowledge/metric/file/model/app/connection id).' },
+        plannedReady: { type: 'string', description: 'Planned-ready date yyyy-mm-dd (default: +4 weeks).' },
+        start: { type: 'string', description: 'Optional start date yyyy-mm-dd (default: today).' },
+        weight: { type: 'number', description: 'Optional manual allocation weight 0–100.' },
+      },
+      required: ['betId', 'kind', 'id'],
+      examples: [
+        { betId: 'bet_ab12cd34', kind: 'knowledge', id: 'wf_ab12cd', plannedReady: '2026-09-01' },
+        { betId: 'bet_ab12cd34', kind: 'software', id: 'app_ab12cd' },
+      ],
+    },
+    call: async (user, args) => {
+      const betId = str(args.betId).trim();
+      if (!betId) fail('attach_bet_component needs a `betId` (from list_big_bets)', 400);
+      const id = str(args.id).trim();
+      if (!id) fail('attach_bet_component needs the component `id`', 400);
+      const kind = str(args.kind) as BetTab;
+      const KINDS: BetTab[] = ['data', 'metric', 'dashboard', 'software', 'agent', 'ml', 'knowledge', 'files', 'connection'];
+      if (!KINDS.includes(kind)) fail(`attach_bet_component needs \`kind\` = ${KINDS.join(' | ')}`, 400);
+      const p = P(user);
+      // Edit gate FIRST (the store's own rule) — no side effect on a forbidden bet.
+      const bet = getBet(betId, p); // view guard (403/404)
+      if (!canEditBet(bet, p)) fail('Not permitted to edit this bet', 403);
+      // Re-resolve through the component's OWN canView gate (all 9 kinds).
+      const art = await resolveLinkedComponent(kind, id, user);
+      const plannedReady = str(args.plannedReady).trim() || new Date(Date.now() + 28 * 86400000).toISOString().slice(0, 10);
+      const { ref } = addComponent(betId, { ...p, kind: 'human' }, {
+        tab: art.tab,
+        artifactId: art.id,
+        plannedReady,
+        start: str(args.start).trim() || undefined,
+        weight: typeof args.weight === 'number' ? args.weight : undefined,
+      });
+      return { betId, refId: ref.id, artifactId: ref.artifactId, tab: ref.tab, title: art.title, plannedReady: ref.plannedReady, origin: ref.origin };
+    },
+  },
+  {
+    name: 'set_bet_workflow',
+    tab: 'bigbets',
+    minRole: 'creator',
+    description:
+      'Set (or move, or clear) a Big Bet’s ANCHOR WORKFLOW — the single knowledge/workflow component that anchors the solution blueprint. Invariant enforced in the store: EXACTLY ONE component may be the anchor, and it MUST be a `knowledge` (workflow) component already attached to the bet (attach it with attach_bet_component kind:"knowledge" first). Pass its ComponentRef id OR the underlying workflow artifact id; pass none (or empty) to CLEAR the anchor. Purpose: step 1 of the Big Bets Design wizard. After: attach solution components + wire_bet_components. Governance: runs AS YOU through the SAME store edit gate as the Big Bets tab (the owner edits their bet; cross-domain bets are Admin-only) — an unseen id is a typed not_found/forbidden; a non-knowledge anchor is a typed bad_request.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        betId: { type: 'string', description: 'The Big Bet to set the anchor on (from list_big_bets).' },
+        refId: { type: 'string', description: 'The anchor’s ComponentRef id (from get_bet_solution) OR the workflow artifact id. Omit/empty to CLEAR the anchor.' },
+      },
+      required: ['betId'],
+      examples: [{ betId: 'bet_ab12cd34', refId: 'ref_ab12cd' }, { betId: 'bet_ab12cd34' }],
+    },
+    call: async (user, args) => {
+      const betId = str(args.betId).trim();
+      if (!betId) fail('set_bet_workflow needs a `betId` (from list_big_bets)', 400);
+      const refId = str(args.refId).trim() || undefined;
+      setBetWorkflow(betId, refId, P(user)); // store edit gate + single-anchor + knowledge invariant
+      return { betId, anchorCleared: !refId, ...(refId ? { anchorRefOrArtifact: refId } : {}) };
+    },
+  },
+  {
+    name: 'wire_bet_components',
+    tab: 'bigbets',
+    minRole: 'creator',
+    description:
+      'WIRE a typed interplay edge between two of a Big Bet’s attached components — how the FINISHED pieces work together at run time (a dashboard `consumes` a metric; an agent `triggers` a workflow; a model `feeds` a dashboard). Distinct from the roadmap’s build-order dependsOn — a separate graph with separate semantics. `from`/`to` are ComponentRef ids (from get_bet_solution), never artifact ids; `relation` ∈ consumes | produces | triggers | feeds | monitors. Purpose: step 2 of the Big Bets Design wizard — draw the solution interplay canvas. Governance: runs AS YOU through the SAME store edit gate as the Big Bets tab. Validation (in-store): both refs must be on THIS bet (else not_found), no self-edge (bad_request), a valid relation (bad_request) and no duplicate edge (same from/to/relation → conflict).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        betId: { type: 'string', description: 'The Big Bet whose components to wire (from list_big_bets).' },
+        from: { type: 'string', description: 'Source ComponentRef id (from get_bet_solution).' },
+        to: { type: 'string', description: 'Target ComponentRef id (from get_bet_solution).' },
+        relation: { type: 'string', enum: [...INTERPLAY_RELATIONS], description: 'The interplay relation.' },
+      },
+      required: ['betId', 'from', 'to', 'relation'],
+      examples: [{ betId: 'bet_ab12cd34', from: 'ref_data1', to: 'ref_agent1', relation: 'feeds' }],
+    },
+    call: async (user, args) => {
+      const betId = str(args.betId).trim();
+      if (!betId) fail('wire_bet_components needs a `betId` (from list_big_bets)', 400);
+      const from = str(args.from).trim();
+      const to = str(args.to).trim();
+      if (!from || !to) fail('wire_bet_components needs `from` and `to` ComponentRef ids (from get_bet_solution)', 400);
+      const relation = str(args.relation) as InterplayRelation;
+      if (!INTERPLAY_RELATIONS.includes(relation)) {
+        fail(`wire_bet_components needs \`relation\` = ${INTERPLAY_RELATIONS.join(' | ')}`, 400);
+      }
+      const { edge } = wireComponents(betId, from, to, relation, P(user)); // store edit gate + validation
+      return { betId, edgeId: edge.id, from: edge.from, to: edge.to, relation: edge.relation };
+    },
+  },
+  {
+    name: 'unwire_bet_components',
+    tab: 'bigbets',
+    minRole: 'creator',
+    description:
+      'REMOVE an interplay edge from a Big Bet’s solution blueprint by its edge id (from get_bet_solution). The inverse of wire_bet_components — the components themselves stay attached; only the interplay edge is dropped. Governance: runs AS YOU through the SAME store edit gate as the Big Bets tab (the owner edits their bet; cross-domain bets are Admin-only). Idempotency: an unknown edge id is a typed not_found.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        betId: { type: 'string', description: 'The Big Bet whose edge to remove (from list_big_bets).' },
+        edgeId: { type: 'string', description: 'The interplay edge id to remove (from get_bet_solution).' },
+      },
+      required: ['betId', 'edgeId'],
+      examples: [{ betId: 'bet_ab12cd34', edgeId: 'edge_ab12cd' }],
+    },
+    call: async (user, args) => {
+      const betId = str(args.betId).trim();
+      if (!betId) fail('unwire_bet_components needs a `betId` (from list_big_bets)', 400);
+      const edgeId = str(args.edgeId).trim();
+      if (!edgeId) fail('unwire_bet_components needs an `edgeId` (from get_bet_solution)', 400);
+      unwireComponents(betId, edgeId, P(user)); // store edit gate + 404 on unknown edge
+      return { betId, edgeId, removed: true };
     },
   },
   {
@@ -1262,6 +1504,92 @@ export const bigbetWriteTools: McpTool[] = [
       };
     },
   },
+  // ---- Big Bet LIFECYCLE (archive · unarchive · delete · restore) ------------
+  // Distinct from update_big_bet's `status:'archived'` (a status FIELD): these
+  // are the true lifecycle transitions, each wrapping the real store fn behind
+  // its own edit gate (canEdit — the owner edits their bet; cross-domain bets
+  // are Admin-only). No new role floor is invented — the write floor is creator.
+  {
+    name: 'archive_big_bet',
+    tab: 'bigbets',
+    minRole: 'creator',
+    description:
+      'Archive a Big Bet you may edit — a reversible soft-hide that removes it from the working list (retained + restorable). Purpose: retire a bet without destroying its roadmap or history. Before: get_big_bet. After: unarchive_big_bet to bring it back, or delete_big_bet to remove it for good. Governance: runs AS YOU through the SAME store edit gate as the Big Bets tab (the owner edits their bet; cross-domain bets are Admin-only) — an unseen id is a typed not_found/forbidden. Note: distinct from update_big_bet with status:"archived" (a status field); this is the lifecycle transition and is audited as bet.archive.',
+    inputSchema: {
+      type: 'object',
+      properties: { betId: { type: 'string', description: 'The Big Bet to archive (from list_big_bets).' } },
+      required: ['betId'],
+      examples: [{ betId: 'bet_ab12cd34' }],
+    },
+    call: async (user, args) => {
+      const betId = str(args.betId).trim();
+      if (!betId) fail('archive_big_bet needs a `betId` (from list_big_bets)', 400);
+      const bet = archiveBet(betId, P(user));
+      return { id: bet.id, status: bet.status, updatedAt: bet.updatedAt };
+    },
+  },
+  {
+    name: 'unarchive_big_bet',
+    tab: 'bigbets',
+    minRole: 'creator',
+    description:
+      'Restore an archived Big Bet back into the working list (returns it to active). Purpose: undo an archive. Before: list_big_bets with includeArchived (archived bets are hidden from the default list — the owner/Admin knows the id). After: get_big_bet to read the roadmap back. Governance: runs AS YOU through the SAME store edit gate as archive_big_bet (the owner edits their bet; cross-domain bets are Admin-only) — an unseen id is a typed not_found/forbidden.',
+    inputSchema: {
+      type: 'object',
+      properties: { betId: { type: 'string', description: 'The archived Big Bet to restore (from list_big_bets, includeArchived).' } },
+      required: ['betId'],
+      examples: [{ betId: 'bet_ab12cd34' }],
+    },
+    call: async (user, args) => {
+      const betId = str(args.betId).trim();
+      if (!betId) fail('unarchive_big_bet needs a `betId` (from list_big_bets)', 400);
+      const bet = unarchiveBet(betId, P(user));
+      return { id: bet.id, status: bet.status, updatedAt: bet.updatedAt };
+    },
+  },
+  {
+    name: 'delete_big_bet',
+    tab: 'bigbets',
+    minRole: 'creator',
+    description:
+      'Physically delete a Big Bet + its version history (edit-scoped, IRREVERSIBLE). Purpose: permanently remove a bet you no longer need. Before: archive_big_bet (the OS lifecycle reaches delete via archive) — the attached component REFERENCES are dropped with the bet, but the components themselves (datasets, dashboards, agent systems) live on in their own tabs; a delete never destroys the artifacts a bet points at. Governance: runs AS YOU through the SAME store edit gate as the Big Bets tab (the owner edits their bet; cross-domain bets are Admin-only) — an unseen id is a typed not_found/forbidden.',
+    inputSchema: {
+      type: 'object',
+      properties: { betId: { type: 'string', description: 'The Big Bet to permanently delete (from list_big_bets).' } },
+      required: ['betId'],
+      examples: [{ betId: 'bet_ab12cd34' }],
+    },
+    call: async (user, args) => {
+      const betId = str(args.betId).trim();
+      if (!betId) fail('delete_big_bet needs a `betId` (from list_big_bets)', 400);
+      deleteBet(betId, P(user));
+      return { deleted: true, betId };
+    },
+  },
+  {
+    name: 'restore_big_bet_version',
+    tab: 'bigbets',
+    minRole: 'creator',
+    description:
+      'Restore a prior version of a Big Bet’s editable content (name, problem, solution, target value, go-live, value basis, allocation, members, status, solution blueprint). Restore is itself reversible — the CURRENT state is snapshotted as a new version first, THEN the chosen version is applied. Purpose: roll a bet back to an earlier framing. Before: get_big_bet (the audit tail lists versions; each has a number). After: get_big_bet to read the restored content back. Governance: runs AS YOU through the SAME store edit gate as the Big Bets tab (the owner edits their bet; cross-domain bets are Admin-only) — an unseen id is a typed not_found/forbidden; an unknown version is a typed not_found.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        betId: { type: 'string', description: 'The Big Bet to restore (from list_big_bets).' },
+        versionId: { type: 'number', description: 'The version number to restore (from get_big_bet’s version history).' },
+      },
+      required: ['betId', 'versionId'],
+      examples: [{ betId: 'bet_ab12cd34', versionId: 2 }],
+    },
+    call: async (user, args) => {
+      const betId = str(args.betId).trim();
+      if (!betId) fail('restore_big_bet_version needs a `betId` (from list_big_bets)', 400);
+      const version = Number(args.versionId);
+      if (!Number.isInteger(version)) fail('restore_big_bet_version needs an integer `versionId`', 400);
+      const bet = restoreBetVersion(betId, P(user), version);
+      return { id: bet.id, name: bet.name, status: bet.status, updatedAt: bet.updatedAt };
+    },
+  },
 ];
 
 // ================================ AGENTS ======================================
@@ -1271,7 +1599,7 @@ export const agentWriteTools: McpTool[] = [
     tab: 'agents',
     minRole: 'creator',
     description:
-      'Create a new agent system (LangGraph). Always starts Personal/owner-only; sharing is the governed promote ladder (Builder→Shared, Admin→Marketplace). Optionally start from a server-authored template.',
+      'Create a new agent system (LangGraph). Always starts My-scope/owner-only — in My scope you have full rights and the system (which runs AS you) needs no approval. Sharing is the governed promote ladder (a domain admin approves the flip to Domain, an Admin certifies to Company). Optionally start from a server-authored template.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1298,7 +1626,7 @@ export const agentWriteTools: McpTool[] = [
     tab: 'agents',
     minRole: 'creator',
     description:
-      'Commit one or more whitelisted files into an agent system you can edit (only `system.yaml` and `agents/<id>/AGENT.md` | `MEMORY.md`). system.yaml is validated on write. Idempotent per identical content.',
+      'Commit one or more whitelisted files into an agent system you can edit (only `system.yaml` and `agents/<id>/AGENT.md` | `agents/<id>/MEMORY.md`). system.yaml is validated on write. Idempotent per identical content. GRANTS (what the team "can use") are authored IN system.yaml under `grants`, grouped exactly like the Agents-builder "What your team can use" surface: CONTEXT grants — `data` · `knowledge` · `metrics` · `connections` (each a list of { id, capability } items, plus `data` items may carry a `layer`) and `files` (folder grants only); and PLAN-ITEM grants — `plan` (the Operating Model, Strategic Pillars and Big Bets an agent may load as read context). CAPABILITIES: the system\'s Define grants are default-on — every sub-agent INHERITS the FULL set by default; narrow a sub-agent to REDUCE its reach, never to widen it. Per-item ACCESS LEVEL is the `capability`: `Read` (read-only) · `Write-approval` (read + propose — a write is DRAFTED/held for a human) · `Write-bounded` (read + write — this is what gives the agent that resource\'s write tools). The write GATE is scope-aware: a My (personal) write runs directly run-as-you with no hold; only a Domain/Company write is held for the right admin. A grant may instead target a whole FOLDER — set `folder: { path, scope }` (scope = personal|domain) with an empty `id`; it late-binds to every item currently under that folder at build/run time, each still per-item DLS-checked. Sub-agent grants ⊆ system grants; nothing here can exceed the caller\'s own entitlements or role. (The interactive labelled selector, category headings and folder-tree picker are the Agents-tab UI over this same schema.)',
     inputSchema: {
       type: 'object',
       properties: {

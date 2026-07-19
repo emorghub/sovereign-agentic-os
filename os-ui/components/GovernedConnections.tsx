@@ -4,9 +4,11 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { CAPABILITY_MODES, type CapabilityMode, type ConnectionTemplateKey } from '@/lib/connections/schema';
-import { roleAtLeast, type Role } from '@/lib/core/session';
+import { type Role } from '@/lib/core/session';
+import { canManageArtifact } from '@/lib/governance/edit-scope';
 import { SCOPE_GROUPS, groupByScope, groupsFromVisibility, scopeCounts, type ScopeKey } from '@/lib/core/scopes';
 import { providerForTemplate, providerConfig, type OAuthProvider } from '@/lib/oauth/providers';
 import { driveConnectionStatus, driveAuthorizePath } from '@/lib/oauth/drive-status';
@@ -14,22 +16,30 @@ import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import type { Visibility } from '@/lib/core/lifecycle';
 import DomainTag from '@/components/DomainTag';
-import { CONNECTORS, CONNECTOR_CATEGORIES } from '@/lib/connections/connectors';
 import { useApi } from '@/lib/useApi';
+import { WarehouseBrowser } from '@/components/data/WarehouseImportPanel';
+import ConnectorWizard, { type WizardStart } from '@/components/connections/ConnectorWizard';
+import InstallationGuide from '@/components/connections/InstallationGuide';
+import { installGuideFor, type InstallGuide } from '@/lib/connections/install-guides';
 
 /**
  * Governed Connections surface — ONE scroll, no sub-tabs.
  *
  * Layout (top → bottom):
- *   1. Governed connections grouped All · My · Shared · Marketplace (scope switcher).
- *   2. Create a new connection (OAuth templates + service connectors).
- *   3. App MCP connections (auto-generated from Software tab).
- *   4. Supported connector catalog.
- *   5. Outbound access / egress allowlist (Builder/Admin only).
+ *   Header — All · My · Shared · Marketplace scope segment, Show archived, ＋ New connector.
+ *   1. Connections list — scope-grouped governed connections, with App-MCP connections
+ *      (auto-generated from the Software tab) FOLDED IN by scope, tagged "App" and
+ *      linking back to their app. Warehouse cards keep Register → Test → Browse → Import.
+ *   2. Supported Connectors — a gallery of the connector TYPES you can connect,
+ *      rendered dynamically from the connection-template registry the API returns
+ *      (data.templates + data.warehouse.providers) so new templates appear on their own.
+ *   3. Outbound access / egress allowlist (Builder/Admin only).
  *
- * Builder/Admin creates a Connection → endpoint + credential (to Secrets Manager,
- * never the record) → tests it → tunes the per-tool capability profile → promotes it
- * up the Personal→Shared→Marketplace ladder. Participants see a read-only consume view.
+ * Both create paths — the header "＋ New connector" (pick any type) and a gallery card's
+ * Connect (pre-set to that type) — open the SAME shared <ConnectorWizard>, which drives
+ * the SAME governed create route. Credentials go to Secrets Manager (never the record);
+ * Builder/Admin then tunes the per-tool capability profile on the card and promotes it up
+ * the Personal→Shared→Marketplace ladder. Participants see a read-only consume view.
  */
 
 // ---- Types -----------------------------------------------------------------
@@ -65,6 +75,8 @@ type Conn = {
   egress: { external: boolean; host: string; allowed: boolean };
   tools: Tool[];
   grants: Grant[];
+  /** Only on a `warehouse` template: the non-secret federation config (platform + catalog). */
+  warehouse?: { platform: string; catalog: string; config?: Record<string, string> };
 };
 type Template = {
   key: string;
@@ -75,10 +87,24 @@ type Template = {
   endpointHint: string;
 };
 type OAuthProviderStatus = { provider: OAuthProvider; label: string; configured: boolean };
+/** One external-warehouse provider's create metadata (fields render from this). */
+type WarehouseField = { key: string; label: string; required: boolean; help?: string; kind?: string };
+type WarehouseProviderMeta = {
+  platform: string;
+  label: string;
+  capabilities: { federate: boolean; import: boolean };
+  credentialFields: WarehouseField[];
+  secretKeys: string[];
+  liveVerificationRequired: string[];
+};
+type WarehouseMeta =
+  | { enabled: false }
+  | { enabled: true; template: Template; providers: WarehouseProviderMeta[] };
 type Data = {
-  user: { id: string; role: Role };
+  user: { id: string; role: Role; domains: string[] };
   connections: Conn[];
   templates: Template[];
+  warehouse?: WarehouseMeta;
   canCreate: boolean;
   canCreatePersonal: boolean;
   oauthProviders?: OAuthProviderStatus[];
@@ -131,12 +157,28 @@ async function postJSON(path: string, body?: unknown): Promise<{ ok: boolean; st
 
 // ---- Main component --------------------------------------------------------
 
-export default function GovernedConnections() {
+function GovernedConnectionsInner() {
+  const searchParams = useSearchParams();
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState('');
   const [open, setOpen] = useState<string>('');
   const [scope, setScope] = useState<ScopeKey>('all');
   const [showArchived, setShowArchived] = useState(false);
+
+  // ?focus=<connectionId> deep-link: once data loads, open (expand) that connection.
+  // We do NOT switch scope — the accordion expansion is visible across all scopes, and
+  // the scope segment is a filter that may hide the card if the user has changed scope;
+  // the simplest honest approach is to leave scope as 'all' (the default) so the target
+  // is always visible. A ref prevents re-firing.
+  const focusApplied = useRef(false);
+  const focusId = searchParams.get('focus') ? decodeURIComponent(searchParams.get('focus')!) : null;
+  useEffect(() => {
+    if (!focusId || focusApplied.current || !data) return;
+    const target = data.connections.find((c) => c.id === focusId);
+    if (!target) return; // unknown id — no-op
+    focusApplied.current = true;
+    setOpen(focusId);
+  }, [focusId, data]);
 
   const load = useCallback(async () => {
     setError('');
@@ -154,91 +196,85 @@ export default function GovernedConnections() {
   // ---- App MCP connections (auto-generated from Software tab) ----
   const { data: appConns } = useApi<AppConns>('/api/connections/apps');
 
-  // ---- New connection form ----
-  const [name, setName] = useState('');
-  const [template, setTemplate] = useState('notion-mcp');
-  const [endpoint, setEndpoint] = useState('');
-  const [credential, setCredential] = useState('');
-  const [openApiSpec, setOpenApiSpec] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [createMsg, setCreateMsg] = useState('');
+  // ---- Shared connector wizard (both create paths open the SAME stepper) ----
+  // `null` = closed; a WizardStart = open (custom = header button, type = gallery card).
+  const [wizard, setWizard] = useState<WizardStart | null>(null);
+  const wizardRef = useRef<HTMLDivElement>(null);
+  const openWizard = useCallback((start: WizardStart) => {
+    setWizard(start);
+    // Bring the (now-visible) wizard into view — it renders just under the header.
+    requestAnimationFrame(() => wizardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }, []);
 
-  const tpl = data?.templates.find((t) => t.key === template);
-  const isOAuth = tpl?.auth === 'oauth';
-  const isApiConnector = tpl?.connector === 'api';
-  const oauthTemplates = data?.templates.filter((t) => t.auth === 'oauth') ?? [];
-  const serviceTemplates = data?.templates.filter((t) => t.auth === 'service') ?? [];
+  // The Supported Connector whose Installation Guide side-panel is open (null = none).
+  const [guide, setGuide] = useState<InstallGuide | null>(null);
+
+  // Supported Connectors: search query + which category groups are collapsed.
+  const [connSearch, setConnSearch] = useState('');
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set());
+
+  const warehouseMeta = data?.warehouse?.enabled ? data.warehouse : null;
   const canCreate = data?.canCreate ?? false;
   const canCreatePersonal = data?.canCreatePersonal ?? false;
-
-  async function create() {
-    if (!name.trim() || creating) return;
-    setCreating(true);
-    setCreateMsg('');
-    try {
-      const body: Record<string, unknown> = { name, template };
-      if (!isOAuth) {
-        body.endpoint = endpoint;
-        body.credential = credential;
-        if (isApiConnector && openApiSpec.trim()) {
-          let spec: unknown = openApiSpec.trim();
-          try { spec = JSON.parse(openApiSpec.trim()); } catch { /* send raw — backend tolerates */ }
-          body.openApiSpec = spec;
-        }
-      }
-      const res = await fetch('/api/connections', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const resp = await res.json() as { connection?: Conn; error?: string };
-      if (!res.ok || !resp.connection) {
-        setCreateMsg(`✗ ${resp.error ?? 'Could not create connection'}`);
-      } else {
-        const c = resp.connection;
-        const ref = `${c.secretRef.name}/${c.secretRef.key}`;
-        if (isOAuth) {
-          setCreateMsg(`✓ Created "${c.name}" — ${c.visibility === 'Shared' ? 'Shared in Domain' : c.visibility}. Now click Connect on its card below to sign in and authorize your own account. The token goes to Secrets Manager as ref ${ref} (never the value).`);
-        } else {
-          setCreateMsg(`✓ Created "${c.name}" — ${c.visibility === 'Shared' ? 'Shared in Domain' : c.visibility}. Credential stored as ref ${ref} (never the value).`);
-        }
-        setName('');
-        setCredential('');
-        setOpenApiSpec('');
-        load();
-      }
-    } catch (e) { setCreateMsg(`✗ ${(e as Error).message}`); }
-    finally { setCreating(false); }
-  }
-
-  const showOAuthForm = (canCreatePersonal || canCreate) && isOAuth && oauthTemplates.length > 0;
-  const showServiceForm = canCreate && !isOAuth && serviceTemplates.length > 0;
 
   if (!data && !error) return <div className="hint"><span className="spin" /> Loading connections…</div>;
 
   return (
     <ConfirmProvider>
 
-      {/* ── 1. Governed connections (scope-grouped) ── */}
-      <div className="section-title">
-        Governed connections
-        <button
-          className="btn ghost"
-          style={{ marginLeft: 'auto', padding: '4px 12px', opacity: showArchived ? 1 : 0.7 }}
-          onClick={() => setShowArchived((v) => !v)}
-          title="Archived connections are hidden by default"
-        >
-          {showArchived ? 'Hide archived' : 'Show archived'}
-        </button>
+      {/* ── Header (canonical artifact-tab header) ── */}
+      {/* Lead left; Show archived + ＋ New connector right; scope segment below. The
+          Show-archived toggle is intentionally always-solid — do NOT restyle it. */}
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-end', gap: 16, flexWrap: 'wrap' }}>
+        <p className="lead" style={{ margin: 0, maxWidth: 560 }}>
+          Governed connections — each connects with your own account, stores only a token
+          <em> reference</em> (never the value), and rides the same visibility ladder as every
+          other artifact.
+        </p>
+        <div className="row" style={{ gap: 8 }}>
+          <button
+            className="btn ghost"
+            style={{ opacity: 1 }}
+            onClick={() => setShowArchived((v) => !v)}
+            title="Archived connections are hidden by default"
+          >
+            {showArchived ? 'Hide archived' : 'Show archived'}
+          </button>
+          {(canCreate || canCreatePersonal) ? (
+            <button className="btn" onClick={() => openWizard({ mode: 'custom' })}>＋ New connector</button>
+          ) : null}
+        </div>
       </div>
-      {error ? <div className="error">{error}</div> : null}
+      {error ? <div className="error" style={{ marginTop: 14 }}>{error}</div> : null}
 
+      {/* The shared wizard — opens under the header for BOTH create paths (header
+          "＋ New connector" = custom; a Supported card's Connect = pre-set to that type). */}
+      <div ref={wizardRef} style={{ scrollMarginTop: 16 }}>
+        {wizard && data ? (
+          <ConnectorWizard
+            data={{ templates: data.templates, warehouse: data.warehouse, canCreate, canCreatePersonal }}
+            start={wizard}
+            onDone={load}
+            onCancel={() => setWizard(null)}
+          />
+        ) : null}
+      </div>
+
+      {/* ── 1. Connections list (scope-grouped; App-MCP folded in by scope) ── */}
       {(() => {
         if (!data) return null;
+        // Governed connections + App-MCP connections share the SAME four scope groups
+        // (My / Shared / Marketplace by visibility+owner). App connections fold into the
+        // caller's scope: my app → My, a Shared app → Shared, etc.
         const groups = groupsFromVisibility(data.connections);
-        const scoped = groupByScope(groups, data.user.id);
-        const counts = scopeCounts(groups, data.user.id);
-        const visible = scoped[scope];
+        const scopedConns = groupByScope(groups, data.user.id)[scope];
+        const apps = appConns?.connections ?? [];
+        const scopedApps = groupByScope(groupsFromVisibility(apps), data.user.id)[scope];
+        // Counts include both governed + app connections so the segment reflects the list.
+        const cCounts = scopeCounts(groups, data.user.id);
+        const aCounts = scopeCounts(groupsFromVisibility(apps), data.user.id);
+        const counts = { all: cCounts.all + aCounts.all, mine: cCounts.mine + aCounts.mine, shared: cCounts.shared + aCounts.shared, marketplace: cCounts.marketplace + aCounts.marketplace };
+        const empty = scopedConns.length === 0 && scopedApps.length === 0;
         return (
           <>
             {/* Scope switcher — the OS-wide four groups: All · My · Shared · Marketplace. */}
@@ -249,206 +285,236 @@ export default function GovernedConnections() {
                 </button>
               ))}
             </div>
-            {visible.length === 0 ? (
+            {empty ? (
               <div className="stub-page">
                 {scope === 'mine' || scope === 'all'
-                  ? <>No governed connections yet{canCreate ? ' — create one below.' : '.'}</>
-                  : scope === 'shared' ? 'Nothing shared in your domain yet.' : 'Nothing in the marketplace yet.'}
+                  ? <>No connections yet{(canCreate || canCreatePersonal) ? ' — use ＋ New connector, or pick a Supported connector below.' : '.'}</>
+                  : scope === 'shared' ? 'Nothing in Domain yet.' : 'Nothing in Company yet.'}
               </div>
             ) : (
-              visible.map((c) => (
-                <ConnectionCard
-                  key={c.id}
-                  c={c}
-                  role={data.user.role}
-                  oauthProviders={data.oauthProviders ?? []}
-                  open={open === c.id}
-                  onToggle={() => setOpen(open === c.id ? '' : c.id)}
-                  onChange={load}
-                />
-              ))
+              <>
+                {scopedConns.map((c) => (
+                  <ConnectionCard
+                    key={c.id}
+                    c={c}
+                    role={data.user.role}
+                    me={data.user}
+                    oauthProviders={data.oauthProviders ?? []}
+                    open={open === c.id}
+                    onToggle={() => setOpen(open === c.id ? '' : c.id)}
+                    onChange={load}
+                  />
+                ))}
+                {scopedApps.map((c) => <AppConnectionCard key={c.id} c={c} />)}
+              </>
             )}
           </>
         );
       })()}
 
-      {/* ── 2. Create a new connection ── */}
-      <div className="section-title" style={{ marginTop: 28 }}>New connection</div>
-      {(canCreate || canCreatePersonal) ? (
-        <>
-          <p className="hint" style={{ marginTop: 0, marginBottom: 12 }}>
-            Pick a connector: <strong>Google Drive</strong>, <strong>OneDrive</strong> or
-            {' '}<strong>Notion</strong>. Each connects with your own account via OAuth — you sign in,
-            we complete the flow server-side and store only a token <em>reference</em> (never the token).
-            All external endpoints are checked against the <strong>egress allowlist</strong>.
-          </p>
-
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Connection name (e.g. Alex's Google Drive, My Notion workspace)"
-          />
-
-          <div className="row" style={{ marginTop: 10 }}>
-            <select
-              value={template}
-              onChange={(e) => { setTemplate(e.target.value); setEndpoint(''); }}
-              style={{ flex: 1 }}
-            >
-              {oauthTemplates.length > 0 && (
-                <optgroup label="Connect your own account (personal OAuth)">
-                  {oauthTemplates.map((t) => (
-                    <option key={t.key} value={t.key}>{t.label}</option>
-                  ))}
-                </optgroup>
-              )}
-              {serviceTemplates.length > 0 && (
-                <optgroup label="Shared in Domain connection (service credentials — Builder / Admin)">
-                  {serviceTemplates.map((t) => (
-                    <option key={t.key} value={t.key}>{t.label} · {t.type}</option>
-                  ))}
-                </optgroup>
-              )}
-            </select>
-          </div>
-
-          {showOAuthForm ? (
-            <>
-              <p className="hint" style={{ marginTop: 10, marginBottom: 6 }}>
-                Add the drive, then click <strong>Connect</strong> on its card above to sign in through
-                {tpl ? ` ${tpl.label}` : ' the provider'} and authorize your own account. We complete OAuth
-                and store the token in Secrets Manager — never in the browser or the record. This
-                connection is private to you (<strong>Personal</strong>).
-              </p>
-              <div className="row" style={{ justifyContent: 'flex-end' }}>
-                <button className="btn" onClick={create} disabled={creating || !name.trim()}>
-                  {creating ? <span className="spin" /> : `Add ${tpl?.label ?? 'drive'}`}
-                </button>
-              </div>
-            </>
-          ) : showServiceForm ? (
-            <>
-              <input
-                type="text"
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-                placeholder={tpl ? `Endpoint (e.g. ${tpl.endpointHint})` : 'Endpoint'}
-                style={{ marginTop: 10 }}
-              />
-              <input
-                type="password"
-                value={credential}
-                onChange={(e) => setCredential(e.target.value)}
-                placeholder="Credential (API key / token / password) — goes to Secrets Manager"
-                style={{ marginTop: 10 }}
-                autoComplete="off"
-              />
-              {isApiConnector ? (
-                <textarea
-                  value={openApiSpec}
-                  onChange={(e) => setOpenApiSpec(e.target.value)}
-                  placeholder="Optional: paste OpenAPI spec (JSON or YAML) — governed tools are generated from it"
-                  style={{ marginTop: 10, minHeight: 80, fontSize: 12, resize: 'vertical' }}
-                />
-              ) : null}
-              <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
-                <button className="btn" onClick={create} disabled={creating || !name.trim()}>
-                  {creating ? <span className="spin" /> : 'Create connection'}
-                </button>
-              </div>
-            </>
-          ) : !canCreate && !isOAuth ? (
-            <p className="hint" style={{ marginTop: 10 }}>
-              Shared connections require a <strong>Builder</strong> or <strong>Administrator</strong>.
-              Select a personal OAuth type above.
-            </p>
-          ) : null}
-
-          {createMsg ? (
-            <div className={createMsg.startsWith('✓') ? 'answer' : 'error'} style={{ marginTop: 12 }}>
-              {createMsg}
-            </div>
-          ) : null}
-        </>
-      ) : (
-        <div className="stub-page">
-          Creating connections requires a <strong>Builder</strong> or <strong>Administrator</strong>.
-          You consume connections that have been granted or shared to you.
-        </div>
-      )}
-
-      {/* ── 3. App MCP connections (auto-generated) ── */}
-      <div className="section-title" style={{ marginTop: 28 }}>App MCP connections</div>
-      <p className="hint" style={{ marginTop: 0, marginBottom: 14 }}>
-        Every app you build in the Software tab auto-generates an MCP, registered here as a
-        governed connection + agent tool. Building an app and creating a connection are one act.
-      </p>
-      {(appConns?.connections?.length ?? 0) === 0 ? (
-        <div className="stub-page">No app connections yet — build one in the Software tab.</div>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Connection</th><th>Principal</th><th>Tools</th><th>Visibility</th><th>App</th></tr>
-            </thead>
-            <tbody>
-              {appConns!.connections.map((c) => (
-                <tr key={c.id}>
-                  <td style={{ fontWeight: 600 }}>{c.name}</td>
-                  <td className="mono">{c.principal}</td>
-                  <td className="muted mono" style={{ fontSize: 11.5, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.tools.map((t) => t.name).join(', ')}>{c.tools.map((t) => t.name).join(', ')}</td>
-                  <td><span className={`badge vis-${c.visibility.toLowerCase()}`}>{c.visibility === 'Shared' ? 'Shared in Domain' : c.visibility}</span></td>
-                  <td><Link className="btn ghost" href={`/software/${c.appId}`}>Open →</Link></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* ── 4. Supported connector catalog ── */}
+      {/* ── 2. Supported Connectors (grouped by category + search) ── */}
       <div className="section-title" style={{ marginTop: 28 }}>Supported connectors</div>
       <p className="hint" style={{ marginTop: 0, marginBottom: 14 }}>
-        These connectors are wired end-to-end: you sign in with your own account and only a
-        token <em>reference</em> is stored (never a raw secret). Connect any of them using
-        the <strong>New connection</strong> form above.
+        The connector types you can connect, straight from the template registry — inbound
+        sources (warehouse, Google Drive, OneDrive, Notion) and any new template the platform
+        adds appear here automatically. <strong>Connect</strong> opens the wizard pre-set to that
+        type. For an arbitrary outbound API or MCP, use <strong>＋ New connector</strong> above.
       </p>
-      {CONNECTOR_CATEGORIES.map((cat) => {
-        const items = CONNECTORS.filter((c) => c.category === cat);
-        if (items.length === 0) return null;
+      {(() => {
+        if (!data) return null;
+        // A gallery card. `guideKey` resolves its Installation Guide (a warehouse card
+        // uses its provider platform; a template card uses its template key). `start`
+        // is how Connect opens the shared wizard (a warehouse card pins the platform).
+        type Card = { key: string; guideKey: string; label: string; meta: string; blurb?: string; category: string; start: WizardStart };
+
+        // Category taxonomy — maps template keys and warehouse platforms to display categories.
+        // Warehouse platforms → Data warehouses; operational databases → Operational databases.
+        // New connectors (e.g. postgres/mysql/sqlserver/mongodb from the DB agent) are derived
+        // by provider name below so they group correctly without touching warehouse-provider files.
+        const TEMPLATE_CATEGORY: Record<string, string> = {
+          'gdrive':        'Docs & Knowledge',
+          'onedrive':      'Docs & Knowledge',
+          'notion-mcp':    'Docs & Knowledge',
+          'airflow':       'Orchestration',
+          'om-catalog':    'Catalog',
+          'salesforce-api':'Enterprise apps',
+          'generic-mcp':   'LLM providers',
+          'generic-api':   'Enterprise apps',
+          'database':      'Operational databases',
+          'warehouse':     'Data warehouses',
+        };
+        const WAREHOUSE_PLATFORM_CATEGORY: Record<string, string> = {
+          'glue':             'Data warehouses',
+          'snowflake':        'Data warehouses',
+          'bigquery':         'Data warehouses',
+          'databricks-delta': 'Data warehouses',
+          'fabric':           'Data warehouses',
+        };
+
+        // Dynamic: one card per user-facing template the API returned…
+        const cards: Card[] = data.templates.map((t) => ({
+          key: t.key,
+          guideKey: t.key,
+          label: t.label,
+          meta: `${t.type} · ${t.auth === 'oauth' ? 'personal OAuth' : 'service credentials'}`,
+          category: TEMPLATE_CATEGORY[t.key] ?? t.type,
+          start: { mode: 'type', template: t.key },
+        }));
+
+        // …plus ONE card PER warehouse provider (not a single generic warehouse card)
+        // when the operator enabled external connectors. Each Connect opens the wizard
+        // pre-set to that platform so it skips the generic platform-choice step.
+        if (warehouseMeta) {
+          for (const p of warehouseMeta.providers) {
+            const caps = [p.capabilities.federate ? 'federate' : null, p.capabilities.import ? 'import' : null]
+              .filter(Boolean).join(' · ');
+            // Derive category: known platforms → Data warehouses; anything db-like → Operational databases.
+            const cat = WAREHOUSE_PLATFORM_CATEGORY[p.platform]
+              ?? (/postgres|mysql|sqlserver|mongodb|mongo/i.test(p.platform) ? 'Operational databases' : 'Data warehouses');
+            cards.push({
+              key: `warehouse:${p.platform}`,
+              guideKey: p.platform,
+              label: p.label,
+              meta: `Warehouse · federated Trino catalog${caps ? ` · ${caps}` : ''}`,
+              blurb: 'Federate this lakehouse as one governed catalog — query live under OPA, then import tables as owned products.',
+              category: cat,
+              start: { mode: 'type', template: 'warehouse', presetPlatform: p.platform },
+            });
+          }
+        }
+
+        if (cards.length === 0) return <div className="stub-page">No connector types available on this deployment.</div>;
+        const canOpen = canCreate || canCreatePersonal;
+
+        // Filter by search query (name or category, case-insensitive).
+        const q = connSearch.trim().toLowerCase();
+        const filtered = q
+          ? cards.filter((c) => c.label.toLowerCase().includes(q) || c.category.toLowerCase().includes(q))
+          : cards;
+
+        // Group filtered cards by category, preserving a consistent category order.
+        const CATEGORY_ORDER = [
+          'Docs & Knowledge',
+          'Messaging',
+          'Calendar',
+          'Code & DevOps',
+          'Operational databases',
+          'Data warehouses',
+          'Data ingest',
+          'Enterprise apps',
+          'Orchestration',
+          'Catalog',
+          'Observability',
+          'LLM providers',
+        ];
+        const grouped = new Map<string, Card[]>();
+        for (const c of filtered) {
+          const list = grouped.get(c.category) ?? [];
+          list.push(c);
+          grouped.set(c.category, list);
+        }
+        // Sort categories: known order first, unknowns appended alphabetically.
+        const sortedCategories = [...grouped.keys()].sort((a, b) => {
+          const ia = CATEGORY_ORDER.indexOf(a);
+          const ib = CATEGORY_ORDER.indexOf(b);
+          if (ia !== -1 && ib !== -1) return ia - ib;
+          if (ia !== -1) return -1;
+          if (ib !== -1) return 1;
+          return a.localeCompare(b);
+        });
+
         return (
-          <div key={cat} style={{ marginBottom: 18 }}>
-            <div className="mono" style={{ color: 'var(--text-faint)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{cat}</div>
-            <div className="grid">
-              {items.map((c) => (
-                <div className="card" key={c.name}>
-                  <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                    <h3 style={{ margin: 0 }}>{c.name}</h3>
-                    <span className="badge ok">available</span>
-                  </div>
-                  <div className="muted" style={{ marginTop: 8 }}>Auth: {c.auth}</div>
-                  <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+          <>
+            {/* Search bar */}
+            <div style={{ marginBottom: 18 }}>
+              <input
+                type="search"
+                value={connSearch}
+                onChange={(e) => setConnSearch(e.target.value)}
+                placeholder="Search connectors by name or category…"
+                style={{ width: '100%', maxWidth: 400 }}
+              />
+            </div>
+
+            {filtered.length === 0 ? (
+              <div className="stub-page">No connectors match &ldquo;{connSearch}&rdquo;.</div>
+            ) : (
+              sortedCategories.map((cat) => {
+                const group = grouped.get(cat)!;
+                const isOpen = !collapsedCategories.has(cat);
+                return (
+                  <div key={cat} style={{ marginBottom: 20 }}>
+                    {/* Group header */}
                     <button
-                      className="btn ghost"
-                      onClick={() => {
-                        // Scroll to the new connection form above (smooth UX).
-                        document.querySelector<HTMLElement>('input[placeholder*="Connection name"]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        setTemplate(c.template);
+                      type="button"
+                      onClick={() => setCollapsedCategories((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(cat)) next.delete(cat); else next.add(cat);
+                        return next;
+                      })}
+                      style={{
+                        all: 'unset',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        marginBottom: isOpen ? 10 : 0,
+                        width: '100%',
                       }}
                     >
-                      Connect →
+                      <span style={{
+                        fontFamily: 'var(--font-mono, monospace)',
+                        fontSize: 10,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.08em',
+                        color: 'var(--text-faint)',
+                        userSelect: 'none',
+                      }}>
+                        {isOpen ? '▾' : '▸'} {cat}
+                      </span>
+                      <span className="badge muted" style={{ fontSize: 10 }}>{group.length}</span>
+                      <span style={{ flex: 1, height: 1, background: 'var(--border)', marginLeft: 4 }} />
                     </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
 
-      {/* ── 5. Outbound access (Builder/Admin only) ── */}
+                    {/* Cards grid — hidden when collapsed */}
+                    {isOpen ? (
+                      <div className="grid">
+                        {group.map((c) => {
+                          const g = installGuideFor(c.guideKey);
+                          return (
+                            <div className="card" key={c.key}>
+                              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                                <h3 style={{ margin: 0 }}>{c.label}</h3>
+                                <span className="badge ok">available</span>
+                              </div>
+                              <div className="muted" style={{ marginTop: 8 }}>{c.meta}</div>
+                              {c.blurb ? <p className="hint" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>{c.blurb}</p> : null}
+                              <div className="row" style={{ marginTop: 12, gap: 8, justifyContent: 'flex-end' }}>
+                                {g ? (
+                                  <button className="btn ghost" onClick={() => setGuide(g)}>Installation Guide</button>
+                                ) : null}
+                                {canOpen ? (
+                                  <button className="btn ghost" onClick={() => openWizard(c.start)}>Connect →</button>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })
+            )}
+          </>
+        );
+      })()}
+
+      {/* ── 3. Outbound access (Builder/Admin only) ── */}
       {canCreate ? <EgressSection /> : null}
+
+      {/* Installation Guide side panel — opened from any Supported Connector card. */}
+      {guide ? <InstallationGuide guide={guide} onClose={() => setGuide(null)} /> : null}
 
     </ConfirmProvider>
   );
@@ -556,13 +622,158 @@ type AutonomousPreset = typeof AUTONOMOUS_PRESETS[number];
 const connVisibility = (v: Conn['visibility']): Visibility =>
   v === 'Shared' ? 'shared' : v === 'Certified' ? 'certified' : 'personal';
 
+/** Display word for a connection's stored visibility. Mirrors lib/core/scopes.ts
+ *  (source of truth): Personal→"My", Shared→"Domain", Certified→"Company". */
+const visWord = (v: Conn['visibility']): string =>
+  v === 'Shared' ? 'Domain' : v === 'Certified' ? 'Company' : 'My';
+
+/** Register outcome (backend route wraps registerWarehouseCatalog → RegisterK8sOutcome). */
+type RegisterResult = { ok?: boolean; catalog?: string; detail?: string; error?: string };
+/** Test outcome (existing route: SHOW SCHEMAS through the governed query path). */
+type TestResult = { ok?: boolean; detail?: string; error?: string };
+
+/**
+ * Warehouse lifecycle — the clean inline steps a builder expects on a warehouse
+ * connection: Register the Trino catalog (one click), Test it (SHOW SCHEMAS), then
+ * Browse its schemas/tables. No YAML, no raw catalog properties — Connect → Register
+ * → Test → Browse. A rolling Trino restart is slow, so after Register we poll Test.
+ */
+function WarehouseControls({ c, canManage, onChange }: { c: Conn; canManage: boolean; onChange: () => void }) {
+  const [busy, setBusy] = useState('');
+  const [regMsg, setRegMsg] = useState('');
+  const [testMsg, setTestMsg] = useState('');
+  const [registered, setRegistered] = useState(c.health === 'healthy');
+  const [browsing, setBrowsing] = useState(false);
+
+  async function register() {
+    setBusy('register');
+    setRegMsg('Registering catalog… a rolling Trino restart can take 60–90s.');
+    setTestMsg('');
+    try {
+      const r = await postJSON(`/api/connections/${c.id}/register`);
+      const d = r.data as RegisterResult;
+      if (r.ok && d.ok !== false) {
+        setRegMsg(`✓ Registered catalog '${d.catalog ?? c.warehouse?.catalog ?? ''}'. ${d.detail ?? 'Testing…'}`);
+        setRegistered(true);
+        onChange();
+        // Trino re-reads its catalog mount on the rolling restart — poll Test until it answers.
+        await pollTest();
+      } else {
+        setRegMsg(`✗ ${d.error ?? d.detail ?? 'Could not register the catalog'}`);
+      }
+    } catch (e) {
+      setRegMsg(`✗ ${(e as Error).message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function pollTest() {
+    // Up to ~90s: the pod restart is the slow part. Stop as soon as SHOW SCHEMAS answers ok.
+    for (let i = 0; i < 9; i++) {
+      await new Promise((res) => setTimeout(res, 10_000));
+      try {
+        const r = await postJSON(`/api/connections/${c.id}/test`);
+        const d = r.data as TestResult;
+        if (d.ok) { setTestMsg(`✓ ${d.detail ?? 'Catalog is queryable.'}`); onChange(); return; }
+      } catch { /* keep polling */ }
+    }
+    setTestMsg('Still waiting on Trino — click Test again in a moment.');
+  }
+
+  async function test() {
+    setBusy('test');
+    setTestMsg('');
+    try {
+      const r = await postJSON(`/api/connections/${c.id}/test`);
+      const d = r.data as TestResult;
+      // The route returns 200 even on a not-yet-registered catalog; branch on payload ok.
+      setTestMsg(d.ok ? `✓ ${d.detail}` : `✗ ${d.error ?? d.detail ?? 'Register the catalog first, then test.'}`);
+      if (d.ok) { setRegistered(true); onChange(); }
+    } catch (e) {
+      setTestMsg(`✗ ${(e as Error).message}`);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        {registered
+          ? <span className="badge ok">catalog registered</span>
+          : <span className="badge muted">needs register</span>}
+        {canManage ? (
+          <button className="btn ghost" onClick={register} disabled={busy !== ''}>
+            {busy === 'register' ? <span className="spin" /> : registered ? 'Re-register' : 'Register catalog'}
+          </button>
+        ) : null}
+        <button className="btn ghost" onClick={test} disabled={busy !== ''}>
+          {busy === 'test' ? <span className="spin" /> : 'Test'}
+        </button>
+        <button className="btn ghost" onClick={() => setBrowsing((v) => !v)} disabled={busy !== ''}>
+          {browsing ? 'Hide browse' : 'Browse'}
+        </button>
+      </div>
+      <p className="hint" style={{ marginTop: 8, marginBottom: 0, fontSize: 11.5 }}>
+        <strong>Register</strong> mounts this source as one governed Trino catalog (one click — no YAML).
+        <strong> Test</strong> runs <span className="mono">SHOW SCHEMAS</span> through the governed query path.
+        <strong> Browse</strong> lists schemas &amp; tables. Import a table into your lakehouse from the
+        Data tab’s <em>Import from warehouse</em>.
+      </p>
+      {regMsg ? <div className={regMsg.startsWith('✗') ? 'error' : 'answer'} style={{ marginTop: 8 }}>{regMsg}</div> : null}
+      {testMsg ? <div className={testMsg.startsWith('✗') ? 'error' : 'answer'} style={{ marginTop: 8 }}>{testMsg}</div> : null}
+      {browsing ? <WarehouseBrowser connId={c.id} onSelect={() => { /* browse-only preview here; import lives in the Data tab */ }} /> : null}
+    </div>
+  );
+}
+
+/**
+ * App-MCP connection card — an auto-generated connection from the Software tab, folded
+ * into the scope list alongside governed connections. Tagged "App" and links to its app.
+ * Read-only here: the app owns its lifecycle (capabilities live on the app in Software).
+ */
+function AppConnectionCard({ c }: { c: AppConn }) {
+  const toolNames = c.tools.map((t) => t.name).join(', ');
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h3 style={{ margin: 0 }}>
+            {c.name}
+            <span className="badge" style={{ marginLeft: 6 }}>App</span>
+          </h3>
+          <div className="muted mono" style={{ marginTop: 6, fontSize: 11.5 }}>
+            {c.principal} · {c.owner}/{c.domain}
+          </div>
+          <div className="muted mono" style={{ marginTop: 8, fontSize: 11.5 }} title={toolNames}>
+            Tools: {toolNames || '(none)'}
+          </div>
+        </div>
+        <div className="row" style={{ gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 12 }}>
+          {(c.visibility === 'Shared' || c.visibility === 'Certified') ? <DomainTag domain={c.domain} /> : null}
+          <span className={badge(c.visibility)}>{visWord(c.visibility)}</span>
+        </div>
+      </div>
+      <p className="hint" style={{ marginTop: 10, marginBottom: 0, fontSize: 11.5 }}>
+        Auto-generated when you built this app in the Software tab — building an app and creating a
+        connection are one act. Manage it from its app.
+      </p>
+      <div className="row" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+        <Link className="btn ghost" href={`/software/${c.appId}`}>Open app →</Link>
+      </div>
+    </div>
+  );
+}
+
 function ConnectionCard({
-  c, role, oauthProviders, open, onToggle, onChange,
+  c, role, me, oauthProviders, open, onToggle, onChange,
 }: {
-  c: Conn; role: Role; oauthProviders: OAuthProviderStatus[]; open: boolean; onToggle: () => void; onChange: () => void;
+  c: Conn; role: Role; me: { id: string; role: Role; domains: string[] }; oauthProviders: OAuthProviderStatus[]; open: boolean; onToggle: () => void; onChange: () => void;
 }) {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
+  const [confirmDemote, setConfirmDemote] = useState(false);
   const [draft, setDraft] = useState<Tool[]>(c.tools);
   const [approvalState, setApprovalState] = useState<{
     tool: string; args: Record<string, unknown>; preview: ApprovalPreview;
@@ -579,9 +790,14 @@ function ConnectionCard({
   const [presetBusy, setPresetBusy] = useState(false);
   const [autonomousMsg, setAutonomousMsg] = useState('');
 
-  const canManage = roleAtLeast(role, 'builder');
+  // Fail-closed edit-scope (defense-in-depth; server is the authority): only the
+  // owner, a domain_admin of the owning domain, or an admin sees manage controls.
+  const canManage = canManageArtifact(me, { owner: c.owner, domain: c.domain });
   const exposed = c.tools.filter((t) => t.mode === 'Read' || t.mode === 'Write-approval' || t.mode === 'Write-bounded');
   const isDrive = c.connector === 'drive' || c.type === 'Drive';
+  // Warehouse connection: its lifecycle is Register → Test → Browse (its own control
+  // block below), not the generic reachability Test the other connectors use.
+  const isWarehouse = c.template === 'warehouse';
 
   // Notion hosted-MCP connection: a per-user OAuth (DCR + PKCE) connect flow that
   // proves liveness with a real MCP tools/list. Status derives from the same safe
@@ -683,7 +899,14 @@ function ConnectionCard({
   async function promote() {
     const r = await doPost(`/api/connections/${c.id}/promote`);
     const conn = r.data.connection as Conn | undefined;
-    setMsg(r.ok ? `✓ Promoted to ${conn?.visibility ?? ''}` : `✗ ${r.data.error as string}`);
+    setMsg(r.ok ? `✓ Promoted to ${conn ? visWord(conn.visibility) : ''}` : `✗ ${r.data.error as string}`);
+    if (r.ok) onChange();
+  }
+
+  async function demote() {
+    const r = await doPost(`/api/connections/${c.id}/demote`);
+    const conn = r.data.connection as Conn | undefined;
+    setMsg(r.ok ? `✓ Revoked → ${conn ? visWord(conn.visibility) : ''}` : `✗ ${r.data.error as string}`);
     if (r.ok) onChange();
   }
 
@@ -804,7 +1027,7 @@ function ConnectionCard({
           {dataUsage === 'bronze' && <span className="badge warn">Bronze source</span>}
           {dataUsage === 'files' && <span className="badge warn">Files index</span>}
           {(c.visibility === 'Shared' || c.visibility === 'Certified') ? <DomainTag domain={c.domain} /> : null}
-          <span className={badge(c.visibility)}>{c.visibility === 'Shared' ? 'Shared in Domain' : c.visibility}</span>
+          <span className={badge(c.visibility)}>{visWord(c.visibility)}</span>
         </div>
       </div>
 
@@ -910,9 +1133,12 @@ function ConnectionCard({
         </div>
       ) : null}
 
+      {/* Warehouse lifecycle — Register → Test → Browse (its own block; no YAML). */}
+      {isWarehouse ? <WarehouseControls c={c} canManage={canManage} onChange={onChange} /> : null}
+
       {/* Action buttons */}
       <div className="row" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
-        {driveProvider || isNotion ? null : c.health === 'needs-reconnect'
+        {driveProvider || isNotion || isWarehouse ? null : c.health === 'needs-reconnect'
           ? <button className="btn ghost" onClick={test} disabled={busy !== ''}>Reconnect</button>
           : <button className="btn ghost" onClick={test} disabled={busy !== ''}>Test</button>}
         <button className="btn ghost" onClick={onToggle}>
@@ -920,8 +1146,24 @@ function ConnectionCard({
         </button>
         {canManage && c.visibility !== 'Certified' ? (
           <button className="btn ghost" onClick={promote} disabled={busy !== ''}>
-            {c.visibility === 'Personal' ? 'Promote → Shared' : 'List → Marketplace'}
+            {c.visibility === 'Personal' ? 'Promote to Domain' : 'Certify to Company'}
           </button>
+        ) : null}
+        {/* Revoke sharing (demote). Certified→Shared is admin-only; Shared→Personal is
+            builder+ (owner enforced server-side). The server is the fail-closed authority. */}
+        {((c.visibility === 'Certified' && role === 'admin') || (c.visibility === 'Shared' && canManage)) ? (
+          confirmDemote ? (
+            <>
+              <button className="btn" style={{ background: 'var(--danger, #b42318)' }} onClick={() => { setConfirmDemote(false); void demote(); }} disabled={busy !== ''}>
+                {c.visibility === 'Certified' ? 'Confirm revoke → Domain' : 'Confirm unshare → My'}
+              </button>
+              <button className="btn ghost" onClick={() => setConfirmDemote(false)} disabled={busy !== ''}>Cancel</button>
+            </>
+          ) : (
+            <button className="btn ghost" onClick={() => setConfirmDemote(true)} disabled={busy !== ''}>
+              {c.visibility === 'Certified' ? 'Revoke from Company' : 'Unshare'}
+            </button>
+          )
         ) : null}
         {/* Data-source toggle */}
         {!dataUsage ? (
@@ -933,6 +1175,24 @@ function ConnectionCard({
             Same connection — agent tool + {dataUsage === 'files' ? 'Files index' : 'Bronze source'}
           </span>
         )}
+        {/* Lifecycle — Archive (live) · Restore + Delete (archived). Lives in the
+            card action row next to Promote/Unshare so it's discoverable, consistent
+            with every other tab (archived connections need the "Show archived"
+            toggle above to be visible). */}
+        {canManage ? (
+          <span style={{ marginLeft: 'auto' }}>
+            <LifecycleActions
+              id={c.id}
+              name={c.name}
+              kind="connection"
+              visibility={connVisibility(c.visibility)}
+              archived={!!c.archived}
+              api={`/api/connections/${c.id}`}
+              onChanged={onChange}
+              compact
+            />
+          </span>
+        ) : null}
       </div>
 
       {msg ? <div className={msg.startsWith('✗') ? 'error' : 'answer'} style={{ marginTop: 10 }}>{msg}</div> : null}
@@ -1171,5 +1431,13 @@ function ConnectionCard({
         </div>
       ) : null}
     </div>
+  );
+}
+
+export default function GovernedConnections() {
+  return (
+    <Suspense>
+      <GovernedConnectionsInner />
+    </Suspense>
   );
 }

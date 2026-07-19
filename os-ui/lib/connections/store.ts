@@ -6,6 +6,7 @@ import { config } from '@/lib/core/config';
 import { osMirror } from '@/lib/infra/os-mirror';
 import type { CurrentUser } from '@/lib/core/auth';
 import { canPromote, roleAtLeast } from '@/lib/core/session';
+import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
 import type { Visibility } from '@/lib/core/artifact-model';
 import {
   type Connection,
@@ -14,9 +15,172 @@ import {
   type CapabilityMode,
   type CapabilityLimits,
   type DataUsage,
+  type WarehouseConnectionConfig,
+  type AirflowConnectionConfig,
+  type AirflowAuthType,
+  type AtlassianConnectionConfig,
+  type AtlassianAuthKind,
   templateByKey,
   isPersonalConnectable,
 } from '@/lib/connections/schema';
+import {
+  type AirflowConn,
+  airflowHealth,
+  listDags as afListDags,
+  getDagRun as afGetDagRun,
+  triggerDag as afTriggerDag,
+  listDagRuns as afListDagRuns,
+  getTaskInstances as afGetTaskInstances,
+  getTaskLogs as afGetTaskLogs,
+  getXcom as afGetXcom,
+  listDatasets as afListDatasets,
+  getDatasetEvents as afGetDatasetEvents,
+  setDagPaused as afSetDagPaused,
+  clearTask as afClearTask,
+  airflowDagAllowed,
+} from '@/lib/connections/airflow';
+import {
+  githubConnFrom,
+  githubHealth,
+  listRepos as ghListRepos,
+  getRepo as ghGetRepo,
+  listIssues as ghListIssues,
+  getIssue as ghGetIssue,
+  searchCode as ghSearchCode,
+  listPulls as ghListPulls,
+  getPull as ghGetPull,
+  listCommits as ghListCommits,
+  createIssue as ghCreateIssue,
+  addIssueComment as ghAddIssueComment,
+  createPullRequest as ghCreatePullRequest,
+} from '@/lib/connections/github';
+import {
+  supabaseConnFrom,
+  supabaseHealth,
+  listProjects as sbListProjects,
+  listTables as sbListTables,
+  listMigrations as sbListMigrations,
+  getAdvisors as sbGetAdvisors,
+  getLogs as sbGetLogs,
+  getProjectUrl as sbGetProjectUrl,
+  executeSql as sbExecuteSql,
+} from '@/lib/connections/supabase';
+import {
+  atlassianConnFrom,
+  atlassianHealth,
+  jiraSearchIssues as atlJiraSearchIssues,
+  jiraGetIssue as atlJiraGetIssue,
+  jiraListProjects as atlJiraListProjects,
+  confluenceSearch as atlConfluenceSearch,
+  confluenceGetPage as atlConfluenceGetPage,
+  jiraCreateIssue as atlJiraCreateIssue,
+  jiraAddComment as atlJiraAddComment,
+  jiraTransitionIssue as atlJiraTransitionIssue,
+  confluenceCreatePage as atlConfluenceCreatePage,
+} from '@/lib/connections/atlassian';
+import {
+  notionConnFrom,
+  notionSearch as apiNotionSearch,
+  notionGetPage as apiNotionGetPage,
+  notionCreatePage as apiNotionCreatePage,
+} from '@/lib/connections/notion';
+import {
+  slackConnFrom,
+  slackHealth,
+  listChannels as slkListChannels,
+  listUsers as slkListUsers,
+  conversationsHistory as slkConversationsHistory,
+  postMessage as slkPostMessage,
+} from '@/lib/connections/slack';
+import {
+  googleMailConnFrom,
+  gmailHealth,
+  gmailListMessages,
+  gmailGetMessage,
+  gmailListLabels,
+  gmailSendMessage,
+  gmailCreateDraft,
+} from '@/lib/connections/gmail';
+import {
+  gcalConnFrom,
+  gcalHealth,
+  gcalListCalendars,
+  gcalListEvents,
+  gcalGetEvent,
+  gcalCreateEvent,
+  gcalUpdateEvent,
+} from '@/lib/connections/gcal';
+import {
+  graphConnFrom,
+  outlookHealth,
+  outlookListMessages,
+  outlookGetMessage,
+  outlookSendMail,
+  outlookCreateDraft,
+} from '@/lib/connections/outlook';
+import {
+  teamsConnFrom,
+  teamsHealth,
+  teamsListTeams,
+  teamsListChannels,
+  teamsListChannelMessages,
+  teamsPostChannelMessage,
+} from '@/lib/connections/teams';
+import {
+  entraConnFrom,
+  entraHealth,
+  entraListUsers,
+  entraGetUser,
+  entraListGroups,
+  entraListRoleAssignments,
+} from '@/lib/connections/entra';
+import {
+  purviewConnFrom,
+  purviewHealth,
+  purviewSearchAssets,
+  purviewGetAsset,
+  purviewListClassifications,
+  purviewGetLineage,
+} from '@/lib/connections/purview';
+import {
+  aiFoundryConnFrom,
+  aiFoundryHealth,
+  aiFoundryListModels,
+  aiFoundryListDeployments,
+  aiFoundryGetDeployment,
+} from '@/lib/connections/ai-foundry';
+import {
+  sagemakerConnFrom,
+  sagemakerHealth,
+  sagemakerListModels,
+  sagemakerListEndpoints,
+  sagemakerListTrainingJobs,
+  sagemakerDescribeEndpoint,
+} from '@/lib/connections/sagemaker';
+import {
+  gcpIdentityConnFrom,
+  gcpIdentityHealth,
+  gcpListProjects,
+  gcpGetIamPolicy,
+  gcpListServiceAccounts,
+} from '@/lib/connections/gcp-identity';
+import {
+  snowflakeGovConnFrom,
+  snowflakeGovHealth,
+  snowflakeGovListUsers,
+  snowflakeGovListRoles,
+  snowflakeGovGrantsToUsers,
+  snowflakeGovGrantsToRoles,
+  snowflakeGovLoginHistory,
+  snowflakeGovAccessHistory,
+} from '@/lib/connections/snowflake-governance';
+import type { WarehousePlatform } from '@/lib/connections/warehouse/types';
+import { splitWarehouseFields, toWarehouseSource } from '@/lib/connections/warehouse/connection';
+import { providerFor } from '@/lib/connections/warehouse/registry';
+import { buildImportCtas } from '@/lib/connections/warehouse/import';
+import { catalogRegistration, type CatalogRegistration } from '@/lib/connections/warehouse/registration';
+import { applyLiveRegistration, type RegK8s, type RegisterK8sOutcome, type SecretValues } from '@/lib/connections/warehouse/k8s-registration';
+import { executeRun, queryRun, type ExecuteIdentity } from '@/lib/infra/governed';
 import { putSecret, secretFingerprint, getSecretServerSide, isEgressAllowed, deleteSecret, hasSecret } from '@/lib/infra/secrets';
 import { type ArtifactVersion, versionLog } from '@/lib/core/versioning';
 import {
@@ -43,8 +207,9 @@ import {
 } from '@/lib/governance/governance';
 import { registerBronzeSource, indexToFiles } from '@/lib/data/data-handoff';
 import { logEgress } from '@/lib/connections/egress-requests';
-import { providerForTemplate } from '@/lib/oauth/providers';
+import { providerForTemplate, providerConfig, type OAuthProvider } from '@/lib/oauth/providers';
 import { storeTokens, readTokens, resolveAccessToken } from '@/lib/oauth/connection-token';
+import { probeDrive } from '@/lib/oauth/client';
 import { isExpired, type TokenSet } from '@/lib/oauth/token-set';
 import {
   refreshNotionToken,
@@ -153,6 +318,13 @@ function visibleToUser(c: Connection, user: CurrentUser): boolean {
   return true; // Certified (Marketplace) — discoverable across domains
 }
 
+/** The edit-scope arg for a connection. A Personal connection is owner-only —
+ *  no admin/domain_admin reaches another user's private connection. */
+function manageArg(c: Connection): { owner: string; domain: string; scope: ArtifactScope } {
+  const scope: ArtifactScope = c.visibility === 'Personal' ? 'personal' : c.visibility === 'Certified' ? 'certified' : 'shared';
+  return { owner: c.owner, domain: c.domain, scope };
+}
+
 export async function listConnectionsForUser(
   user: CurrentUser,
   opts: { includeArchived?: boolean } = {},
@@ -179,12 +351,51 @@ function assertBuilderOrAdmin(user: CurrentUser): void {
 
 // -------------------------------------------------------------------- Create ---
 
+/** The warehouse-federation block on the create input (only for the `warehouse` template). */
+export type WarehouseCreateInput = {
+  platform: WarehousePlatform;
+  /** The Trino catalog name to mount as (e.g. `glue_sales`). */
+  catalog: string;
+  /** Flat field map keyed by the provider's credentialField keys (secret + non-secret). */
+  fields: Record<string, string>;
+};
+
+/** The non-secret Airflow config on the create input (only for the `airflow` template). */
+export type AirflowCreateInput = {
+  authType: AirflowAuthType;
+  /** Basic-auth username (non-secret); empty for Bearer. */
+  username?: string;
+  /** Optional allowlist of DAG ids `trigger_dag` is bounded to. */
+  dagAllowlist?: string[];
+};
+
+/** The non-secret Atlassian config on the create input (only for the `atlassian` template). */
+export type AtlassianCreateInput = {
+  /** 'basic' = API token (with the account email); 'bearer' = OAuth 3LO access token. */
+  authKind: AtlassianAuthKind;
+  /** Basic-auth account email (non-secret); empty for Bearer. */
+  email?: string;
+};
+
 export async function createConnection(
   user: CurrentUser,
-  input: { name: string; template: ConnectionTemplateKey; endpoint: string; credential: string; domain?: string; openApiSpec?: unknown },
+  input: { name: string; template: ConnectionTemplateKey; endpoint: string; credential: string; domain?: string; openApiSpec?: unknown; warehouse?: WarehouseCreateInput; omService?: string; airflow?: AirflowCreateInput; atlassian?: AtlassianCreateInput },
 ): Promise<Connection> {
   const tpl = templateByKey(input.template);
   if (!tpl) throw withStatus(new Error('Unknown connection template'), 400);
+
+  // External-warehouse connections are gated OFF by default — refuse to create one
+  // unless the operator has turned on EXTERNAL_CONNECTORS_ENABLED. No behaviour
+  // change for any other template when the flag is off.
+  if (tpl.key === 'warehouse' && !config.externalConnectorsEnabled) {
+    throw withStatus(new Error('External-warehouse connectors are not enabled on this deployment'), 403);
+  }
+
+  // External OpenMetadata connections are gated OFF by default too — refuse to
+  // create one unless the operator has turned on OPENMETADATA_CONNECT_ENABLED.
+  if (tpl.key === 'om-catalog' && !config.openmetadataConnectEnabled) {
+    throw withStatus(new Error('External OpenMetadata connections are not enabled on this deployment'), 403);
+  }
 
   // WHO CONNECTS (golden path): any user may connect a PERSONAL (per-user OAuth)
   // account; SHARED (service-credential) connections require a Builder/Admin.
@@ -199,6 +410,72 @@ export async function createConnection(
   const principal = `conn-${slug}`;
   const endpoint = (input.endpoint ?? '').trim() || tpl.endpointHint;
   const adapter = adapterFor(tpl.connector);
+
+  // ---- WAREHOUSE branch: split the flat field map into non-secret record config +
+  // vaulted secrets, store each secret under its own key, and stamp the record's
+  // `warehouse` block. NEVER put a secret value on the record (the ONE rule holds).
+  if (tpl.key === 'warehouse') {
+    if (!input.warehouse) throw withStatus(new Error('A warehouse connection needs a platform + catalog + fields'), 400);
+    const wh = input.warehouse;
+    let split: { config: Record<string, string>; secrets: Record<string, string> };
+    try {
+      split = splitWarehouseFields({ platform: wh.platform, catalog: wh.catalog, fields: wh.fields });
+    } catch (e) {
+      throw withStatus(e as Error, (e as Error & { status?: number }).status ?? 400);
+    }
+    const secretName = `connection-${slug}`;
+    // Store each secret field under its own key in the connection's vault secret.
+    let anySecret = false;
+    for (const [key, value] of Object.entries(split.secrets)) {
+      putSecret(secretName, key, value);
+      anySecret = true;
+    }
+    // A stable primary ref so the record has a secretRef even when a platform (Glue)
+    // needs no secret material at all (IRSA) — points at the connection's secret name.
+    const secretRef = { name: secretName, key: providerFor(wh.platform).secretMaterial.secretKeys[0] ?? 'warehouse-secret' };
+    const warehouse: WarehouseConnectionConfig = { platform: wh.platform, catalog: wh.catalog, config: split.config };
+    const tools = tpl.tools.map((tool) => ({ ...tool, limits: tool.limits ? { ...tool.limits } : undefined }));
+    const tW = now();
+    const cW: Connection = {
+      id: id('conn'),
+      name,
+      type: tpl.type,
+      connector: tpl.connector,
+      auth: tpl.auth,
+      template: tpl.key,
+      endpoint: `catalog:${wh.catalog}`,
+      principal,
+      owner: user.id,
+      domain,
+      visibility: 'Personal',
+      mode: 'untested',
+      secretRef,
+      secretSet: anySecret,
+      secretFingerprint: anySecret ? secretFingerprint(secretRef) : '',
+      // Federation reaches an external metastore/object store — a real egress, but it
+      // is the Trino POD that egresses (GitOps-configured), not this app. Mark it
+      // non-external here so the app never claims to proxy the warehouse itself.
+      egress: { external: false, host: wh.catalog, allowed: true },
+      tools,
+      grants: [],
+      health: 'untested',
+      dataUsage: null,
+      warehouse,
+      createdAt: tW,
+      updatedAt: tW,
+    };
+    map.set(cW.id, cW);
+    compileProfile(cW);
+    writeThrough(cW);
+    void trace({
+      principal,
+      tool: 'generate',
+      input: { action: 'create_connection', name, type: tpl.type, warehouse: { platform: wh.platform, catalog: wh.catalog }, secretRef },
+      output: { connectionId: cW.id, exposed: exposedConnectionTools(principal), secretKeys: Object.keys(split.secrets) },
+      decision: 'allow',
+    });
+    return cW;
+  }
 
   // Egress guardrail: an external endpoint must be on the allowlist (Admin
   // guardrail; or an Admin-approved request). Checked BEFORE any credential use.
@@ -250,6 +527,29 @@ export async function createConnection(
     grants: [],
     health: 'untested',
     dataUsage: null,
+    // For an om-catalog connection, stamp the optional default OM Service (non-secret).
+    ...(tpl.key === 'om-catalog' ? { om: { service: (input.omService ?? '').trim() || undefined } } : {}),
+    // For an airflow connection, stamp the non-secret REST config (auth type, Basic
+    // username, optional trigger allowlist). The password/token stays in the vault.
+    ...(tpl.key === 'airflow'
+      ? {
+          airflow: {
+            authType: input.airflow?.authType ?? 'bearer',
+            username: (input.airflow?.username ?? '').trim() || undefined,
+            dagAllowlist: (input.airflow?.dagAllowlist ?? []).map((d) => d.trim()).filter(Boolean),
+          } satisfies AirflowConnectionConfig,
+        }
+      : {}),
+    // For an atlassian connection, stamp the non-secret auth config (Basic API-token
+    // + account email, or OAuth bearer). The token stays in the vault.
+    ...(tpl.key === 'atlassian'
+      ? {
+          atlassian: {
+            authKind: input.atlassian?.authKind ?? 'basic',
+            email: (input.atlassian?.email ?? '').trim() || undefined,
+          } satisfies AtlassianConnectionConfig,
+        }
+      : {}),
     createdAt: t,
     updatedAt: t,
   };
@@ -284,9 +584,10 @@ export async function updateCapabilities(
   const map = await getCache();
   const c = map.get(connId);
   if (!c) throw withStatus(new Error('Connection not found'), 404);
-  const isOwner = c.owner === user.id;
-  const isDomainAdmin = user.role === 'admin' && user.domains.includes(c.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to edit this connection'), 403);
+  // Fail-closed edit-scope: owner, domain_admin of the owning domain, or admin.
+  if (!canManageArtifact(user, manageArg(c))) {
+    throw withStatus(new Error('Not permitted to edit this connection'), 403);
+  }
   if (!roleAtLeast(user.role, 'builder')) {
     throw withStatus(new Error('Editing capabilities requires a Builder or Administrator'), 403);
   }
@@ -326,14 +627,261 @@ export async function updateCapabilities(
 // ---------------------------------------------------------------------- Test ---
 
 /**
+ * Per-template health probe registry — mirrors `CONNECTION_EXECUTORS`. Each entry
+ * is a function that performs the real round-trip for its template and returns an
+ * honest `{ ok, mode, detail }`. Adding a new connector requires only one new entry
+ * here (and in `CONNECTION_EXECUTORS`) — `testConnection` never needs editing.
+ *
+ * VERBATIM logic per template: same health client, same secret handling via
+ * `getSecretServerSide` (inside each connector's `*ConnFrom` helper), same
+ * never-fake-green semantics. The `c` reference is mutated in-place (mode/health/
+ * updatedAt) and flushed by the caller.
+ */
+type HealthFn = (c: Connection) => Promise<{ ok: boolean; mode: 'live' | 'offline'; detail: string }>;
+
+// AIRFLOW: the honest test is a real, unauthenticated health probe against the
+// Airflow REST API (v2 /api/v2/monitor/health, falling back to v1 /api/v1/health).
+// ANY HTTP response ⇒ Airflow is reachable (live); a network error/timeout ⇒
+// offline. Never a stub — and the credential is never sent on the health probe.
+//
+// GITHUB: real GET /user with the vaulted PAT. A 2xx proves the token is live;
+// a 401 is an honest ✗ (never a fake green). Token stays server-side only.
+//
+// SUPABASE: real GET /v1/projects with the vaulted management PAT (sbp_…).
+// A 2xx proves the token is live; a 401 is an honest ✗. Token stays server-side.
+//
+// ATLASSIAN: real GET of the current user (Jira `/rest/api/3/myself`) with the
+// vaulted token. A 2xx proves auth; a 401 is an honest ✗. Token stays server-side.
+//
+// SLACK: real GET auth.test with the vaulted bot token. ok:true proves auth; an
+// invalid_auth body is an honest ✗. Never a stub; the token stays server-side.
+//
+// GMAIL: real GET users/me/profile with the vaulted OAuth access token. A 2xx
+// proves the token is live; a 401 is an honest ✗. Token stays server-side.
+//
+// GOOGLE CALENDAR: real GET users/me/calendarList with the vaulted OAuth token.
+//
+// OUTLOOK: real GET /me over Microsoft Graph with the vaulted OAuth token.
+//
+// TEAMS: real GET /me over Microsoft Graph with the vaulted OAuth token.
+//
+// ENTRA: real GET /me over Microsoft Graph with the vaulted OAuth token.
+//
+// PURVIEW: real GET of the classification typedefs over the account's Atlas URL.
+//
+// AI FOUNDRY: real GET of the model registry over the workspace/region base.
+//
+// SAGEMAKER: real signed ListModels round-trip (SigV4) with the vaulted AWS keys.
+//
+// GCP IDENTITY: real JWT-bearer token exchange + a projects list (pageSize 1) with
+// the vaulted service-account JSON key. 2xx ⇒ live; a rejected key is an honest ✗.
+//
+// SNOWFLAKE GOVERNANCE: real key-pair-JWT `SELECT CURRENT_ACCOUNT()` over the SQL
+// REST API with the vaulted RSA key. 2xx ⇒ live; a rejected key is an honest ✗.
+const CONNECTION_HEALTH: Partial<Record<ConnectionTemplateKey, HealthFn>> = {
+  airflow: async (c) => {
+    const h = await airflowHealth(airflowConnFor(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Airflow at ${c.egress.host} is reachable${h.detail ? ` (${h.detail})` : ''}. The token is never sent on the health probe.` }
+      : { ok: false, mode: 'offline', detail: `Airflow at ${c.egress.host} is unreachable (${h.reason ?? 'network error'}) — check the base URL + egress, then re-test.` };
+  },
+  github: async (c) => {
+    const h = await githubHealth(githubConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `GitHub is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `GitHub is unreachable (${h.reason ?? 'network error'}) — check the token + egress, then re-test.` };
+  },
+  supabase: async (c) => {
+    const h = await supabaseHealth(supabaseConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Supabase Management API is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Supabase is unreachable (${h.reason ?? 'network error'}) — check the access token + egress, then re-test.` };
+  },
+  atlassian: async (c) => {
+    const h = await atlassianHealth(atlassianConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Atlassian at ${c.egress.host} is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Atlassian at ${c.egress.host} is unreachable (${h.reason ?? 'network error'}) — check the site URL, token + egress, then re-test.` };
+  },
+  slack: async (c) => {
+    const h = await slackHealth(slackConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Slack is reachable${h.detail ? ` (${h.detail})` : ''}. The bot token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Slack is unreachable (${h.reason ?? 'network error'}) — check the bot token + egress, then re-test.` };
+  },
+  gmail: async (c) => {
+    const h = await gmailHealth(googleMailConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Gmail is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Gmail is unreachable (${h.reason ?? 'network error'}) — the access token may be expired; refresh it + check egress, then re-test.` };
+  },
+  gcal: async (c) => {
+    const h = await gcalHealth(gcalConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Google Calendar is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Google Calendar is unreachable (${h.reason ?? 'network error'}) — the access token may be expired; refresh it + check egress, then re-test.` };
+  },
+  outlook: async (c) => {
+    const h = await outlookHealth(graphConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Outlook (Microsoft Graph) is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Outlook is unreachable (${h.reason ?? 'network error'}) — the access token may be expired; refresh it + check egress, then re-test.` };
+  },
+  teams: async (c) => {
+    const h = await teamsHealth(teamsConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Microsoft Teams (Graph) is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Teams is unreachable (${h.reason ?? 'network error'}) — the access token may be expired; refresh it + check egress, then re-test.` };
+  },
+  entra: async (c) => {
+    const h = await entraHealth(entraConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Microsoft Entra (Graph) is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Entra is unreachable (${h.reason ?? 'network error'}) — the access token may be expired; refresh it + check egress, then re-test.` };
+  },
+  purview: async (c) => {
+    const h = await purviewHealth(purviewConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Microsoft Purview is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Purview is unreachable (${h.reason ?? 'network error'}) — check the account URL + token, then re-test.` };
+  },
+  'ai-foundry': async (c) => {
+    const h = await aiFoundryHealth(aiFoundryConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Azure AI Foundry is reachable${h.detail ? ` (${h.detail})` : ''}. The token never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Azure AI Foundry is unreachable (${h.reason ?? 'network error'}) — check the workspace endpoint + token, then re-test.` };
+  },
+  sagemaker: async (c) => {
+    const h = await sagemakerHealth(sagemakerConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `AWS SageMaker is reachable${h.detail ? ` (${h.detail})` : ''}. The AWS keys never leave the server.` }
+      : { ok: false, mode: 'offline', detail: `SageMaker is unreachable (${h.reason ?? 'network error'}) — check the region endpoint + IAM keys, then re-test.` };
+  },
+  'gcp-identity': async (c) => {
+    const h = await gcpIdentityHealth(gcpIdentityConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Google Cloud (Resource Manager + IAM) is reachable${h.detail ? ` (${h.detail})` : ''}. The service-account key never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Google Cloud is unreachable (${h.reason ?? 'network error'}) — check the service-account key + egress, then re-test.` };
+  },
+  'snowflake-governance': async (c) => {
+    const h = await snowflakeGovHealth(snowflakeGovConnFrom(c));
+    c.mode = h.connected ? 'live' : 'offline';
+    c.health = h.connected ? 'healthy' : 'needs-reconnect';
+    return h.connected
+      ? { ok: true, mode: 'live', detail: `Snowflake ACCOUNT_USAGE is reachable${h.detail ? ` (${h.detail})` : ''}. The RSA private key never leaves the server. Note: ACCOUNT_USAGE has ~2h latency and queries consume credits.` }
+      : { ok: false, mode: 'offline', detail: `Snowflake is unreachable (${h.reason ?? 'network error'}) — check the account/user + registered public key, then re-test.` };
+  },
+};
+
+/**
  * Test the connection inline. Retrieves the secret SERVER-SIDE (never returned to
  * the client) and probes the endpoint best-effort; offline returns a deterministic
  * ok so the flow works with no live endpoint. Never echoes the secret.
  */
-export async function testConnection(connId: string, user: CurrentUser): Promise<{ ok: boolean; mode: 'live' | 'offline'; detail: string }> {
+export async function testConnection(
+  connId: string,
+  user: CurrentUser,
+  opts: { probe?: (provider: OAuthProvider, token: string) => Promise<{ ok: boolean; status: number }> } = {},
+): Promise<{ ok: boolean; mode: 'live' | 'offline'; detail: string }> {
   const map = await getCache();
   const c = map.get(connId);
   if (!c || !visibleToUser(c, user)) throw withStatus(new Error('Connection not found'), 404);
+
+  // DRIVE (personal OAuth): the honest test is a real, read-only call to the
+  // provider (Google Drive `about.get` / Graph `/me/drive`) with the stored token.
+  // Success ⇒ genuinely connected; a needs-reconnect/none resolution or a non-2xx
+  // response is reported honestly — never a fake "ok". Governance: owner-only.
+  const driveProvider = c.type === 'Drive' && c.auth === 'oauth' ? providerForTemplate(c.template) : null;
+  if (driveProvider) {
+    if (c.owner !== user.id) throw withStatus(new Error('Only the connection owner can test this connection'), 403);
+    const probe = opts.probe ?? probeDrive;
+    const token = await resolveConnectionAccessToken(c.id, user.id); // silent refresh; owner-gated
+    if (!token) {
+      const reason =
+        c.health === 'needs-reconnect'
+          ? 'the stored token expired and could not be refreshed — click Reconnect'
+          : 'no account is connected yet — click Connect to authorize';
+      c.mode = 'offline';
+      c.updatedAt = now();
+      writeThrough(c);
+      return { ok: false, mode: 'offline', detail: `${providerConfig(driveProvider).label}: ${reason}.` };
+    }
+    const res = await probe(driveProvider, token);
+    c.mode = res.ok ? 'live' : 'offline';
+    c.health = res.ok ? 'healthy' : 'needs-reconnect';
+    c.updatedAt = now();
+    writeThrough(c);
+    return res.ok
+      ? { ok: true, mode: 'live', detail: `${providerConfig(driveProvider).label}: live call succeeded — the connected account's drive is reachable. The token is never sent to the browser.` }
+      : { ok: false, mode: 'offline', detail: `${providerConfig(driveProvider).label}: the live API rejected the stored token (HTTP ${res.status || 'unreachable'}) — click Reconnect.` };
+  }
+
+  // WAREHOUSE: the honest test is the provider's probe. When the probe is `sql` the
+  // live check is running `SHOW SCHEMAS FROM <catalog>` through the governed query
+  // path — but that only works once an operator has registered the catalog in Trino
+  // (a GitOps step). Until then, and for `none`-probe platforms, we honestly report
+  // "credential present; the live probe is the operator's step", never a fake ok.
+  if (c.template === 'warehouse' && c.warehouse) {
+    const provider = providerFor(c.warehouse.platform);
+    const source = toWarehouseSource({ platform: c.warehouse.platform, catalog: c.warehouse.catalog, config: c.warehouse.config });
+    if (provider.testProbe.kind === 'none') {
+      c.updatedAt = now();
+      writeThrough(c);
+      return { ok: true, mode: 'offline', detail: `Config valid for ${provider.label}. No safe live probe exists (${provider.testProbe.reason}) — reachability is the operator's step on a live tenant.` };
+    }
+    const query = provider.testProbe.query(source);
+    try {
+      const res = await queryRun(query, c.domain, c.domain);
+      c.mode = 'live';
+      c.health = 'healthy';
+      c.updatedAt = now();
+      writeThrough(c);
+      return { ok: true, mode: 'live', detail: `Ran \`${query}\` through the governed query path — ${res.rowCount} schema(s) visible in catalog '${c.warehouse.catalog}'.` };
+    } catch (e) {
+      c.updatedAt = now();
+      writeThrough(c);
+      return { ok: true, mode: 'offline', detail: `Config valid; catalog '${c.warehouse.catalog}' is not queryable yet (${(e as Error).message}). Register it in Trino (values.trino.externalCatalogs) + rolling-restart, then re-test.` };
+    }
+  }
+
+  // Registered connectors: look up the per-template health probe in CONNECTION_HEALTH.
+  // Each entry performs a real round-trip and mutates c.mode/c.health in-place.
+  // Unknown templates fall through to the generic credential-presence check below.
+  const healthFn = CONNECTION_HEALTH[c.template];
+  if (healthFn) {
+    c.updatedAt = now();
+    const result = await healthFn(c);
+    writeThrough(c);
+    return result;
+  }
 
   const secret = getSecretServerSide(c.secretRef); // server-side only
   if (!secret) {
@@ -370,6 +918,236 @@ export async function testConnection(connId: string, user: CurrentUser): Promise
   };
 }
 
+// ---------------------------------------------------------------- Warehouse ---
+
+/** The identity threaded to the governed WRITE path (mirrors the data store's shape). */
+function executeIdentity(user: CurrentUser): ExecuteIdentity {
+  return { principal: user.domains[0] ?? user.id, uid: user.id, domains: user.domains, role: user.role };
+}
+
+/**
+ * The GitOps registration snippet for a warehouse connection: the Trino catalog
+ * props + the exact `values.trino.externalCatalogs` entry an operator pastes, plus
+ * the secret env vars + OM hint. Registration is a values edit + rolling restart
+ * (the pod's catalog dir is a read-only ConfigMap) — this returns what to apply, it
+ * never mutates the cluster. Visible to anyone who can see the connection.
+ */
+export async function warehouseRegistration(connId: string, user: CurrentUser): Promise<CatalogRegistration> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c || !visibleToUser(c, user)) throw withStatus(new Error('Connection not found'), 404);
+  if (c.template !== 'warehouse' || !c.warehouse) throw withStatus(new Error('Not a warehouse connection'), 400);
+  const source = toWarehouseSource({ platform: c.warehouse.platform, catalog: c.warehouse.catalog, config: c.warehouse.config });
+  return catalogRegistration(source);
+}
+
+// -------------------------------------------------------- Warehouse discovery ---
+
+/** One discovered schema/table pair, shaped so the UI can render a browse tree. */
+export type DiscoveryResult = {
+  ok: boolean;
+  mode: 'live' | 'offline';
+  catalog: string;
+  /** Schemas visible in the catalog (from SHOW SCHEMAS). */
+  schemas: string[];
+  /** Tables in the requested schema (from SHOW TABLES FROM <catalog>.<schema>). */
+  tables: string[];
+  /** The schema the tables belong to, when one was requested. */
+  schema: string | null;
+  detail: string;
+};
+
+/**
+ * DISCOVER a warehouse's schemas (and, given a schema, its tables) through the SAME
+ * governed query path `testConnection` probes with — running the provider's pure
+ * `SHOW SCHEMAS` / `SHOW TABLES` queries AS the caller's domain so Trino→OPA governs
+ * the reads. Requires the catalog to be registered + queryable in Trino; until then
+ * (and for a `none`-probe platform like Fabric that exposes no metastore) it honestly
+ * reports offline rather than inventing a listing. Visible to anyone who can see the
+ * connection (read-only).
+ */
+export async function discoverWarehouse(
+  connId: string,
+  user: CurrentUser,
+  opts: { schema?: string } = {},
+): Promise<DiscoveryResult> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c || !visibleToUser(c, user)) throw withStatus(new Error('Connection not found'), 404);
+  if (c.template !== 'warehouse' || !c.warehouse) throw withStatus(new Error('Not a warehouse connection'), 400);
+  const provider = providerFor(c.warehouse.platform);
+  const source = toWarehouseSource({ platform: c.warehouse.platform, catalog: c.warehouse.catalog, config: c.warehouse.config });
+  const catalog = c.warehouse.catalog;
+
+  // Honest: a platform whose metastore exposes no table listing (Fabric/OneLake) has
+  // no `discoverTables`. We say so instead of pretending to enumerate.
+  if (!provider.discoverTables) {
+    return {
+      ok: false,
+      mode: 'offline',
+      catalog,
+      schemas: [],
+      tables: [],
+      schema: null,
+      detail: `${provider.label} is not discoverable — OneLake exposes no metastore; provide explicit table locations when importing.`,
+    };
+  }
+
+  const schema = (opts.schema ?? '').trim();
+  // The SHOW SCHEMAS probe reuses the provider's testProbe (sql); guarded above.
+  const schemasQuery = provider.testProbe.kind === 'sql' ? provider.testProbe.query(source) : `SHOW SCHEMAS FROM ${catalog}`;
+  try {
+    const schemasRes = await queryRun(schemasQuery, c.domain, c.domain);
+    const schemas = schemasRes.rows.map((r) => String(r[0])).filter(Boolean);
+    let tables: string[] = [];
+    if (schema) {
+      // `discoverTables` validates the schema identifier (throws on bad input).
+      const tablesQuery = provider.discoverTables(source, schema);
+      const tablesRes = await queryRun(tablesQuery, c.domain, c.domain);
+      tables = tablesRes.rows.map((r) => String(r[0])).filter(Boolean);
+    }
+    void trace({
+      principal: c.principal,
+      tool: 'generate',
+      input: { action: 'discover_warehouse', by: user.id, catalog, schema: schema || null },
+      output: { schemas: schemas.length, tables: tables.length },
+      decision: 'allow',
+    });
+    return {
+      ok: true,
+      mode: 'live',
+      catalog,
+      schemas,
+      tables,
+      schema: schema || null,
+      detail: schema
+        ? `Discovered ${schemas.length} schema(s); ${tables.length} table(s) in '${schema}'.`
+        : `Discovered ${schemas.length} schema(s) in catalog '${catalog}'.`,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      mode: 'offline',
+      catalog,
+      schemas: [],
+      tables: [],
+      schema: schema || null,
+      detail: `Catalog '${catalog}' is not queryable yet (${(e as Error).message}). Register it (one-click Register, or values.trino.externalCatalogs + rolling restart), then retry.`,
+    };
+  }
+}
+
+// ------------------------------------------------------- Warehouse registration ---
+
+export type RegisterWarehouseResult = RegisterK8sOutcome;
+
+/**
+ * ONE-CLICK REGISTER a warehouse connection as a LIVE Trino catalog — no values edit,
+ * no manual helm. Renders the connection's `catalogRegistration()` (the exact props +
+ * secret env plumbing), reads the connection's vaulted secret VALUES server-side (never
+ * returned), and applies them to the cluster via {@link applyLiveRegistration}: merge the
+ * `<catalog>.properties` into the live `trino-catalog` ConfigMap, materialize a
+ * `trino-ext-<catalog>` Secret + patch the Trino env for the provider's env vars (keyless
+ * platforms emit NO secret), and roll the Trino Deployment. Governed: Builder/Admin with
+ * edit rights on the connection; audit-logged; honest failure surfaced. `k8s` is
+ * injectable for tests.
+ */
+export async function registerWarehouseCatalog(
+  connId: string,
+  user: CurrentUser,
+  opts: { k8s?: RegK8s } = {},
+): Promise<RegisterWarehouseResult> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c || !visibleToUser(c, user)) throw withStatus(new Error('Connection not found'), 404);
+  if (c.template !== 'warehouse' || !c.warehouse) throw withStatus(new Error('Not a warehouse connection'), 400);
+  // Governed: registering a live catalog writes cluster state — edit rights + Builder+.
+  if (!canManageArtifact(user, manageArg(c))) {
+    throw withStatus(new Error('Not permitted to register this connection'), 403);
+  }
+  if (!roleAtLeast(user.role, 'builder')) {
+    throw withStatus(new Error('Registering a warehouse catalog requires a Builder or Administrator'), 403);
+  }
+
+  const source = toWarehouseSource({ platform: c.warehouse.platform, catalog: c.warehouse.catalog, config: c.warehouse.config });
+  const reg = catalogRegistration(source);
+
+  // Materialize the vaulted secret VALUES keyed by ENV-VAR name. The provider pairs
+  // secretKeys[i] ↔ envVars[i] (see each provider's secretMaterial). A keyless platform
+  // (Glue IRSA / BigQuery WI) has NO env vars → no values, no Secret emitted.
+  const provider = providerFor(c.warehouse.platform);
+  const { secretKeys, envVars } = provider.secretMaterial;
+  const values: SecretValues = {};
+  for (let i = 0; i < envVars.length; i++) {
+    const key = secretKeys[i];
+    // Each secret field is stored under its own key in the connection's vault secret.
+    const val = key ? getSecretServerSide({ name: c.secretRef.name, key }) : null;
+    if (val) values[envVars[i]] = val;
+  }
+
+  const outcome = await applyLiveRegistration(reg, values, { namespace: config.platformNamespace, k8s: opts.k8s });
+
+  // Reflect the outcome on the record so the UI can show "registered" honestly.
+  if (outcome.ok) {
+    c.updatedAt = now();
+    map.set(c.id, c);
+    writeThrough(c);
+  }
+  void trace({
+    principal: c.principal,
+    tool: 'generate',
+    input: { action: 'register_warehouse_catalog', by: user.id, catalog: reg.name, envVars }, // env-var NAMES only, never values
+    output: { ok: outcome.ok, live: outcome.live, steps: outcome.steps },
+    decision: outcome.ok ? 'allow' : 'deny',
+  });
+  return outcome;
+}
+
+/**
+ * IMPORT a federated external table into the OS Iceberg lakehouse as an owned data
+ * product — a governed CTAS run through the SAME `executeRun` promote/materialize
+ * path (Trino→OPA as the caller). Requires the provider to support import and the
+ * caller to be able to edit the connection. Returns the target FQN + the SQL run.
+ */
+export async function importWarehouseTable(
+  connId: string,
+  user: CurrentUser,
+  input: { schema: string; table: string; name?: string; targetDomain?: string },
+): Promise<{ ok: true; target: string; sql: string; rowsAffected: number | null }> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c || !visibleToUser(c, user)) throw withStatus(new Error('Connection not found'), 404);
+  if (c.template !== 'warehouse' || !c.warehouse) throw withStatus(new Error('Not a warehouse connection'), 400);
+  if (!canManageArtifact(user, manageArg(c))) {
+    throw withStatus(new Error('Not permitted to import from this connection'), 403);
+  }
+  const provider = providerFor(c.warehouse.platform);
+  if (!provider.capabilities.import) {
+    throw withStatus(new Error(`${provider.label} does not support import-as-product`), 400);
+  }
+  const targetDomain = input.targetDomain && user.domains.includes(input.targetDomain) ? input.targetDomain : c.domain;
+  const name = (input.name ?? input.table).trim();
+  let sql: string;
+  try {
+    sql = buildImportCtas(
+      { domain: targetDomain, name },
+      { catalog: c.warehouse.catalog, schema: input.schema, table: input.table },
+    );
+  } catch (e) {
+    throw withStatus(e as Error, (e as Error & { status?: number }).status ?? 400);
+  }
+  const res = await executeRun(sql, executeIdentity(user), targetDomain);
+  const target = `iceberg.${targetDomain}.${name}`;
+  void trace({
+    principal: c.principal,
+    tool: 'generate',
+    input: { action: 'import_warehouse_table', by: user.id, source: `${c.warehouse.catalog}.${input.schema}.${input.table}` },
+    output: { target, rowsAffected: res.rowsAffected },
+    decision: 'allow',
+  });
+  return { ok: true, target, sql, rowsAffected: res.rowsAffected };
+}
+
 // ------------------------------------------------------------------- Promote ---
 
 /**
@@ -385,7 +1163,7 @@ export async function promoteConnection(connId: string, user: CurrentUser): Prom
   }
   let next: Visibility;
   if (c.visibility === 'Personal') {
-    if (!canPromote(user.role, 'Personal')) throw withStatus(new Error('Promoting to Shared requires a Builder or Administrator'), 403);
+    if (!canPromote(user.role, 'Personal')) throw withStatus(new Error('Promoting to Shared requires a Domain admin or Administrator'), 403);
     next = 'Shared';
   } else if (c.visibility === 'Shared') {
     if (!canPromote(user.role, 'Shared')) throw withStatus(new Error('Listing in the Marketplace requires an Administrator'), 403);
@@ -401,6 +1179,45 @@ export async function promoteConnection(connId: string, user: CurrentUser): Prom
     principal: c.principal,
     tool: 'generate',
     input: { action: 'promote_connection', by: user.id, role: user.role },
+    output: { connectionId: c.id, visibility: next },
+    decision: 'allow',
+  });
+  return c;
+}
+
+/**
+ * Demotion (revoke sharing): the reverse of {@link promoteConnection}, one step
+ * down — Certified → Shared (admin only) → Personal (owner or in-domain
+ * builder/admin). Never deletes the connection; only lowers its visibility so it
+ * leaves the marketplace / domain surface. The effect seam is the primary gate.
+ */
+export async function demoteConnection(connId: string, user: CurrentUser): Promise<Connection> {
+  const map = await getCache();
+  const c = map.get(connId);
+  if (!c) throw withStatus(new Error('Connection not found'), 404);
+  if (!user.domains.includes(c.domain)) {
+    throw withStatus(new Error('You can only revoke sharing on connections in a domain you belong to'), 403);
+  }
+  let next: Visibility;
+  if (c.visibility === 'Certified') {
+    if (user.role !== 'admin') throw withStatus(new Error('Revoking from the Marketplace requires an Administrator'), 403);
+    next = 'Shared';
+  } else if (c.visibility === 'Shared') {
+    if (!canManageArtifact(user, manageArg(c))) {
+      throw withStatus(new Error('Unsharing requires the owner, an in-domain Domain admin, or an Administrator'), 403);
+    }
+    next = 'Personal';
+  } else {
+    throw withStatus(new Error('Already Personal — nothing to revoke'), 400);
+  }
+  c.visibility = next;
+  c.updatedAt = now();
+  map.set(c.id, c);
+  writeThrough(c);
+  void trace({
+    principal: c.principal,
+    tool: 'generate',
+    input: { action: 'demote_connection', by: user.id, role: user.role },
     output: { connectionId: c.id, visibility: next },
     decision: 'allow',
   });
@@ -423,9 +1240,10 @@ export async function grantToAgent(
   const map = await getCache();
   const c = map.get(connId);
   if (!c) throw withStatus(new Error('Connection not found'), 404);
-  const isOwner = c.owner === user.id;
-  const isDomainAdmin = user.role === 'admin' && user.domains.includes(c.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to grant this connection'), 403);
+  // Fail-closed edit-scope: owner, domain_admin of the owning domain, or admin.
+  if (!canManageArtifact(user, manageArg(c))) {
+    throw withStatus(new Error('Not permitted to grant this connection'), 403);
+  }
   if (!roleAtLeast(user.role, 'builder')) {
     throw withStatus(new Error('Granting a connection requires a Builder or Administrator'), 403);
   }
@@ -547,6 +1365,40 @@ export async function callConnectionTool(
   return runAllow(c, tool, args, input.asAgent, authz.reason, authz.mode);
 }
 
+/**
+ * A per-template EXECUTOR: runs one ALREADY-ALLOWED tool call against the real
+ * backing system and returns an honest result. The governance gate (Read auto /
+ * Write-approval / Blocked) has already been applied UPSTREAM in
+ * `callConnectionTool` — an executor is only reached once a call is allowed, and it
+ * NEVER throws (each hand-built client degrades to `{ ok:false, reason }`).
+ *
+ * This is the connector REGISTRY the CONNECTOR-STANDARD praises: instead of one
+ * growing `template === 'airflow' ? … : …` ternary, each real connector registers
+ * its dispatch here (mirroring `warehouse/registry.ts`), so connectors append
+ * cleanly on disjoint branches. A template with no entry falls through to the
+ * offline `executeMock` (the demonstrable, LABELLED offline path).
+ */
+type Executor = (c: Connection, tool: string, args: Record<string, unknown>) => Promise<unknown>;
+
+const CONNECTION_EXECUTORS: Partial<Record<ConnectionTemplateKey, Executor>> = {
+  airflow: (c, tool, args) => executeAirflow(c, tool, args),
+  github: (c, tool, args) => executeGithub(c, tool, args),
+  supabase: (c, tool, args) => executeSupabase(c, tool, args),
+  'notion-mcp': (c, tool, args) => executeNotion(c, tool, args),
+  atlassian: (c, tool, args) => executeAtlassian(c, tool, args),
+  slack: (c, tool, args) => executeSlack(c, tool, args),
+  gmail: (c, tool, args) => executeGmail(c, tool, args),
+  gcal: (c, tool, args) => executeGcal(c, tool, args),
+  outlook: (c, tool, args) => executeOutlook(c, tool, args),
+  teams: (c, tool, args) => executeTeams(c, tool, args),
+  entra: (c, tool, args) => executeEntra(c, tool, args),
+  purview: (c, tool, args) => executePurview(c, tool, args),
+  'ai-foundry': (c, tool, args) => executeAiFoundry(c, tool, args),
+  sagemaker: (c, tool, args) => executeSageMaker(c, tool, args),
+  'gcp-identity': (c, tool, args) => executeGcpIdentity(c, tool, args),
+  'snowflake-governance': (c, tool, args) => executeSnowflakeGov(c, tool, args),
+};
+
 /** Execute an allowed call: inject the secret SERVER-SIDE (never logged), trace + log egress. */
 async function runAllow(
   c: Connection,
@@ -556,8 +1408,25 @@ async function runAllow(
   reason: string,
   mode?: string,
 ): Promise<ToolCallResult> {
+  // CONNECTOR-STANDARD §3.3: egress allowlist re-checked before EVERY external call
+  // (fail-closed — mirrors the create-time check at ~line 465). An internal/offline
+  // endpoint (external:false) is always allowed; only external hosts are gated.
+  if (c.egress.external) {
+    const egress = isEgressAllowed(c.endpoint);
+    if (!egress.allowed) {
+      const tr = await trace({ principal: c.principal, tool, input: { args, asAgent }, output: { denied: `egress not allowed: ${egress.host}` }, decision: 'deny' });
+      return { tool, principal: c.principal, decision: 'deny', reason: `Egress to "${egress.host}" is not on the allowlist — an Administrator must approve it first`, traceId: tr.id };
+    }
+  }
+
   const secret = getSecretServerSide(c.secretRef);
-  const result = executeMock(c, tool, args, Boolean(secret));
+  // A registered executor hits the REAL API (the secret is injected server-side
+  // inside the client and never logged); every other connector uses the offline
+  // mock (the LABELLED demonstrable path). Look up the executor for this template.
+  const executor = CONNECTION_EXECUTORS[c.template];
+  const result = executor
+    ? await executor(c, tool, args)
+    : executeMock(c, tool, args, Boolean(secret));
   if (c.egress.external) logEgress({ host: c.egress.host, connectionId: c.id, tool }); // monitored egress
   const tr = await trace({
     principal: c.principal,
@@ -675,13 +1544,540 @@ export async function approveAndRemember(
 }
 
 /** Deterministic seed responses so the slice is demonstrable with no live endpoint. */
+/** Build the pure Airflow client config from a connection — the credential is
+ *  dereferenced from the vault HERE (server-side) and never leaves this process. */
+function airflowConnFor(c: Connection): AirflowConn {
+  const authType: AirflowAuthType = c.airflow?.authType ?? 'bearer';
+  return {
+    baseUrl: c.endpoint,
+    authType,
+    username: c.airflow?.username,
+    secret: getSecretServerSide(c.secretRef) ?? undefined,
+    fetchImpl: fetch,
+    timeoutMs: 4000,
+  };
+}
+
+/**
+ * Execute an ALLOWED Airflow tool against the real REST API. The governance gate
+ * (Read auto-allow · trigger_dag Write-approval) already passed upstream; here we
+ * only run the call and shape an honest result. `trigger_dag` additionally honours
+ * the connection's non-secret DAG allowlist as a bound. Never throws.
+ */
+async function executeAirflow(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = airflowConnFor(c);
+  const dagId = String(args.dagId ?? args.dag_id ?? '');
+  switch (tool) {
+    case 'list_dags': {
+      const r = await afListDags(conn);
+      return r.ok ? { connection: c.name, dags: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'get_dag_run': {
+      const runId = String(args.runId ?? args.dag_run_id ?? '');
+      if (!dagId || !runId) return { connection: c.name, ok: false, reason: 'get_dag_run needs a dagId and a runId' };
+      const r = await afGetDagRun(conn, dagId, runId);
+      return r.ok ? { connection: c.name, run: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'list_dag_runs': {
+      if (!dagId) return { connection: c.name, ok: false, reason: 'list_dag_runs needs a dagId' };
+      const limit = args.limit !== undefined ? Number(args.limit) : undefined;
+      const state = args.state ? String(args.state) : undefined;
+      const r = await afListDagRuns(conn, dagId, { limit, state });
+      return r.ok ? { connection: c.name, runs: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'get_task_instances': {
+      const runId = String(args.runId ?? args.dag_run_id ?? '');
+      if (!dagId || !runId) return { connection: c.name, ok: false, reason: 'get_task_instances needs a dagId and a runId' };
+      const r = await afGetTaskInstances(conn, dagId, runId);
+      return r.ok ? { connection: c.name, taskInstances: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'get_task_logs': {
+      const runId = String(args.runId ?? args.dag_run_id ?? '');
+      const taskId = String(args.taskId ?? args.task_id ?? '');
+      if (!dagId || !runId || !taskId) return { connection: c.name, ok: false, reason: 'get_task_logs needs a dagId, runId and taskId' };
+      const tryNumber = args.tryNumber !== undefined ? Number(args.tryNumber) : undefined;
+      const r = await afGetTaskLogs(conn, dagId, runId, taskId, { tryNumber });
+      return r.ok ? { connection: c.name, logs: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'get_xcom': {
+      const runId = String(args.runId ?? args.dag_run_id ?? '');
+      const taskId = String(args.taskId ?? args.task_id ?? '');
+      if (!dagId || !runId || !taskId) return { connection: c.name, ok: false, reason: 'get_xcom needs a dagId, runId and taskId' };
+      const key = args.key ? String(args.key) : undefined;
+      const r = await afGetXcom(conn, dagId, runId, taskId, { key });
+      return r.ok ? { connection: c.name, xcom: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'list_datasets': {
+      const limit = args.limit !== undefined ? Number(args.limit) : undefined;
+      const r = await afListDatasets(conn, limit);
+      return r.ok ? { connection: c.name, datasets: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'get_dataset_events': {
+      const limit = args.limit !== undefined ? Number(args.limit) : undefined;
+      const r = await afGetDatasetEvents(conn, limit);
+      return r.ok ? { connection: c.name, events: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'pause_dag':
+    case 'unpause_dag': {
+      if (!dagId) return { connection: c.name, ok: false, reason: `${tool} needs a dagId` };
+      if (!airflowDagAllowed(c, dagId)) return { connection: c.name, ok: false, reason: `DAG "${dagId}" is not on this connection's allowlist` };
+      const r = await afSetDagPaused(conn, dagId, tool === 'pause_dag');
+      return r.ok ? { connection: c.name, dag: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'clear_task': {
+      const runId = String(args.runId ?? args.dag_run_id ?? '');
+      if (!dagId || !runId) return { connection: c.name, ok: false, reason: 'clear_task needs a dagId and a runId' };
+      if (!airflowDagAllowed(c, dagId)) return { connection: c.name, ok: false, reason: `DAG "${dagId}" is not on this connection's allowlist` };
+      const taskIds = Array.isArray(args.taskIds) ? (args.taskIds as unknown[]).map(String)
+        : Array.isArray(args.task_ids) ? (args.task_ids as unknown[]).map(String) : undefined;
+      const onlyFailed = Boolean(args.onlyFailed ?? args.only_failed);
+      const r = await afClearTask(conn, dagId, runId, { taskIds, onlyFailed });
+      return r.ok ? { connection: c.name, cleared: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    case 'trigger_dag': {
+      if (!dagId) return { connection: c.name, ok: false, reason: 'trigger_dag needs a dagId' };
+      if (!airflowDagAllowed(c, dagId)) return { connection: c.name, ok: false, reason: `DAG "${dagId}" is not on this connection's trigger allowlist` };
+      const conf = (args.conf && typeof args.conf === 'object') ? (args.conf as Record<string, unknown>) : undefined;
+      const logicalDate = args.logicalDate ? String(args.logicalDate) : (args.logical_date ? String(args.logical_date) : undefined);
+      const r = await afTriggerDag(conn, dagId, conf, logicalDate);
+      return r.ok ? { connection: c.name, triggered: r.data } : { connection: c.name, ok: false, reason: r.reason };
+    }
+    default:
+      return { connection: c.name, ok: false, reason: `Unknown Airflow tool: ${tool}` };
+  }
+}
+
+/**
+ * Execute an ALLOWED GitHub tool against the real REST API. The governance gate
+ * (reads auto · writes Write-approval · deletes Blocked) already passed upstream;
+ * here we only run the call and shape an honest result. Never throws — the client
+ * degrades to `{ ok:false, reason }` and we surface it as `{ ok:false, reason }`.
+ */
+async function executeGithub(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = githubConnFrom(c);
+  const repo = String(args.repo ?? args.repository ?? '');
+  const number = Number(args.number ?? args.issue ?? args.pull ?? 0);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_repos':
+      return done(await ghListRepos(conn), 'repos');
+    case 'get_repo':
+      return done(await ghGetRepo(conn, repo), 'repo');
+    case 'list_issues':
+      return done(await ghListIssues(conn, repo, { state: args.state ? String(args.state) : undefined }), 'issues');
+    case 'get_issue':
+      if (!number) return fail('get_issue needs a number');
+      return done(await ghGetIssue(conn, repo, number), 'issue');
+    case 'search_code':
+      return done(await ghSearchCode(conn, String(args.query ?? args.q ?? '')), 'results');
+    case 'list_pull_requests':
+      return done(await ghListPulls(conn, repo, { state: args.state ? String(args.state) : undefined }), 'pullRequests');
+    case 'get_pull_request':
+      if (!number) return fail('get_pull_request needs a number');
+      return done(await ghGetPull(conn, repo, number), 'pullRequest');
+    case 'list_commits':
+      return done(await ghListCommits(conn, repo), 'commits');
+    case 'create_issue':
+      return done(await ghCreateIssue(conn, repo, { title: String(args.title ?? ''), body: args.body ? String(args.body) : undefined }), 'issue');
+    case 'add_issue_comment':
+      if (!number) return fail('add_issue_comment needs a number');
+      return done(await ghAddIssueComment(conn, repo, number, String(args.body ?? '')), 'comment');
+    case 'create_pull_request':
+      return done(await ghCreatePullRequest(conn, repo, {
+        title: String(args.title ?? ''),
+        head: String(args.head ?? ''),
+        base: String(args.base ?? ''),
+        body: args.body ? String(args.body) : undefined,
+      }), 'pullRequest');
+    default:
+      return fail(`Unknown GitHub tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Supabase Management-API tool. Governance already passed
+ * upstream (reads auto · execute_sql Write-approval + DDL-refused · apply_migration/
+ * deploy_edge_function Blocked). Never throws. Service-role keys are never surfaced.
+ */
+async function executeSupabase(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = supabaseConnFrom(c);
+  const ref = String(args.ref ?? args.project ?? args.projectRef ?? '');
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data } : fail(r.reason);
+  const needsRef = (): string | null => (ref ? null : `${tool} needs a project ref`);
+  switch (tool) {
+    case 'list_projects':
+      return done(await sbListProjects(conn), 'projects');
+    case 'list_tables':
+      return needsRef() ? fail(needsRef()!) : done(await sbListTables(conn, ref), 'tables');
+    case 'list_migrations':
+      return needsRef() ? fail(needsRef()!) : done(await sbListMigrations(conn, ref), 'migrations');
+    case 'get_advisors':
+      return needsRef() ? fail(needsRef()!) : done(await sbGetAdvisors(conn, ref, args.type === 'performance' ? 'performance' : 'security'), 'advisors');
+    case 'get_logs':
+      return needsRef() ? fail(needsRef()!) : done(await sbGetLogs(conn, ref), 'logs');
+    case 'get_project_url':
+      return needsRef() ? fail(needsRef()!) : done(await sbGetProjectUrl(conn, ref), 'project');
+    case 'execute_sql':
+      return needsRef() ? fail(needsRef()!) : done(await sbExecuteSql(conn, ref, String(args.sql ?? args.query ?? '')), 'result');
+    default:
+      return fail(`Unknown Supabase tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Atlassian (Jira + Confluence) tool. Governance already passed
+ * upstream (reads auto · writes Write-approval · deletes Blocked). Never throws.
+ */
+async function executeAtlassian(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = atlassianConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'jira_search_issues':
+      return done(await atlJiraSearchIssues(conn, String(args.jql ?? args.query ?? '')), 'issues');
+    case 'jira_get_issue':
+      return done(await atlJiraGetIssue(conn, String(args.key ?? args.issue ?? '')), 'issue');
+    case 'jira_list_projects':
+      return done(await atlJiraListProjects(conn), 'projects');
+    case 'confluence_search':
+      return done(await atlConfluenceSearch(conn, String(args.cql ?? args.query ?? '')), 'results');
+    case 'confluence_get_page':
+      return done(await atlConfluenceGetPage(conn, String(args.id ?? args.pageId ?? '')), 'page');
+    case 'jira_create_issue':
+      return done(await atlJiraCreateIssue(conn, {
+        projectKey: String(args.projectKey ?? args.project ?? ''),
+        issueType: String(args.issueType ?? args.type ?? 'Task'),
+        summary: String(args.summary ?? args.title ?? ''),
+        description: args.description ? String(args.description) : undefined,
+      }), 'issue');
+    case 'jira_add_comment':
+      return done(await atlJiraAddComment(conn, String(args.key ?? args.issue ?? ''), String(args.body ?? args.comment ?? '')), 'comment');
+    case 'jira_transition_issue':
+      return done(await atlJiraTransitionIssue(conn, String(args.key ?? args.issue ?? ''), String(args.transitionId ?? args.transition ?? '')), 'transition');
+    case 'confluence_create_page':
+      return done(await atlConfluenceCreatePage(conn, {
+        spaceKey: String(args.spaceKey ?? args.space ?? ''),
+        title: String(args.title ?? ''),
+        body: String(args.body ?? args.content ?? ''),
+      }), 'page');
+    default:
+      return fail(`Unknown Atlassian tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Notion tool against the REAL Notion API using the token the
+ * hosted-MCP OAuth flow already stored. Governance already passed upstream (reads
+ * auto · notion_create_page Write-approval · delete Blocked). Never throws. This
+ * makes the already-user-visible Notion connector HONEST (was executeMock fixtures).
+ */
+async function executeNotion(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = notionConnFor(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data } : fail(r.reason);
+  switch (tool) {
+    case 'notion_search':
+      return done(await apiNotionSearch(conn, String(args.query ?? args.q ?? '')), 'results');
+    case 'notion_get_page':
+      return done(await apiNotionGetPage(conn, String(args.id ?? args.pageId ?? '')), 'page');
+    case 'notion_create_page':
+      return done(await apiNotionCreatePage(conn, {
+        parentId: String(args.parentId ?? args.parent ?? ''),
+        title: String(args.title ?? ''),
+        text: args.text ? String(args.text) : undefined,
+      }), 'page');
+    default:
+      return fail(`Unknown Notion tool: ${tool}`);
+  }
+}
+
+/** Build the pure Notion API client config — the OAuth access token is resolved from
+ *  the vault HERE (server-side) and never leaves this process. */
+function notionConnFor(c: Connection) {
+  return notionConnFrom(c, readTokens(c.secretRef)?.accessToken);
+}
+
+/**
+ * Execute an ALLOWED Slack Web API tool. Governance already passed upstream (reads
+ * auto · post_message Write-approval · delete_message Blocked). Never throws. The
+ * bot token is injected server-side inside the client and never logged/returned.
+ */
+async function executeSlack(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = slackConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_channels':
+      return done(await slkListChannels(conn), 'channels');
+    case 'list_users':
+      return done(await slkListUsers(conn), 'users');
+    case 'conversations_history':
+      return done(await slkConversationsHistory(conn, String(args.channel ?? args.channelId ?? ''), { limit: args.limit !== undefined ? Number(args.limit) : undefined }), 'messages');
+    case 'post_message':
+      return done(await slkPostMessage(conn, { channel: String(args.channel ?? ''), text: String(args.text ?? '') }), 'posted');
+    default:
+      return fail(`Unknown Slack tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Gmail tool. Governance already passed upstream (reads auto ·
+ * send_message/create_draft Write-approval — NEVER auto-send · trash/delete Blocked).
+ * Never throws. The OAuth access token is injected server-side, never logged/returned.
+ */
+async function executeGmail(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = googleMailConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_messages':
+      return done(await gmailListMessages(conn, { query: args.query ? String(args.query) : undefined }), 'messages');
+    case 'get_message':
+      return done(await gmailGetMessage(conn, String(args.id ?? args.messageId ?? '')), 'message');
+    case 'list_labels':
+      return done(await gmailListLabels(conn), 'labels');
+    case 'send_message':
+      return done(await gmailSendMessage(conn, { to: String(args.to ?? ''), subject: String(args.subject ?? ''), body: String(args.body ?? args.text ?? '') }), 'sent');
+    case 'create_draft':
+      return done(await gmailCreateDraft(conn, { to: String(args.to ?? ''), subject: String(args.subject ?? ''), body: String(args.body ?? args.text ?? '') }), 'draft');
+    default:
+      return fail(`Unknown Gmail tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Google Calendar tool. Governance already passed upstream (reads
+ * auto · create/update event Write-approval · delete_event Blocked). Never throws.
+ */
+async function executeGcal(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = gcalConnFrom(c);
+  const cal = String(args.calendarId ?? args.calendar ?? 'primary');
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_calendars':
+      return done(await gcalListCalendars(conn), 'calendars');
+    case 'list_events':
+      return done(await gcalListEvents(conn, cal, { timeMin: args.timeMin ? String(args.timeMin) : undefined }), 'events');
+    case 'get_event':
+      return done(await gcalGetEvent(conn, cal, String(args.id ?? args.eventId ?? '')), 'event');
+    case 'create_event':
+      return done(await gcalCreateEvent(conn, cal, { summary: String(args.summary ?? args.title ?? ''), start: String(args.start ?? ''), end: String(args.end ?? ''), description: args.description ? String(args.description) : undefined }), 'event');
+    case 'update_event':
+      return done(await gcalUpdateEvent(conn, cal, String(args.id ?? args.eventId ?? ''), { summary: args.summary ? String(args.summary) : undefined, start: args.start ? String(args.start) : undefined, end: args.end ? String(args.end) : undefined, description: args.description ? String(args.description) : undefined }), 'event');
+    default:
+      return fail(`Unknown Google Calendar tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Outlook tool over Microsoft Graph. Governance already passed
+ * upstream (reads auto · send_mail/create_draft Write-approval — NEVER auto-send ·
+ * delete Blocked). Never throws. The OAuth access token is injected server-side.
+ */
+async function executeOutlook(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = graphConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_messages':
+      return done(await outlookListMessages(conn, { search: args.search ? String(args.search) : undefined }), 'messages');
+    case 'get_message':
+      return done(await outlookGetMessage(conn, String(args.id ?? args.messageId ?? '')), 'message');
+    case 'send_mail':
+      return done(await outlookSendMail(conn, { to: String(args.to ?? ''), subject: String(args.subject ?? ''), body: String(args.body ?? args.text ?? '') }), 'sent');
+    case 'create_draft':
+      return done(await outlookCreateDraft(conn, { to: String(args.to ?? ''), subject: String(args.subject ?? ''), body: String(args.body ?? args.text ?? '') }), 'draft');
+    default:
+      return fail(`Unknown Outlook tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Microsoft Teams tool over Microsoft Graph. Governance already
+ * passed upstream (reads auto · post_channel_message Write-approval · delete Blocked).
+ * Never throws. The OAuth access token is injected server-side, never logged/returned.
+ */
+async function executeTeams(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = teamsConnFrom(c);
+  const team = String(args.teamId ?? args.team ?? '');
+  const channel = String(args.channelId ?? args.channel ?? '');
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_teams':
+      return done(await teamsListTeams(conn), 'teams');
+    case 'list_channels':
+      return done(await teamsListChannels(conn, team), 'channels');
+    case 'list_channel_messages':
+      return done(await teamsListChannelMessages(conn, team, channel), 'messages');
+    case 'post_channel_message':
+      return done(await teamsPostChannelMessage(conn, team, channel, String(args.text ?? args.body ?? '')), 'posted');
+    default:
+      return fail(`Unknown Teams tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Microsoft Entra tool over Microsoft Graph. READ-ONLY connector —
+ * every tool is a read (governance already passed upstream). Never throws. The OAuth
+ * access token is injected server-side, never logged/returned.
+ */
+async function executeEntra(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = entraConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_users':
+      return done(await entraListUsers(conn, { search: args.search ? String(args.search) : undefined }), 'users');
+    case 'get_user':
+      return done(await entraGetUser(conn, String(args.id ?? args.userId ?? args.userPrincipalName ?? '')), 'user');
+    case 'list_groups':
+      return done(await entraListGroups(conn), 'groups');
+    case 'list_role_assignments':
+      return done(await entraListRoleAssignments(conn), 'roleAssignments');
+    default:
+      return fail(`Unknown Entra tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Microsoft Purview tool over the account's Atlas/Purview URL.
+ * READ-ONLY connector — every tool is a read. Never throws. The OAuth access token is
+ * injected server-side, never logged/returned.
+ */
+async function executePurview(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = purviewConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'search_assets':
+      return done(await purviewSearchAssets(conn, String(args.keywords ?? args.query ?? args.q ?? '')), 'assets');
+    case 'get_asset':
+      return done(await purviewGetAsset(conn, String(args.guid ?? args.id ?? '')), 'asset');
+    case 'list_classifications':
+      return done(await purviewListClassifications(conn), 'classifications');
+    case 'get_lineage':
+      return done(await purviewGetLineage(conn, String(args.guid ?? args.id ?? '')), 'lineage');
+    default:
+      return fail(`Unknown Purview tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Azure AI Foundry tool over the workspace/region base. READ-ONLY
+ * connector — every tool is a read. Never throws. The OAuth access token is injected
+ * server-side, never logged/returned.
+ */
+async function executeAiFoundry(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = aiFoundryConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_models':
+      return done(await aiFoundryListModels(conn), 'models');
+    case 'list_deployments':
+      return done(await aiFoundryListDeployments(conn), 'deployments');
+    case 'get_deployment':
+      return done(await aiFoundryGetDeployment(conn, String(args.name ?? args.deployment ?? '')), 'deployment');
+    default:
+      return fail(`Unknown Azure AI Foundry tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED AWS SageMaker tool over api.sagemaker.<region>.amazonaws.com.
+ * READ-ONLY connector — every tool is a read. Never throws. The AWS keys are injected
+ * server-side (SigV4-signed), never logged/returned.
+ */
+async function executeSageMaker(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = sagemakerConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_models':
+      return done(await sagemakerListModels(conn), 'models');
+    case 'list_endpoints':
+      return done(await sagemakerListEndpoints(conn), 'endpoints');
+    case 'list_training_jobs':
+      return done(await sagemakerListTrainingJobs(conn), 'trainingJobs');
+    case 'describe_endpoint':
+      return done(await sagemakerDescribeEndpoint(conn, String(args.name ?? args.endpointName ?? '')), 'endpoint');
+    default:
+      return fail(`Unknown SageMaker tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Google Cloud identity/IAM governance tool over Cloud Resource
+ * Manager + IAM. READ-ONLY connector — every tool is a read. Never throws. The
+ * service-account key is dereferenced server-side, signs a JWT exchanged for a
+ * read-only OAuth2 bearer, and never leaves the process.
+ */
+async function executeGcpIdentity(c: Connection, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  const conn = gcpIdentityConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_projects':
+      return done(await gcpListProjects(conn), 'projects');
+    case 'get_iam_policy':
+      return done(await gcpGetIamPolicy(conn, String(args.projectId ?? args.project ?? args.id ?? '')), 'bindings');
+    case 'list_service_accounts':
+      return done(await gcpListServiceAccounts(conn, String(args.projectId ?? args.project ?? args.id ?? '')), 'serviceAccounts');
+    default:
+      return fail(`Unknown Google Cloud tool: ${tool}`);
+  }
+}
+
+/**
+ * Execute an ALLOWED Snowflake ACCOUNT_USAGE governance tool over the SQL REST API.
+ * READ-ONLY connector — every tool is a bounded SELECT built server-side (no user
+ * SQL). Never throws. The RSA private key signs a key-pair JWT server-side and never
+ * leaves the process. Note: ACCOUNT_USAGE has ~2h latency + consumes warehouse credits.
+ */
+async function executeSnowflakeGov(c: Connection, tool: string, _args: Record<string, unknown>): Promise<unknown> {
+  const conn = snowflakeGovConnFrom(c);
+  const fail = (reason: string) => ({ connection: c.name, ok: false, reason });
+  const done = <T>(r: { ok: true; data: T; truncated?: boolean } | { ok: false; reason: string }, key: string) =>
+    r.ok ? { connection: c.name, [key]: r.data, ...(('truncated' in r && r.truncated) ? { truncated: true } : {}) } : fail(r.reason);
+  switch (tool) {
+    case 'list_users':
+      return done(await snowflakeGovListUsers(conn), 'users');
+    case 'list_roles':
+      return done(await snowflakeGovListRoles(conn), 'roles');
+    case 'grants_to_users':
+      return done(await snowflakeGovGrantsToUsers(conn), 'grants');
+    case 'grants_to_roles':
+      return done(await snowflakeGovGrantsToRoles(conn), 'grants');
+    case 'login_history':
+      return done(await snowflakeGovLoginHistory(conn), 'logins');
+    case 'access_history':
+      return done(await snowflakeGovAccessHistory(conn), 'accesses');
+    default:
+      return fail(`Unknown Snowflake governance tool: ${tool}`);
+  }
+}
+
 function executeMock(c: Connection, tool: string, args: Record<string, unknown>, credentialPresent: boolean): unknown {
   const base = { connection: c.name, credentialInjectedServerSide: credentialPresent };
   switch (tool) {
-    case 'notion_search':
-      return { ...base, results: [{ id: 'pg_demo', title: 'Q3 Planning', url: 'notion://pg_demo' }] };
-    case 'notion_get_page':
-      return { ...base, page: { id: String(args.id ?? 'pg_demo'), title: 'Q3 Planning', blocks: 12 } };
     case 'read_account':
       return { ...base, account: { id: String(args.id ?? 'acct-1'), name: 'Sample Account', owner: 'Sales', arr: 48000 } };
     case 'read_opportunity':
@@ -883,9 +2279,10 @@ export async function verifyNotionConnection(
 /** The store's edit authority for archive/delete/restore: owner or a domain admin. */
 function requireConnEdit(c: Connection | undefined, user: CurrentUser): Connection {
   if (!c) throw withStatus(new Error('Connection not found'), 404);
-  const isOwner = c.owner === user.id;
-  const isDomainAdmin = user.role === 'admin' && user.domains.includes(c.domain);
-  if (!isOwner && !isDomainAdmin) throw withStatus(new Error('Not permitted to modify this connection'), 403);
+  // Fail-closed edit-scope: owner, domain_admin of the owning domain, or admin.
+  if (!canManageArtifact(user, manageArg(c))) {
+    throw withStatus(new Error('Not permitted to modify this connection'), 403);
+  }
   return c;
 }
 

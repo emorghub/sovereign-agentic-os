@@ -2,6 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { type Role, roleAtLeast } from '../core/session.ts';
+import { canManageArtifact, type ArtifactScope } from '../governance/edit-scope.ts';
 import {
   type Dataset,
   type DataVisibility,
@@ -31,6 +32,10 @@ import { assetTarget, productTarget, personalSchema, domainSchema, slug, version
 import { config } from '../core/config.ts';
 import { osMirror } from '../infra/os-mirror.ts';
 import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
+// The GOVERNED folder registry (Wave 1) — a moved-into folder is upserted as an
+// explicit row so it persists even when empty. Reused, never forked (mirrors Files).
+import { createFolder, type FolderScope, type Principal as FolderPrincipal } from '../folders/index.ts';
+import { normaliseFolderPath } from '../core/folders.ts';
 
 // Re-export the FQN helpers so existing consumers keep importing them from the store.
 export { assetTarget, productTarget } from './store-fqn.ts';
@@ -70,6 +75,8 @@ export type DatasetSummary = {
   domain: string;
   tier: Tier;
   visibility: DataVisibility;
+  /** The folder this dataset lives in (normalised path; `'/'` = root). */
+  folder: string;
   /** Furthest built medallion layer, or null if nothing built. */
   freshness: string | null;
   quality: Quality;
@@ -249,8 +256,23 @@ function canView(d: Dataset, user: Principal): boolean {
 }
 
 function canEdit(d: Dataset, user: Principal): boolean {
-  if (d.owner === user.id) return true;
-  return user.role === 'admin' && user.domains.includes(d.domain);
+  // Fail-closed edit-scope: owner always; a PRIVATE (dataset-tier) dataset is
+  // owner-only — no admin/domain_admin may touch another user's private data. A
+  // shared (asset) / product dataset admits an in-domain domain_admin or admin.
+  const scope: ArtifactScope = d.tier === 'dataset' ? 'personal' : d.tier === 'product' ? 'certified' : 'shared';
+  return canManageArtifact(user, { owner: d.owner, domain: d.domain, scope });
+}
+
+/**
+ * The PROMOTE/APPROVE governance authority (separate from private-artifact
+ * management). Promotion is the sanctioned path by which a Builder/Admin SHARES a
+ * dataset — so even for a still-Personal (dataset-tier) dataset it admits an
+ * in-domain domain_admin or a platform admin, NOT owner-only. The role/tier
+ * separation-of-duties is enforced additionally by {@link canTransition}. Keeping
+ * this on the pre-existing (scope-agnostic) rule preserves the promotion gates the
+ * manage-rights change must NOT alter. */
+function canGovern(d: Dataset, user: Principal): boolean {
+  return canManageArtifact(user, { owner: d.owner, domain: d.domain, scope: 'shared' });
 }
 
 function viewOf(rec: DatasetRecord, user: Principal): Dataset {
@@ -262,6 +284,26 @@ function viewOf(rec: DatasetRecord, user: Principal): Dataset {
 function editOf(rec: DatasetRecord, user: Principal): Dataset {
   const d = parseDataset(rec.yaml);
   if (!canEdit(d, user)) fail('Not permitted to edit this dataset', 403);
+  return d;
+}
+
+/**
+ * Metric-definition scope — DISTINCT from a structural edit. Defining/removing a
+ * measure is additive semantic-layer work on a governed domain gold mart (the Metrics
+ * tab is built for Builders to do exactly this), not a change to the dataset's core
+ * (silver/gold rebuild, docs, promotion, delete — those stay owner/domain_admin/admin
+ * via {@link editOf}). So a metric only needs: you can USE the data (canView) and you
+ * are a Builder+. This restores the pre-0.1.95 "builders define metrics" behaviour that
+ * the edit-scope tightening accidentally blocked for shared-in-domain datasets.
+ */
+function metricScopeOf(rec: DatasetRecord, user: Principal): Dataset {
+  const d = parseDataset(rec.yaml);
+  if (!canView(d, user)) fail('Not permitted to view this dataset', 403);
+  // The OWNER may always define a metric on their own dataset (building their own
+  // work); anyone else needs Builder+ to add a metric to a dataset they can use.
+  if (d.owner !== user.id && !roleAtLeast(user.role, 'builder')) {
+    fail('Defining a metric requires a Builder or Admin', 403);
+  }
   return d;
 }
 
@@ -300,6 +342,7 @@ function summarise(d: Dataset, archived = false): DatasetSummary {
     domain: d.domain,
     tier: d.tier,
     visibility: d.visibility,
+    folder: d.folder,
     freshness: f.freshness,
     quality: built ? built.quality : 'unknown',
     dots: { bronze: d.versions.bronze.built, silver: d.versions.silver.built, gold: d.versions.gold.built },
@@ -335,6 +378,17 @@ export function listDatasets(user: Principal, opts: { includeArchived?: boolean 
 
 export function getDataset(id: string, user: Principal): Dataset {
   return viewOf(get(id), user);
+}
+
+/**
+ * The soft-archive flag is a RECORD-level property (`DatasetRecord.archived`), not
+ * part of the yaml-derived {@link Dataset}. The detail view needs it to show
+ * Restore instead of Archive, so expose it view-scoped alongside `getDataset`.
+ */
+export function isDatasetArchived(id: string, user: Principal): boolean {
+  const rec = get(id);
+  viewOf(rec, user); // authz: caller must be allowed to see it
+  return !!rec.archived;
 }
 
 /** Prove EDIT authority on a dataset (owner or domain admin) and return it. The metric
@@ -462,6 +516,20 @@ export function listAskable(user: Principal): AskableDataset[] {
 export function createDataset(user: Principal, input: { name: string; domain?: string }): Dataset {
   ensureSeeded();
   const domain = input.domain && user.domains.includes(input.domain) ? input.domain : user.domains[0] ?? 'platform';
+  const wanted = (input.name.trim() || 'Untitled dataset').toLowerCase();
+  // Name uniqueness WITHIN a domain: a dataset name maps to ONE domain gold table
+  // (`gold_<slug>`) and ONE Cube model file, so two same-named datasets in a domain
+  // collide — the model-sync sidecar overwrites one with the other and a defined measure
+  // silently vanishes ("metric did not resolve"). Refuse the duplicate at the source with
+  // a clear message. Cross-domain the SAME name is now SAFE (#155): new datasets carry a
+  // domain-namespaced cube identity (`<domain>__<slug>`), so two domains' "Sales" no longer
+  // share one cube/view/model file — hence this guard stays deliberately within-domain.
+  for (const rec of ds().store.values()) {
+    if (rec.domain !== domain) continue;
+    if (parseDataset(rec.yaml).name.trim().toLowerCase() === wanted) {
+      fail(`A dataset named “${input.name.trim()}” already exists in ${domain} — pick a unique name.`, 409);
+    }
+  }
   const d: Dataset = {
     version: '1',
     id: newId(),
@@ -470,16 +538,44 @@ export function createDataset(user: Principal, input: { name: string; domain?: s
     domain,
     tier: 'dataset',
     visibility: 'private',
+    folder: '/',
     description: '',
     versions: emptyVersions(),
     grants: [],
     measures: [],
     columns: [],
+    // #155: every NEW dataset gets the domain-namespaced cube identity. Existing datasets
+    // (no marker) keep their legacy un-namespaced name — so live Cube models are untouched.
+    cubeNamespaced: true,
   };
   const rec: DatasetRecord = { id: d.id, owner: d.owner, domain: d.domain, yaml: serializeDataset(d), updatedAt: now() };
   ds().store.set(rec.id, rec);
   writeThrough(rec); // best-effort durable mirror
   return d;
+}
+
+/**
+ * Governed offboard support: transfer this owner's PERSONAL-lane records to a new
+ * owner (used by lib/platform-admin/offboard.ts when a user is offboarded with
+ * reassignment). Only personal, owner-only artifacts move; shared/domain/certified
+ * are untouched. Returns the count moved.
+ */
+export function reassignOwner(fromId: string, toId: string): number {
+  let moved = 0;
+  for (const rec of ds().store.values()) {
+    if (rec.owner !== fromId) continue;
+    const d = parseDataset(rec.yaml);
+    if (d.tier !== 'dataset') continue; // personal lane only
+    // The owner lives on BOTH the record (mirror index key) and the serialized
+    // yaml (which drives canView/DLS) — rewrite both so the new owner can see it.
+    d.owner = toId;
+    rec.owner = toId;
+    rec.yaml = serializeDataset(d);
+    rec.updatedAt = now();
+    writeThrough(rec);
+    moved++;
+  }
+  return moved;
 }
 
 /** Build (or pass-through) one medallion version. Editing is Creator+ on a dataset
@@ -550,6 +646,47 @@ export function setDocs(
 }
 
 /**
+ * Move a dataset into a folder (edit-scoped, versioned/write-through like every other
+ * mutation). Mirrors `lib/files/store.moveFile`: the folder is a normalised path on the
+ * dataset's single source; the folder ROOT (personal vs domain tree) is decided by tier.
+ * On move we also upsert an EXPLICIT folder row in the governed registry so the
+ * destination folder persists even when it holds no datasets. A viewer who cannot edit
+ * is rejected 403 and nothing is written.
+ */
+export function moveDataset(id: string, user: Principal, folder: string): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  d.folder = normaliseFolderPath(folder);
+  persist(rec, d, { author: user.id, summary: 'edit folder' });
+  // The move already passed the dataset's edit-scope gate above, so this same-owner
+  // folder create can only mirror an authorised move (best-effort; never rolls it back).
+  upsertFolderRow(d, user);
+  return d;
+}
+
+/** The folder scope a dataset lives in: a private (dataset) tile's folders are the
+ *  owner's PERSONAL tree; a shared (asset) / marketplace (product) tile's folders are
+ *  the owning DOMAIN's tree. Mirrors how `listDatasets` groups by tier. */
+function folderScopeOf(d: Dataset): FolderScope {
+  return d.tier === 'dataset' ? 'personal' : 'domain';
+}
+
+/** Best-effort: mirror a dataset's folder path into the governed folder registry so an
+ *  empty folder still shows in the rail. The root is implicit (never a row). createFolder
+ *  is idempotent and edit-scoped; any gate failure is swallowed so a successful move is
+ *  never rolled back by a folder-registry hiccup (mirrors Files' upsertFolderRow). */
+function upsertFolderRow(d: Dataset, user: Principal): void {
+  const path = normaliseFolderPath(d.folder);
+  if (path === '/') return;
+  const principal: FolderPrincipal = { id: user.id, role: user.role, domains: user.domains };
+  try {
+    createFolder(principal, { tab: 'data', scope: folderScopeOf(d), path, domain: d.domain });
+  } catch {
+    /* folder-registry mirror is best-effort; the dataset move already succeeded */
+  }
+}
+
+/**
  * Append a data-quality check to a dataset (visible + runnable in the detail view).
  * A STRUCTURED rule (`rule` + `column` + args) is EXECUTABLE — compiled to a governed
  * COUNT-of-violations SQL and run AS the owner to produce a real pass/fail (see
@@ -613,7 +750,7 @@ function carryQuality(d: Dataset, layer: Layer): Quality {
  */
 export function defineMeasure(id: string, user: Principal, measure: Measure): Dataset {
   const rec = get(id);
-  const d = editOf(rec, user);
+  const d = metricScopeOf(rec, user);
   // FAIL-CLOSED metric gate (#91): a cube can only bind to a governed DOMAIN gold mart.
   // Registering a metric on un-promoted personal gold builds a broken cube (Cube's
   // `cube-*` principal can't read the personal lane). Refuse with the clear message.
@@ -643,7 +780,7 @@ export function defineMeasure(id: string, user: Principal, measure: Measure): Da
  */
 export function removeMeasure(id: string, user: Principal, measureName: string): { removed: boolean } {
   const rec = get(id);
-  const d = editOf(rec, user);
+  const d = metricScopeOf(rec, user);
   const before = d.measures.length;
   d.measures = d.measures.filter((m) => m.name !== measureName);
   if (d.measures.length === before) return { removed: false }; // nothing to drop
@@ -677,7 +814,9 @@ export function transition(
 ): Dataset {
   const rec = get(id);
   const d = parseDataset(rec.yaml);
-  if (!canEdit(d, user)) fail('Not permitted to change this dataset', 403);
+  // Promote/approve governance authority — NOT the owner-only private-manage gate,
+  // so a Builder/Admin can still SHARE a Personal dataset (unchanged promotion gate).
+  if (!canGovern(d, user)) fail('Not permitted to change this dataset', 403);
 
   const gate = canTransition(user.role, d.tier, t);
   if (!gate.ok) fail(gate.reason ?? 'transition not allowed', 403);

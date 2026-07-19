@@ -85,6 +85,16 @@ export const TUTORIAL_EXEMPT_ROUTES: Record<string, string> = {
     'Static reference/teaching page that documents the MCP protocol and tool catalog; the connection instructions are self-contained and nothing needs practising in a sandbox.',
   '/llm-gateway':
     'Read-only observability over the LiteLLM gateway (tenant usage + the public Model Hub embed); nothing to configure or practise — the actionable model/cost controls live in Platform.',
+  '/workflows':
+    'Newly split out of Knowledge (its tutorial still lives under the Knowledge golden path). A dedicated Workflows tutorial ships with the Workflows redesign (Operating Manual + 2-tab detail); exempt until then.',
+  '/operating-manual':
+    'The My/Domain/Company operating manual — authored prose (guided sections) governed per scope, not a sandbox golden path. A dedicated tutorial ships with the Operating Manual redesign (content model + agent-context bundle); exempt until then.',
+  '/about':
+    'Static read-only license manifest — lists the open-source components bundled in the OS. Purely informational; nothing to practise in a sandbox. Moved from the Admin group to Entry for transparency; class-exemption not applicable (no minRole).',
+  '/console':
+    'Operator/analyst tool, now builder-visible for the governed Query surface (SQL over Trino/Cube, OPA/RLS-checked per-caller). Querying is the analyst escape hatch; the taught golden path for reading numbers is the Metrics tab (no-SQL semantic layer). The raw Shell inside stays admin-only. No sandbox golden path to practise here.',
+  '/platform':
+    'Admin cockpit, now builder-visible but tile-filtered fail-closed: a builder sees only self-service links (My Settings), never a tenant-admin control. Nothing for a student to practise — the admin operations are covered by the operator guide, and the builder-visible tiles are trivial navigation.',
 };
 
 /** Resolve one tutorial. Returns `undefined` for an unknown key. */

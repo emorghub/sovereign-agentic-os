@@ -12,6 +12,7 @@ import {
 } from './system-schema.ts';
 import { canPromote, roleAtLeast } from '../core/session.ts';
 import { type TemplateKey, templateYaml } from './templates.ts';
+import { canManageArtifact, type ArtifactScope } from '../governance/edit-scope.ts';
 import { osMirror } from '../infra/os-mirror.ts';
 import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
 
@@ -40,7 +41,7 @@ export type LastBuildRow = {
   tool: string;
   applied: boolean;
   verified: boolean;
-  status: 'ok' | 'fail';
+  status: 'ok' | 'fail' | 'pending';
   detail: string;
   error?: string;
 };
@@ -64,6 +65,37 @@ export type LastRun = {
   traces: number;
   held: number;
   steps: { node: string; tool: string; effect: string; ran?: boolean }[];
+  /**
+   * The per-agent drill-down for a team run (input given, output produced, status,
+   * per-step args→result). Persisted so the per-agent cards survive a tab-switch /
+   * reseed — without it a reload falls back to the flat step table. Absent for
+   * single-agent runs.
+   */
+  nodes?: {
+    node: string;
+    model?: string;
+    /** AUTO per-node routing: the resolved tier + why, so the drill-down explains the model. */
+    tier?: 'fast' | 'reasoning';
+    tierReason?: string;
+    status: string;
+    error?: string;
+    input?: string;
+    finalText?: string;
+    steps: { tool: string; isError?: boolean; summary?: string; args?: string; result?: string }[];
+  }[];
+  /**
+   * "Context actually used per run" (#177) — derived from `nodes[].steps[]`: which
+   * datasets/knowledge/files/metrics/connections the run read, retrieved or wrote.
+   * Additive + back-compatible: absent on runs recorded before it shipped (the UI
+   * re-derives client-side from `nodes` as a fallback). See `build/context-usage.ts`.
+   */
+  contextUsage?: import('./build/context-usage.ts').RunContextUsage;
+  /**
+   * The system's declared grant ids at run time, per kind — so the Evaluate view can
+   * show granted-but-unused ("dead") grants next to what was actually used. Best-effort:
+   * absent when the yaml could not be parsed. Purely for the used-vs-granted strip.
+   */
+  grantedIds?: { data: string[]; knowledge: string[]; files: string[]; metrics: string[]; connections: string[] };
   output?: string;
   mode?: 'live' | 'offline-mock';
   traceStoreAvailable?: boolean;
@@ -227,7 +259,7 @@ function starterYaml(name: string, domain: string, visibility: Visibility): stri
     safetyPreset: 'read-only',
     entrypoint: 'assistant',
     state: { channels: { messages: 'add_messages' } },
-    grants: { data: [], knowledge: [], metrics: [], tools: ['search_knowledge'], connections: [] },
+    grants: { data: [], knowledge: [], metrics: [], tools: ['search_knowledge'], connections: [], files: [], plan: [] },
     routing: { overrides: {} },
     agents: [
       {
@@ -290,14 +322,26 @@ function canView(rec: SystemRecord, user: Principal): boolean {
 }
 
 function canEdit(rec: SystemRecord, user: Principal): boolean {
-  if (rec.owner === user.id) return true;
-  return user.role === 'admin' && user.domains.includes(rec.domain);
+  // Fail-closed edit-scope: owner always; a Personal agent system is owner-only
+  // (no admin/domain_admin reaches another user's private agent). A Shared /
+  // Marketplace one admits an in-domain domain_admin or a platform admin.
+  const scope: ArtifactScope = rec.visibility === 'Personal' ? 'personal' : rec.visibility === 'Marketplace' ? 'certified' : 'shared';
+  return canManageArtifact(user, { owner: rec.owner, domain: rec.domain, scope });
 }
 
 function requireView(systemId: string, user: Principal): SystemRecord {
   const rec = get(systemId);
   if (!canView(rec, user)) fail('Not permitted to view this system', 403);
   return rec;
+}
+
+/** The PROMOTE/APPROVE governance authority (separate from private-artifact
+ *  management): owner, in-domain domain_admin, or admin — scope-agnostic, so a
+ *  Builder/Admin can still SHARE a filed Personal system. A non-owner Builder is
+ *  still blocked (not a domain_admin/admin). Preserves the promotion gate the
+ *  manage-rights change must not alter. */
+function canGovern(rec: SystemRecord, user: Principal): boolean {
+  return canManageArtifact(user, { owner: rec.owner, domain: rec.domain, scope: 'shared' });
 }
 
 function requireEdit(systemId: string, user: Principal): SystemRecord {
@@ -445,6 +489,25 @@ export function createSystem(
 }
 
 /**
+ * Governed offboard support: transfer this owner's PERSONAL-lane records to a new
+ * owner (used by lib/platform-admin/offboard.ts when a user is offboarded with
+ * reassignment). Only personal, owner-only artifacts move; shared/domain/certified
+ * are untouched. Returns the count moved.
+ */
+export function reassignOwner(fromId: string, toId: string): number {
+  let moved = 0;
+  for (const rec of state().store.values()) {
+    if (rec.owner !== fromId) continue;
+    if (rec.visibility !== 'Personal') continue; // personal lane only
+    rec.owner = toId;
+    rec.updatedAt = now();
+    writeThrough(rec);
+    moved++;
+  }
+  return moved;
+}
+
+/**
  * Promotion ladder for an agent system — the mirror of `promoteArtifact`:
  *   Personal ──(Builder+)──▶ Shared ──(Admin)──▶ Marketplace
  * The actor must belong to the system's domain (Admin spans the tenant via
@@ -453,16 +516,48 @@ export function createSystem(
  * the ladder holds regardless of any client input.
  */
 export function promoteSystem(systemId: string, user: Principal): SystemRecord {
-  const rec = requireEdit(systemId, user);
+  const rec = get(systemId);
+  // Promotion is the sanctioned SHARE action — gate on the governance authority
+  // (owner/domain_admin/admin), NOT the owner-only private-manage gate, so an
+  // admin can approve a filed Personal→Shared promotion.
+  if (!canGovern(rec, user)) fail('Not permitted to promote this system', 403);
   if (rec.origin === 'forked') fail('An installed (forked) system cannot be re-published', 400);
   if (rec.visibility === 'Personal') {
-    if (!canPromote(user.role, 'Personal')) fail('Promoting to Shared requires a Builder or Admin', 403);
+    if (!canPromote(user.role, 'Personal')) fail('Promoting to Shared requires a Domain admin or Admin', 403);
     rec.visibility = 'Shared';
   } else if (rec.visibility === 'Shared') {
     if (!canPromote(user.role, 'Shared')) fail('Publishing to the Marketplace requires an Admin', 403);
     rec.visibility = 'Marketplace';
   } else {
     fail('This system is already published to the Marketplace', 400);
+  }
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return rec;
+}
+
+/**
+ * Demotion (revoke sharing) — the reverse of `promoteSystem`, one step down:
+ *   Marketplace ──(Admin)──▶ Shared ──(owner | in-domain Builder+)──▶ Personal
+ * Marketplace→Shared is Admin-only (only an Admin published it); Shared→Personal is
+ * the owner or an in-domain Builder/Admin (mirrors who could have promoted it).
+ * Forked (installed) copies have no shared lineage to revoke. Never deletes the
+ * system; only lowers its visibility. Server-side enforcement, so the gate holds.
+ */
+export function demoteSystem(systemId: string, user: Principal): SystemRecord {
+  const rec = get(systemId);
+  if (rec.origin === 'forked') fail('An installed (forked) system has no sharing to revoke', 400);
+  if (!user.domains.includes(rec.domain)) fail('You can only revoke sharing on systems in a domain you belong to', 403);
+  if (rec.visibility === 'Marketplace') {
+    if (user.role !== 'admin') fail('Revoking from the Marketplace requires an Admin', 403);
+    rec.visibility = 'Shared';
+  } else if (rec.visibility === 'Shared') {
+    if (!canManageArtifact(user, { owner: rec.owner, domain: rec.domain, scope: 'shared' })) {
+      fail('Unsharing requires the owner, an in-domain Domain admin, or an Admin', 403);
+    }
+    rec.visibility = 'Personal';
+  } else {
+    fail('This system is already personal — nothing to revoke', 400);
   }
   rec.updatedAt = now();
   writeThrough(rec);

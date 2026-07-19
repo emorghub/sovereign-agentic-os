@@ -5,11 +5,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useUser } from '@/lib/useUser';
-import { anchorAttr, ANCHORS } from '@/lib/tutorials/anchors';
+import { anchorAttr, ANCHORS } from '@/lib/tutorials';
 import { previewText } from '@/lib/files/preview';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
+import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
+import type { FiledApproval } from '@/lib/governance/approval-notice';
 import type { Visibility } from '@/lib/core/lifecycle';
+import { FolderPickerModal } from '@/components/core/FolderTree';
+import type { FolderPathNode } from '@/lib/core/folders';
 
 /** File tier → the OS-wide lifecycle visibility (drives the delete gate). */
 const lcVis = (tier: Asset['tier']): Visibility =>
@@ -34,7 +38,8 @@ const KIND_LABEL: Record<Asset['kind'], string> = {
   doc: 'DOC', image: 'IMG', audio: 'AUD', video: 'VID', table: 'TAB', archive: 'ZIP', other: 'FILE',
 };
 const SENSITIVITIES = ['public', 'internal', 'confidential', 'restricted'] as const;
-const TIER_WORD: Record<Asset['tier'], string> = { dataset: 'Private', asset: 'Shared in Domain', product: 'Marketplace' };
+// Scope vocabulary mirrors lib/core/scopes.ts (source of truth): Shared→"Domain", Certified→"Company".
+const TIER_WORD: Record<Asset['tier'], string> = { dataset: 'Private', asset: 'Domain', product: 'Company' };
 
 function bytesLabel(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -49,6 +54,7 @@ function fresh(iso: string | null): string {
 
 export default function FilePreview({ id, onMutated, onClose }: { id: string; onMutated: () => void; onClose: () => void }) {
   const { user, isAdmin } = useUser();
+  const { notifyApprovalFiled } = useApprovalNotifier();
   const [view, setView] = useState<View | null>(null);
   const [err, setErr] = useState('');
   const [tagDraft, setTagDraft] = useState('');
@@ -58,6 +64,10 @@ export default function FilePreview({ id, onMutated, onClose }: { id: string; on
   const [useAsMsg, setUseAsMsg] = useState('');
   const [showFullText, setShowFullText] = useState(false);
   const reuploadRef = useRef<HTMLInputElement>(null);
+  // Folder picker modal state.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [personalNodes, setPersonalNodes] = useState<FolderPathNode[]>([]);
+  const [domainNodes, setDomainNodes] = useState<FolderPathNode[]>([]);
 
   const load = useCallback(async () => {
     setErr('');
@@ -78,13 +88,27 @@ export default function FilePreview({ id, onMutated, onClose }: { id: string; on
   }, [id]);
   useEffect(() => { load(); }, [load]);
 
+  const loadFolders = useCallback(async () => {
+    try {
+      const [pRes, dRes] = await Promise.all([
+        fetch('/api/folders?tab=files&scope=personal', { cache: 'no-store' }),
+        fetch('/api/folders?tab=files&scope=domain', { cache: 'no-store' }),
+      ]);
+      if (pRes.ok) setPersonalNodes(((await pRes.json()).folders ?? []) as FolderPathNode[]);
+      if (dRes.ok) setDomainNodes(((await dRes.json()).folders ?? []) as FolderPathNode[]);
+    } catch { /* ignore */ }
+  }, []);
+
   const requestPromote = useCallback(async () => {
     setErr('');
     const res = await fetch(`/api/files/${id}/promote`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     const data = await res.json();
     if (!res.ok) { setErr(data.error ?? 'Could not request promotion'); return; }
+    // ONE OS-wide "this needs approval" confirmation (Policies link + inline approve).
+    const approval = data.approval as FiledApproval | undefined;
+    if (approval?.id) notifyApprovalFiled(approval, 'file', () => { void load(); onMutated(); });
     await load(); onMutated();
-  }, [id, load, onMutated]);
+  }, [id, load, onMutated, notifyApprovalFiled]);
 
   const certify = useCallback(async () => {
     setErr('');
@@ -116,6 +140,22 @@ export default function FilePreview({ id, onMutated, onClose }: { id: string; on
       });
       const data = await res.json();
       if (!res.ok) { setErr(data.error ?? 'Update failed'); return; }
+      await load();
+      onMutated();
+    } catch (e) { setErr((e as Error).message); }
+  }, [id, load, onMutated]);
+
+  // Move this file into another folder via the edit-gated folder route. A viewer
+  // (non-owner, non-admin) is rejected 403 by the store; the button is owner-only.
+  const move = useCallback(async (folder: string) => {
+    setErr('');
+    try {
+      const res = await fetch(`/api/files/${id}/folder`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ folder }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setErr(data.error ?? 'Move failed'); return; }
       await load();
       onMutated();
     } catch (e) { setErr((e as Error).message); }
@@ -203,10 +243,41 @@ export default function FilePreview({ id, onMutated, onClose }: { id: string; on
         <dt>Owner</dt><dd>{a.owner}</dd>
         <dt>Folder</dt><dd>{a.folder}</dd>
         <dt>Updated</dt><dd>{fresh(a.freshness)}</dd>
-        <dt>Sharing</dt><dd>{a.visibility === 'Shared' ? 'Shared in Domain' : a.visibility}</dd>
+        <dt>Sharing</dt><dd>{a.visibility === 'Shared' ? 'Domain' : a.visibility === 'Certified' ? 'Company' : a.visibility}</dd>
         <dt>Storage</dt><dd>{a.storage}</dd>
         <dt>Link</dt><dd className="deep-link">{a.deepLink}</dd>
       </dl>
+
+      {/* Move to folder — edit-gated (owner / in-domain admin). The folder route
+          also upserts the destination folder into the governed registry. */}
+      {isOwner || isAdmin ? (
+        <div className="preview-row">
+          <button
+            className="btn ghost sm"
+            onClick={() => { void loadFolders(); setPickerOpen(true); }}
+            title="Move this file into a folder"
+          >
+            Move to folder…
+          </button>
+          <FolderPickerModal
+            open={pickerOpen}
+            tab="files"
+            personalNodes={personalNodes}
+            domainNodes={domainNodes}
+            title="Move file to folder"
+            onConfirm={({ path }) => { setPickerOpen(false); void move(path); }}
+            onCancel={() => setPickerOpen(false)}
+            onCreate={async (scope, path) => {
+              const res = await fetch('/api/folders', {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ tab: 'files', scope, path }),
+              });
+              if (!res.ok) { setErr((await res.json()).error ?? 'Could not create folder'); return; }
+              await loadFolders();
+            }}
+          />
+        </div>
+      ) : null}
 
       {/* Editable: description, tags, sensitivity, index opt-out (owner-only; 403 otherwise). */}
       <div>
@@ -233,28 +304,30 @@ export default function FilePreview({ id, onMutated, onClose }: { id: string; on
         </button>
       </div>
 
-      {/* ---- Sharing lifecycle (governed exactly like Data): a Creator requests a
-              promotion (a Builder approves); an Admin certifies to the marketplace. ---- */}
+      {/* ---- Sharing lifecycle (governed exactly like Data): the OWNER (creator or
+              builder) PROPOSES a promotion, a domain admin approves; an Admin certifies
+              to the marketplace. The propose button is owner-gated, never role-gated —
+              a builder proposes their OWN file; the approval is the governed gate. ---- */}
       <div className="preview-share" {...anchorAttr(ANCHORS.files.share)}>
         <label className="rail-group-title">Sharing</label>
         {a.tier === 'dataset' ? (
           promote?.request ? (
-            <p className="hint" style={{ margin: 0 }}>Pending a domain Builder’s approval…</p>
+            <p className="hint" style={{ margin: 0 }}>⏳ Proposed — awaiting a domain admin’s approval…</p>
           ) : isOwner ? (
             <>
               {promote && !promote.gate.ok ? (
-                <p className="hint" style={{ margin: '0 0 6px' }}>To share, add {promote.gate.missing.join(', ')}.</p>
+                <p className="hint" style={{ margin: '0 0 6px' }}>To propose sharing, add {promote.gate.missing.join(', ')}.</p>
               ) : null}
               <button className="btn ghost sm" disabled={!promote?.gate.ok} onClick={requestPromote}
-                title="Ask a domain Builder to share this file with your domain">
-                Share to domain →
+                title="Propose sharing this file with your domain — a domain admin reviews it">
+                Propose to Domain →
               </button>
             </>
           ) : <p className="hint" style={{ margin: 0 }}>Private to {a.owner}.</p>
         ) : a.tier === 'asset' ? (
           <div className="preview-row">
-            <span className="hint" style={{ margin: 0 }}>Shared in domain.</span>
-            {isAdmin ? <button className="btn ghost sm" onClick={certify}>Certify to marketplace →</button> : null}
+            <span className="hint" style={{ margin: 0 }}>Shared with your domain.</span>
+            {isAdmin ? <button className="btn ghost sm" onClick={certify}>Certify to Company →</button> : null}
           </div>
         ) : (
           <span className="hint" style={{ margin: 0 }}>Published in the marketplace.</span>

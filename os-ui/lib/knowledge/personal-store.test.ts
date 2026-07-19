@@ -16,10 +16,15 @@ import {
   restorePersonalKnowledgeVersion,
   promotePersonalKnowledge,
   certifyPersonalKnowledge,
+  decertifyPersonalKnowledge,
+  unsharePersonalKnowledge,
+  moveKnowledge,
 } from './personal-store.ts';
 
 const amir = { id: 'amir', domains: ['sales'], role: 'creator' as const };
 const bea = { id: 'bea', domains: ['sales'], role: 'builder' as const };
+// Promoting Personal→Shared now requires domain_admin+; `dana` is the in-domain approver.
+const dana = { id: 'dana', domains: ['sales'], role: 'domain_admin' as const };
 const kenji = { id: 'kenji', domains: ['finance'], role: 'builder' as const };
 const ada = { id: 'ada', domains: ['sales'], role: 'admin' as const };
 
@@ -90,6 +95,26 @@ test('delete removes the entry and its history', () => {
   assert.throws(() => getPersonalKnowledge(rec.id, amir), /not found/);
 });
 
+test('archived-delete regression: an ARCHIVED entry deletes for the owner, is denied for a non-owner non-admin, and a missing entry surfaces honestly', () => {
+  // Reproduces the reported bug: archive a knowledge note, then Delete it.
+  // Server-side the delete must (a) succeed for the owner even once archived,
+  // (b) stay fail-closed for a non-owner non-admin, and (c) NOT silently no-op
+  // on a missing id — it must throw a 404 the UI can surface.
+  __resetStore();
+  const rec = createPersonalKnowledge(amir, { title: 'To retire', md: 'body' });
+  archivePersonalKnowledge(rec.id, amir);
+  // Still present (archived), not yet gone.
+  assert.equal(listPersonalKnowledge(amir, { includeArchived: true }).mine.length, 1);
+  // A non-owner in another domain (creator/builder — no admin authority) is refused.
+  assert.throws(() => deletePersonalKnowledge(rec.id, kenji), /Not permitted/);
+  // The owner deletes the archived entry — it is physically gone (record + history).
+  deletePersonalKnowledge(rec.id, amir);
+  assert.equal(listPersonalKnowledge(amir, { includeArchived: true }).mine.length, 0);
+  assert.throws(() => getPersonalKnowledge(rec.id, amir), /not found/);
+  // Deleting a now-missing id is an HONEST 404, never a silent success.
+  assert.throws(() => deletePersonalKnowledge(rec.id, amir), /not found/);
+});
+
 test('restore: reverts to a prior version and snapshots the live state first (reversible)', () => {
   __resetStore();
   const rec = createPersonalKnowledge(amir, { title: 'T', md: 'v1' });
@@ -100,12 +125,14 @@ test('restore: reverts to a prior version and snapshots the live state first (re
   assert.equal(listPersonalKnowledgeVersions(rec.id, amir).length, 2);
 });
 
-test('promotion ladder: builder promotes Personal→Shared; a creator cannot', () => {
+test('promotion ladder: domain_admin promotes Personal→Shared; a creator and a plain builder cannot', () => {
   __resetStore();
-  const rec = createPersonalKnowledge(bea, { title: 'Playbook', md: 'x' });
+  const rec = createPersonalKnowledge(dana, { title: 'Playbook', md: 'x' });
   // A creator (no promote gate) is refused the direct flip.
-  assert.throws(() => promotePersonalKnowledge(rec.id, amir), /builders and admins/);
-  const promoted = promotePersonalKnowledge(rec.id, bea);
+  assert.throws(() => promotePersonalKnowledge(rec.id, amir), /domain admins and admins/);
+  // A plain builder can NO LONGER promote Personal→Shared.
+  assert.throws(() => promotePersonalKnowledge(rec.id, bea), /domain admins and admins/);
+  const promoted = promotePersonalKnowledge(rec.id, dana);
   assert.equal(promoted.visibility, 'Shared');
   // Now visible to same-domain peers under the domain group.
   assert.equal(listPersonalKnowledge(amir).domain.map((e) => e.title).includes('Playbook'), true);
@@ -113,8 +140,8 @@ test('promotion ladder: builder promotes Personal→Shared; a creator cannot', (
 
 test('certification ladder: only an admin certifies Shared→Marketplace', () => {
   __resetStore();
-  const rec = createPersonalKnowledge(bea, { title: 'Certifiable', md: 'x' });
-  promotePersonalKnowledge(rec.id, bea); // → Shared
+  const rec = createPersonalKnowledge(dana, { title: 'Certifiable', md: 'x' });
+  promotePersonalKnowledge(rec.id, dana); // → Shared
   assert.throws(() => certifyPersonalKnowledge(rec.id, bea), /admins can certify/);
   const certified = certifyPersonalKnowledge(rec.id, ada);
   assert.equal(certified.visibility, 'Marketplace');
@@ -122,11 +149,59 @@ test('certification ladder: only an admin certifies Shared→Marketplace', () =>
 
 test('promotion guards: cannot re-promote an already-Shared entry, cannot certify a Personal one', () => {
   __resetStore();
-  const rec = createPersonalKnowledge(bea, { title: 'Guarded', md: 'x' });
-  promotePersonalKnowledge(rec.id, bea); // → Shared
-  assert.throws(() => promotePersonalKnowledge(rec.id, bea), /already promoted/);
+  const rec = createPersonalKnowledge(dana, { title: 'Guarded', md: 'x' });
+  promotePersonalKnowledge(rec.id, dana); // → Shared
+  assert.throws(() => promotePersonalKnowledge(rec.id, dana), /already promoted/);
   const rec2 = createPersonalKnowledge(ada, { title: 'Skip', md: 'x' });
   assert.throws(() => certifyPersonalKnowledge(rec2.id, ada), /Promote this knowledge to the domain/);
+});
+
+test('DEMOTE: revoke sharing lowers Marketplace → Shared → Personal', () => {
+  __resetStore();
+  const rec = createPersonalKnowledge(dana, { title: 'Roundtrip', md: 'x' });
+  promotePersonalKnowledge(rec.id, dana); // → Shared
+  certifyPersonalKnowledge(rec.id, ada); // → Marketplace
+  // Marketplace → Shared is admin-only (a builder → 403).
+  assert.throws(() => decertifyPersonalKnowledge(rec.id, bea), /admins can revoke/);
+  assert.equal(decertifyPersonalKnowledge(rec.id, ada).visibility, 'Shared');
+  // Shared → Personal: owner, in-domain domain_admin, or admin (fail-closed edit-scope).
+  assert.equal(unsharePersonalKnowledge(rec.id, dana).visibility, 'Personal');
+});
+
+test('DEMOTE fail-closed: a creator cannot unshare a Shared entry they do not own', () => {
+  __resetStore();
+  const rec = createPersonalKnowledge(dana, { title: 'Team note', md: 'x' });
+  promotePersonalKnowledge(rec.id, dana); // → Shared (owned by dana)
+  assert.throws(() => unsharePersonalKnowledge(rec.id, amir), /Not permitted/i); // amir = creator, non-owner
+  // A plain builder (non-owner) also cannot unshare someone else's shared entry.
+  assert.throws(() => unsharePersonalKnowledge(rec.id, bea), /Not permitted/i);
+  assert.equal(getPersonalKnowledge(rec.id, amir).visibility, 'Shared');
+});
+
+test('folder field defaults to "/" on create', () => {
+  __resetStore();
+  const rec = createPersonalKnowledge(amir, { title: 'Test' });
+  assert.equal(rec.folder, '/');
+});
+
+test('folder can be set on create', () => {
+  __resetStore();
+  const rec = createPersonalKnowledge(amir, { title: 'Test', folder: '/work/notes' });
+  assert.equal(rec.folder, '/work/notes');
+});
+
+test('moveKnowledge: owner can move their own entry', () => {
+  __resetStore();
+  const rec = createPersonalKnowledge(amir, { title: 'Test' });
+  const moved = moveKnowledge(rec.id, amir, '/project/alpha');
+  assert.equal(moved.folder, '/project/alpha');
+  assert.equal(getPersonalKnowledge(rec.id, amir).folder, '/project/alpha');
+});
+
+test('moveKnowledge: non-owner in same domain cannot move entry', () => {
+  __resetStore();
+  const rec = createPersonalKnowledge(amir, { title: 'Private' });
+  assert.throws(() => moveKnowledge(rec.id, bea, '/shared'), /Not permitted/);
 });
 
 test('Shared-count bug regression: after Personal→Shared promotion the domain group count increments', () => {
@@ -134,12 +209,12 @@ test('Shared-count bug regression: after Personal→Shared promotion the domain 
   // domainKnowledge.sections for the Shared count and ignored personal.domain,
   // so a promoted entry never incremented the "(N)" badge.
   __resetStore();
-  const rec = createPersonalKnowledge(bea, { title: 'Promoted note', md: 'content' });
+  const rec = createPersonalKnowledge(dana, { title: 'Promoted note', md: 'content' });
   // Before promotion: mine=1, domain=0.
   let g = listPersonalKnowledge(amir); // peer in same domain
   assert.equal(g.domain.length, 0, 'domain count must be 0 before promotion');
   // Promote Personal → Shared.
-  promotePersonalKnowledge(rec.id, bea);
+  promotePersonalKnowledge(rec.id, dana);
   // After promotion: the entry moves from mine to domain, so domain count increments.
   g = listPersonalKnowledge(amir);
   assert.equal(g.domain.length, 1, 'domain count must be 1 after promotion (Shared-count badge fix)');

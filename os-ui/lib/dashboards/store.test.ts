@@ -3,7 +3,7 @@
  */
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { __resetDashboards, listDashboards, getDashboard, saveDashboard, setDashboardArchived, deleteDashboard, listDashboardVersions, restoreDashboardVersion, type Principal } from './store.ts';
+import { __resetDashboards, listDashboards, getDashboard, saveDashboard, setDashboardArchived, deleteDashboard, listDashboardVersions, restoreDashboardVersion, transitionDashboard, type Principal } from './store.ts';
 import type { DashboardSpec } from './model.ts';
 
 const admin: Principal = { id: 'sara', domains: ['sales'], role: 'admin' };
@@ -83,11 +83,30 @@ test('archive soft-hides a dashboard; unarchive restores it; delete purges histo
   assert.equal(listDashboardVersions('dash_a', builder).length, 0);
 });
 
-test('archive / delete / restore obey owner authz (a non-owner is rejected 403)', () => {
+test('archive / delete / restore obey edit-scope (a non-owner without manage rights is rejected 403)', () => {
   saveDashboard(builder, 'dash_o', spec('Owned'));
   saveDashboard(builder, 'dash_o', spec('e'));
-  const intruder: Principal = { id: 'mallory', domains: ['sales'], role: 'admin' };
+  // A non-owner plain creator (no manage rights) is rejected.
+  const intruder: Principal = { id: 'mallory', domains: ['sales'], role: 'creator' };
   assert.throws(() => setDashboardArchived('dash_o', intruder, true), (e: { status?: number }) => e.status === 403);
   assert.throws(() => deleteDashboard('dash_o', intruder), (e: { status?: number }) => e.status === 403);
   assert.throws(() => restoreDashboardVersion('dash_o', intruder, 1), (e: { status?: number }) => e.status === 403);
+});
+
+test('archive: a PERSONAL dashboard is owner-only; a SHARED one admits domain_admin + admin', () => {
+  const ownerBuilder: Principal = { id: 'ivy', domains: ['sales'], role: 'builder' };
+  saveDashboard(ownerBuilder, 'dash_da', spec('Owned')); // Personal tier, owned by ivy
+  const domainAdmin: Principal = { id: 'dana', domains: ['sales'], role: 'domain_admin' };
+  const platformAdmin: Principal = { id: 'sara', domains: ['ops'], role: 'admin' };
+  // A PERSONAL dashboard is owner-only — not even a domain_admin/admin may manage it.
+  assert.throws(() => setDashboardArchived('dash_da', domainAdmin, true), (e: { status?: number }) => e.status === 403);
+  assert.throws(() => setDashboardArchived('dash_da', platformAdmin, true), (e: { status?: number }) => e.status === 403);
+  // The owner (a Builder) promotes their own dashboard Personal→Domain (shared).
+  transitionDashboard('dash_da', ownerBuilder, 'promote');
+  // Now the in-domain domain_admin + platform admin manage the shared dashboard.
+  assert.equal(setDashboardArchived('dash_da', domainAdmin, true).archived, true);
+  assert.equal(setDashboardArchived('dash_da', platformAdmin, false).archived, false);
+  // A domain_admin of ANOTHER domain is denied.
+  const otherDomainAdmin: Principal = { id: 'omar', domains: ['ops'], role: 'domain_admin' };
+  assert.throws(() => setDashboardArchived('dash_da', otherDomainAdmin, true), (e: { status?: number }) => e.status === 403);
 });

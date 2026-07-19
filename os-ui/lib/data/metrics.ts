@@ -25,15 +25,64 @@ export function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'dataset';
 }
 
+/**
+ * #155 — the domain prefix that makes a cube identity unique per domain. A double
+ * underscore SEPARATES the domain from the dataset slug so the scheme is obviously
+ * reversible/inspectable (`sales__orders` = domain `sales`, dataset `orders`) and can
+ * never be confused with a single-underscore word boundary inside either half.
+ */
+export function cubeDomainPrefix(d: Dataset): string {
+  return slug(d.domain);
+}
+
+/**
+ * The cube name (== the model file base). NAMESPACED for datasets created after #155
+ * (`<domain>__<slug>`) so two domains can each name a dataset "Sales" without colliding
+ * on one shared cube/model file. LEGACY (un-namespaced `slug(name)`) for every dataset
+ * that predates #155 — so the LIVE Cube models keep their exact old name and there is no
+ * migration. The `cubeNamespaced` marker on the dataset (set once at create) decides,
+ * so a given dataset's identity is stable for its whole life.
+ */
 export function cubeName(d: Dataset): string {
-  return slug(d.name);
+  return d.cubeNamespaced ? `${cubeDomainPrefix(d)}__${slug(d.name)}` : slug(d.name);
 }
 
 /** The Cube VIEW name dashboards + the agent metrics tool resolve. MUST be a valid
  *  Cube identifier — letters/digits/underscore, no spaces — or the WHOLE Cube schema
- *  fails to compile ("fails to match the identifier pattern"). Underscores, readable case. */
+ *  fails to compile ("fails to match the identifier pattern"). Underscores, readable case.
+ *  NAMESPACED (`<domain>__<View>`) for post-#155 datasets, LEGACY (bare View) otherwise —
+ *  moves in lockstep with `cubeName` so the cube + its view are always the same scheme. */
 export function cubeViewName(d: Dataset): string {
+  const view = d.name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'View';
+  return d.cubeNamespaced ? `${cubeDomainPrefix(d)}__${view}` : view;
+}
+
+/** The un-namespaced (legacy) cube name a dataset WOULD have had before #155. The
+ *  back-compat alias: a stored/hand-written reference using the old bare name still
+ *  resolves to this dataset (see `cubeNameMatches`). For a legacy dataset this equals
+ *  `cubeName(d)`; for a namespaced one it is the collision-prone name we deliberately
+ *  moved off of, kept resolvable so nothing that referenced it breaks. */
+export function legacyCubeName(d: Dataset): string {
+  return slug(d.name);
+}
+
+/** The un-namespaced (legacy) view name a dataset WOULD have had before #155. */
+export function legacyCubeViewName(d: Dataset): string {
   return d.name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'View';
+}
+
+/** Back-compat resolver: does `name` refer to this dataset's cube — under EITHER its
+ *  current (possibly namespaced) name OR its legacy un-namespaced name? Every reverse
+ *  lookup (a persisted dashboard view, a hand-written Power BI/Cube query, a legacy
+ *  metric member) resolves through this, so a namespaced dataset still answers to the
+ *  old bare name and no existing reference breaks — zero migration. */
+export function cubeNameMatches(d: Dataset, name: string): boolean {
+  return name === cubeName(d) || name === legacyCubeName(d);
+}
+
+/** Back-compat resolver for the VIEW name (both current + legacy). */
+export function cubeViewNameMatches(d: Dataset, view: string): boolean {
+  return view === cubeViewName(d) || view === legacyCubeViewName(d);
 }
 
 /** The Gold mart FQN the cube binds to via `sql_table` (the handover contract). */
@@ -109,6 +158,22 @@ function measureYaml(m: Measure, knownMembers: Set<string>): string {
   return out.join('\n');
 }
 
+/** The EXACT set of members the Cube VIEW exposes (its `includes` list): every
+ *  named measure + every gold dimension column EXCEPT the primary key. The PK is a
+ *  cube dimension (for joins/drill) but is deliberately NOT in the view, so a metric
+ *  slice on the PK would 400 ("not found for path <view>.<pk>"). Callers reconcile
+ *  slice dimensions against this set (drop non-members) — mirrors the security
+ *  scrub in lib/infra/governed.ts. Kept in lockstep with `scaffoldCubeYaml`. */
+export function viewMembers(d: Dataset): Set<string> {
+  const pk = primaryKeyColumn(d.columns);
+  const measureNames = new Set(d.measures.map((m) => m.name));
+  const dimCols = d.columns.filter((c) => c.name === pk || !measureNames.has(c.name));
+  return new Set<string>([
+    ...d.measures.map((m) => m.name),
+    ...dimCols.filter((c) => c.name !== pk).map((c) => c.name),
+  ]);
+}
+
 /** Build the Cube model YAML (cube + view) from the Gold columns + named measures —
  *  the file the Metric step would hand-write only the `measures:` block of. */
 export function scaffoldCubeYaml(d: Dataset): string {
@@ -130,7 +195,7 @@ export function scaffoldCubeYaml(d: Dataset): string {
   // against this set (never emit a reference to a column not in the mart, #91).
   const knownMembers = new Set<string>([...dimCols.map((c) => c.name), ...measureNames]);
   const measures = (d.measures.length ? d.measures : [{ name: 'count', type: 'count', sql: '' } as Measure]).map((m) => measureYaml(m, knownMembers));
-  const includes = [...d.measures.map((m) => m.name), ...dimCols.filter((c) => c.name !== pk).map((c) => c.name)];
+  const includes = [...viewMembers(d)]; // the view's member set (measures + non-pk dims)
   return [
     'cubes:',
     `  - name: ${cube}`,
@@ -153,9 +218,14 @@ export function scaffoldCubeYaml(d: Dataset): string {
  *  mart→metric edge appears in OpenMetadata automatically (data-ui-ux.md §C). */
 export function scaffoldExposureYaml(d: Dataset): string {
   const s = slug(d.name);
+  // The exposure NAME namespaces with the cube (so two domains' exposures don't collide);
+  // the dbt `ref('mart_<slug>')` still points at the dataset's dbt mart model (unchanged —
+  // the dbt project owns that name; #155 is scoped to the cube identity). Legacy datasets
+  // keep the bare `<slug>_metrics` name (cubeName === slug), so nothing existing churns.
+  const base = cubeName(d);
   return [
     'exposures:',
-    `  - name: ${s}_metrics`,
+    `  - name: ${base}_metrics`,
     '    type: analysis',
     `    label: ${cubeViewName(d)} metrics`,
     '    depends_on:',
@@ -179,13 +249,21 @@ export function scaffoldDashboardBundle(d: Dataset): string {
       database_service_name: 'trino',
       dataset: { name: view, schema: 'cube', sql: `SELECT * FROM "${view}"` },
       charts: [{ name: `${view} — ${firstMeasure}`, viz_type: 'big_number_total', metric: firstMeasure }],
-      depends_on_exposure: `${slug(d.name)}_metrics`,
+      depends_on_exposure: `${cubeName(d)}_metrics`,
     },
     null,
     2,
   );
 }
 
-export const CUBE_ARTIFACT = (d: Dataset) => `metrics/${slug(d.name)}.cube.yml`;
+/** The file-name base for a dataset's emitted artifacts — the SAME scheme as `cubeName`
+ *  so the cube, its model file, its exposure and its dashboard bundle all namespace (or
+ *  stay legacy) TOGETHER. Namespaced `<domain>__<slug>` post-#155; legacy `<slug>` before
+ *  it (so live artifact paths are byte-stable and never re-written). */
+export function artifactBase(d: Dataset): string {
+  return cubeName(d);
+}
+
+export const CUBE_ARTIFACT = (d: Dataset) => `metrics/${artifactBase(d)}.cube.yml`;
 export const EXPOSURE_ARTIFACT = 'models/exposures.yml';
-export const DASHBOARD_ARTIFACT = (d: Dataset) => `dashboards/${slug(d.name)}.json`;
+export const DASHBOARD_ARTIFACT = (d: Dataset) => `dashboards/${artifactBase(d)}.json`;

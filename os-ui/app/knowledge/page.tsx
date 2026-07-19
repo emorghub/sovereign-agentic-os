@@ -3,45 +3,40 @@
  */
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import PageHeader from '@/components/PageHeader';
-import WorkflowTile from '@/components/knowledge/WorkflowTile';
-import WorkflowView from '@/components/knowledge/WorkflowView';
-import type { WorkflowSummary } from '@/lib/knowledge/store';
-import type { DomainKnowledge } from '@/lib/knowledge/schema';
 import { roleAtLeast, type Role } from '@/lib/core/session';
 import { useTabNavReset } from '@/lib/core/tab-nav';
-import { SCOPE_GROUPS, groupByScope, activeScopeCounts, type ScopeKey } from '@/lib/core/scopes';
+import { SCOPE_GROUPS, type ScopeKey } from '@/lib/core/scopes';
 import type { PersonalKnowledgeSummary } from '@/lib/knowledge/personal-store';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
+import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
+import type { FiledApproval } from '@/lib/governance/approval-notice';
 import DomainTag from '@/components/DomainTag';
 import type { Visibility as LcVisibility } from '@/lib/core/lifecycle';
 import TalkTo from '@/components/talk/TalkTo';
 import { TALK_PRESENTATION } from '@/lib/talk/schema';
+import { FolderPickerModal } from '@/components/core/FolderTree';
+import FolderLayout from '@/components/core/FolderLayout';
+import KnowledgeFolderRail from '@/components/knowledge/KnowledgeFolderRail';
+import { isUnderFolder, type FolderPathNode } from '@/lib/core/folders';
 
 /** Knowledge visibility (Personal/Shared/Marketplace) → OS-wide lifecycle visibility. */
 const lcVis = (v: 'Personal' | 'Shared' | 'Marketplace'): LcVisibility =>
   v === 'Shared' ? 'shared' : v === 'Marketplace' ? 'certified' : 'personal';
 
 /**
- * Knowledge tab — the domain's operating manual.
+ * Knowledge tab — reference knowledge (markdown) added by users.
  *
- * TOP:   General domain knowledge — four guided sections (overview / glossary /
- *        goals / context). Automatically the base context for every domain agent.
+ * My knowledge: personal notes about how you work (owner-only, promotable).
+ * Domain: notes promoted to domain scope.
+ * Company: certified knowledge from across the org.
  *
- * BELOW: Workflow tiles — one per business process. Each opens the tri-directional
- *        step editor (visual swimlane + Monaco markdown + Mermaid). Phase 1 shows
- *        the raw source; Phase 2 wires the full editor.
- *
- * Surface: knowledge, workflows, a search box. All tooling hidden.
+ * The Domain Operating Manual (overview / glossary / goals / context) has
+ * moved to the top of the Workflows tab (/workflows).
  */
-
-type WorkflowGroups = {
-  mine: WorkflowSummary[];
-  domain: WorkflowSummary[];
-  marketplace: WorkflowSummary[];
-};
 
 type UserInfo = { id: string; role: Role; domains: string[] };
 
@@ -51,34 +46,21 @@ type PersonalGroups = {
   marketplace: PersonalKnowledgeSummary[];
 };
 
-const SECTION_PLACEHOLDERS: Record<string, string> = {
-  overview:
-    'A short description of this domain — what it does, who it serves, and what makes it distinct…',
-  glossary:
-    'Key terms and their definitions — e.g.\n\n**Data Product:** A certified, shared dataset in the marketplace.',
-  goals:
-    'The domain\'s current objectives — e.g.\n\n- Reduce submission error rate below 0.1%\n- Achieve 48h SLA on bank submissions',
-  context:
-    'Background knowledge agents need — key partners, systems, constraints, deadlines…',
-};
-
 export default function KnowledgePage() {
-  const [view, setView] = useState<'overview' | 'workflows' | 'new' | 'detail'>('overview');
-  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
+  return (
+    <Suspense>
+      <KnowledgePageInner />
+    </Suspense>
+  );
+}
 
-  // Clicking the Knowledge sidebar link while inside a workflow detail returns to
-  // the tab root (same-route client nav wouldn't otherwise re-mount this page).
-  useTabNavReset(() => { setSelectedWorkflowId(null); setView('overview'); });
+function KnowledgePageInner() {
+  const searchParams = useSearchParams();
+  const { notifyApprovalFiled } = useApprovalNotifier();
+  // Clicking the Knowledge sidebar link returns to this page root.
+  useTabNavReset(() => {});
 
-  // Domain knowledge (top section)
-  const [domainKnowledge, setDomainKnowledge] = useState<DomainKnowledge | null>(null);
-  const [dkLoading, setDkLoading] = useState(true);
-  const [editingSection, setEditingSection] = useState<string | null>(null);
-  const [sectionDraft, setSectionDraft] = useState('');
-  const [dkSaving, setDkSaving] = useState(false);
-  const [dkMsg, setDkMsg] = useState('');
-
-  // Knowledge sub-area scope (Shared = domain sections · My = personal entries · Marketplace).
+  // Knowledge scope (My · Shared · Marketplace).
   const [kScope, setKScope] = useState<ScopeKey>('all');
 
   // Personal general-knowledge entries ("My knowledge").
@@ -90,34 +72,17 @@ export default function KnowledgePage() {
   const [pkSaving, setPkSaving] = useState(false);
   const [pkMsg, setPkMsg] = useState('');
   const [pkPromoting, setPkPromoting] = useState(false);
-
-  // Workflows
-  const [groups, setGroups] = useState<WorkflowGroups | null>(null);
-  const [wfScope, setWfScope] = useState<ScopeKey>('all');
-  const [wfLoading, setWfLoading] = useState(true);
-  const [wfError, setWfError] = useState('');
-  // Archive/lifecycle UI
+  const [confirmDemoteId, setConfirmDemoteId] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
 
-  // New workflow form
-  const [newTitle, setNewTitle] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState('');
+  // Folder navigation state for "My knowledge"
+  const [pkFolder, setPkFolder] = useState<string>('/');
+  const [pkFolderNodes, setPkFolderNodes] = useState<FolderPathNode[]>([]);
+  // Picker modal: which entry id is being moved; null = closed.
+  const [pkMoveId, setPkMoveId] = useState<string | null>(null);
 
   // User info for role-based UI
   const [user, setUser] = useState<UserInfo | null>(null);
-
-  const loadDomainKnowledge = useCallback(async () => {
-    setDkLoading(true);
-    try {
-      const res = await fetch('/api/knowledge/domain', { cache: 'no-store' });
-      if (res.ok) setDomainKnowledge(await res.json());
-    } catch {
-      /* leave domainKnowledge null → the "Could not load" surface renders */
-    } finally {
-      setDkLoading(false);
-    }
-  }, []);
 
   const loadPersonal = useCallback(async () => {
     try {
@@ -128,72 +93,50 @@ export default function KnowledgePage() {
     }
   }, [showArchived]);
 
-  const loadWorkflows = useCallback(async () => {
-    setWfLoading(true);
-    setWfError('');
+  const loadFolders = useCallback(async () => {
     try {
-      // ?archived=1 additionally returns soft-archived workflows (shown in their
-      // own section with Restore / Delete).
-      const res = await fetch(`/api/knowledge/workflows${showArchived ? '?archived=1' : ''}`, { cache: 'no-store' });
-      if (res.ok) setGroups(await res.json());
-      else setWfError('Could not load workflows.');
-    } catch {
-      setWfError('Network error loading workflows.');
-    } finally {
-      setWfLoading(false);
-    }
+      // Include archived folder rows when the user is viewing archived, so the shared
+      // ••• menu can offer Restore / Delete on them (one lifecycle, every tab).
+      const res = await fetch(
+        `/api/folders?tab=knowledge&scope=personal${showArchived ? '&archived=1' : ''}`,
+        { cache: 'no-store' },
+      );
+      if (res.ok) {
+        const d = await res.json();
+        // Keep the FULL rows (id + archived) so the lifecycle menu can target the row.
+        setPkFolderNodes((d.folders ?? []) as FolderPathNode[]);
+      }
+    } catch { /* leave empty */ }
   }, [showArchived]);
 
   useEffect(() => {
-    void loadDomainKnowledge();
-    // Load user role from existing /api/auth endpoint. `/api/auth/me` nests the
-    // profile under `.user`, so read that (else role stays undefined and the
-    // Builder-only affordances never light up).
     fetch('/api/auth/me', { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => d?.user && setUser(d.user))
       .catch(() => null);
-  }, [loadDomainKnowledge]);
+  }, []);
 
-  // Reload workflows + personal knowledge whenever the archived filter toggles
-  // (both loaders depend on showArchived).
   useEffect(() => {
-    void loadWorkflows();
     void loadPersonal();
-  }, [loadWorkflows, loadPersonal]);
+    void loadFolders();
+  }, [loadPersonal, loadFolders]);
 
-  // ── Domain section editing ───────────────────────────────────────────────
-
-  function startEditSection(id: string) {
-    const sec = domainKnowledge?.sections.find((s) => s.id === id);
-    setSectionDraft(sec?.content ?? '');
-    setEditingSection(id);
-    setDkMsg('');
-  }
-
-  async function saveSectionDraft() {
-    if (!editingSection || dkSaving) return;
-    setDkSaving(true);
-    try {
-      const res = await fetch('/api/knowledge/domain', {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sections: [{ id: editingSection, content: sectionDraft }] }),
-      });
-      if (res.ok) {
-        setDomainKnowledge(await res.json());
-        setEditingSection(null);
-        setDkMsg('Saved.');
-        setTimeout(() => setDkMsg(''), 2000);
-      } else {
-        setDkMsg('Could not save — please retry.');
-      }
-    } catch {
-      setDkMsg('Could not save — please retry.');
-    } finally {
-      setDkSaving(false);
-    }
-  }
+  // ?focus=<knowledgeId> deep-link: once entries load, open that entry for editing.
+  // Searches across all three scope groups (mine/domain/marketplace). Switches to 'all'
+  // scope so the entry is always visible. A ref prevents re-firing.
+  const focusApplied = useRef(false);
+  const focusId = searchParams.get('focus') ? decodeURIComponent(searchParams.get('focus')!) : null;
+  useEffect(() => {
+    if (!focusId || focusApplied.current || !personal) return;
+    const all = [...(personal.mine ?? []), ...(personal.domain ?? []), ...(personal.marketplace ?? [])];
+    const target = all.find((e) => e.id === focusId);
+    if (!target) return; // unknown id — no-op
+    focusApplied.current = true;
+    setKScope('all');
+    void openPersonal(focusId);
+  // openPersonal is defined below — safe to omit from deps (stable function reference in closure)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusId, personal]);
 
   // ── Personal knowledge ("My knowledge") ──────────────────────────────────
 
@@ -250,8 +193,6 @@ export default function KnowledgePage() {
 
   /**
    * Promote a personal entry one governed rung along Personal → Shared → Marketplace.
-   * Reuses the SAME ladder every artifact rides (`/promote`): a Builder+ promotes
-   * (Admin certifies) in one shot; a creator files request_promotion (docs-first).
    */
   async function promotePersonal(id: string) {
     if (pkPromoting) return;
@@ -261,37 +202,33 @@ export default function KnowledgePage() {
       const res = await fetch(`/api/knowledge/personal/${id}/promote`, { method: 'POST' });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) { setPkMsg(d.error ?? 'Could not promote.'); return; }
-      setPkMsg(d.requested ? 'Requested — an approver will review it.' : 'Promoted.');
+      setPkMsg(d.requested ? 'Requested — approve it in Policies & Approvals.' : 'Promoted.');
+      // ONE OS-wide "this needs approval" confirmation (Policies link + inline approve).
+      const approval = d.approval as FiledApproval | undefined;
+      if (d.requested && approval?.id) notifyApprovalFiled(approval, 'knowledge', () => { void loadPersonal(); });
       setTimeout(() => setPkMsg(''), 2500);
       await loadPersonal();
     } catch (e) { setPkMsg((e as Error).message); }
     finally { setPkPromoting(false); }
   }
 
-  // ── Create workflow ──────────────────────────────────────────────────────
-
-  async function createWorkflow() {
-    const title = newTitle.trim();
-    if (!title || creating) return;
-    setCreating(true);
-    setCreateError('');
+  /**
+   * Revoke sharing on a personal entry one governed rung along
+   * Marketplace → Shared → Personal (`/demote`).
+   */
+  async function demotePersonal(id: string) {
+    if (pkPromoting) return;
+    setPkPromoting(true);
+    setPkMsg('');
     try {
-      const res = await fetch('/api/knowledge/workflows', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ title }),
-      });
-      const d = await res.json();
-      if (!res.ok) { setCreateError(d.error ?? 'Failed to create workflow.'); return; }
-      setNewTitle('');
-      await loadWorkflows();
-      setSelectedWorkflowId(d.id);
-      setView('detail');
-    } catch (e) {
-      setCreateError((e as Error).message);
-    } finally {
-      setCreating(false);
-    }
+      const res = await fetch(`/api/knowledge/personal/${id}/demote`, { method: 'POST' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setPkMsg(d.error ?? 'Could not revoke.'); return; }
+      setPkMsg('Revoked.');
+      setTimeout(() => setPkMsg(''), 2500);
+      await loadPersonal();
+    } catch (e) { setPkMsg((e as Error).message); }
+    finally { setPkPromoting(false); }
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
@@ -299,47 +236,10 @@ export default function KnowledgePage() {
   const canPublish = !!user && roleAtLeast(user.role, 'builder');
   const canCertify = !!user && roleAtLeast(user.role, 'admin');
   const uid = user?.id ?? '';
-  const allWorkflows = [
-    ...(groups?.mine ?? []),
-    ...(groups?.domain ?? []),
-    ...(groups?.marketplace ?? []),
-  ];
-  // The OS-wide four groups (All · My · Shared · Marketplace), owner-scoped for "My".
-  const wfScoped = groups ? groupByScope(groups, uid) : null;
-  const wfCounts = groups ? activeScopeCounts(groups, uid) : null;
-  const scopedWorkflows = (wfScoped ? wfScoped[wfScope] : []).filter((w) => !w.archived);
-  const archivedWorkflows = allWorkflows.filter((w) => w.archived);
-  const activeCount = allWorkflows.filter((w) => !w.archived).length;
-
-  const openWorkflow = (id: string) => { setSelectedWorkflowId(id); setView('detail'); };
-
-  // One workflow card + its lifecycle actions (the OS-wide Archive/Restore · Delete ·
-  // Version-history cluster). The tile is a bare <button>, so the controls live in a
-  // sibling action row — never nested inside the button.
-  const renderCell = (w: WorkflowSummary) => (
-    <div key={w.id} className="k-wf-cell">
-      <WorkflowTile workflow={w} onClick={openWorkflow} />
-      <div className="k-wf-actions">
-        <LifecycleActions
-          id={w.id}
-          name={w.title}
-          kind="knowledge"
-          visibility={lcVis(w.visibility)}
-          archived={!!w.archived}
-          api={`/api/knowledge/workflows/${w.id}`}
-          onChanged={() => void loadWorkflows()}
-          compact
-          surface="tile"
-        />
-      </div>
-    </div>
-  );
 
   // One personal ("My knowledge") entry — header + open/close, and when open the
-  // full detail: title/body editor, the OS-wide lifecycle cluster (Archive/Restore ·
-  // Delete-when-archived · Version history), the promotion ladder control, and a
-  // source-domain tag once it is Shared/Marketplace. Reused across all scopes so a
-  // promoted note keeps its full detail (versions + governance) wherever it lands.
+  // full detail: title/body editor, the OS-wide lifecycle cluster, the promotion
+  // ladder control, and a source-domain tag once it is Shared/Marketplace.
   const renderPersonalEntry = (e: PersonalKnowledgeSummary, editable: boolean) => {
     const open = pkOpenId === e.id;
     const shared = e.visibility === 'Shared' || e.visibility === 'Marketplace';
@@ -348,9 +248,10 @@ export default function KnowledgePage() {
         <div className="k-section-head">
           <span className="k-section-label">{e.title}</span>
           <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+            {e.archived && <span className="badge muted">archived</span>}
             {shared && <DomainTag domain={e.domain} />}
-            {e.visibility === 'Shared' && <span className="badge vis-shared">Shared in Domain</span>}
-            {e.visibility === 'Marketplace' && <span className="badge vis-certified">Certified</span>}
+            {e.visibility === 'Shared' && <span className="badge vis-shared">Domain</span>}
+            {e.visibility === 'Marketplace' && <span className="badge vis-certified">Company</span>}
             <button className="btn ghost sm" onClick={() => void (open ? setPkOpenId(null) : openPersonal(e.id))}>
               {open ? 'Close' : 'Open'}
             </button>
@@ -388,15 +289,36 @@ export default function KnowledgePage() {
               />
               <div className="row" style={{ gap: 8, alignItems: 'center' }}>
                 {pkMsg === 'Saved.' ? <span className="hint" style={{ color: 'var(--teal)' }}>Saved.</span> : null}
-                {/* Promotion ladder — Personal → Shared → (Marketplace).
-                    Docs-first: Builder+ promotes / Admin certifies, a creator files a request. */}
+                {/* Promotion ladder — Personal → Shared → (Marketplace). */}
                 {editable && !e.archived && e.visibility !== 'Marketplace' && (
                   <button className="btn ghost sm" onClick={() => void promotePersonal(e.id)} disabled={pkPromoting} title="Share this note along the governed promotion ladder">
                     {pkPromoting ? <span className="spin" /> : (
                       e.visibility === 'Shared'
-                        ? (canCertify ? 'Certify to marketplace' : 'Request certification')
-                        : (canPublish ? 'Promote to domain' : 'Request promotion')
+                        ? (canCertify ? 'Certify to Company' : 'Request certification')
+                        : (canPublish ? 'Promote to Domain' : 'Request promotion')
                     )}
+                  </button>
+                )}
+                {/* Revoke sharing — Marketplace → Shared (Admin) / Shared → Personal (owner or Builder+). */}
+                {!e.archived &&
+                  ((e.visibility === 'Marketplace' && canCertify) ||
+                    (e.visibility === 'Shared' && editable)) &&
+                  (confirmDemoteId === e.id ? (
+                    <>
+                      <button className="btn sm" onClick={() => { setConfirmDemoteId(null); void demotePersonal(e.id); }} disabled={pkPromoting} style={{ background: 'var(--danger, #b42318)' }}>
+                        {pkPromoting ? <span className="spin" /> : (e.visibility === 'Marketplace' ? 'Confirm revoke → Shared' : 'Confirm unshare → Personal')}
+                      </button>
+                      <button className="btn ghost sm" onClick={() => setConfirmDemoteId(null)} disabled={pkPromoting}>Cancel</button>
+                    </>
+                  ) : (
+                    <button className="btn ghost sm" onClick={() => setConfirmDemoteId(e.id)} disabled={pkPromoting} title="Revoke sharing one governed rung">
+                      {e.visibility === 'Marketplace' ? 'Revoke from Company' : 'Unshare'}
+                    </button>
+                  ))}
+                {editable && (
+                  <button className="btn ghost sm" onClick={() => setPkMoveId(e.id)}
+                    title="Move to a folder">
+                    Move…
                   </button>
                 )}
                 {editable && (
@@ -412,343 +334,151 @@ export default function KnowledgePage() {
     );
   };
 
-  // ── Workflow detail — the tri-directional editor (swimlane + markdown + Mermaid) ─
-
-  if (view === 'detail' && selectedWorkflowId) {
-    return (
-      <WorkflowView
-        workflowId={selectedWorkflowId}
-        onBack={() => { setSelectedWorkflowId(null); setView('workflows'); void loadWorkflows(); }}
-      />
-    );
-  }
-
   return (
     <ConfirmProvider>
-      <PageHeader title="Knowledge" crumb="domain operating manual · workflows · context" tutorial="knowledge" />
+      <PageHeader title="Knowledge" crumb="personal notes · domain · company" tutorial="knowledge" />
       <div className="content">
 
-        {/* ── Tab navigation ── */}
-        <div className="tabstrip">
-          <button
-            className={view === 'overview' ? 'active' : ''}
-            onClick={() => setView('overview')}
+        <p className="lead" style={{ marginTop: 18 }}>
+          Reference knowledge (markdown) that grounds your agents. <strong>My knowledge</strong> is
+          personal context about how you work; <strong>Domain</strong> are notes promoted
+          by domain members; <strong>Company</strong> is certified knowledge from across the org.
+          The <strong>Domain Operating Manual</strong> (overview / glossary / goals / context) lives
+          at the top of the <strong>Workflows</strong> tab.
+        </p>
+
+        {/* ── CREATE — capture a note in one line. ── */}
+        <div className="k-create">
+          <div className="k-create-lead">
+            <div className="k-create-title">New knowledge</div>
+            <p className="hint" style={{ margin: 0 }}>
+              Jot a personal note about how you work — it grounds your own agents and
+              can be promoted to the domain later.
+            </p>
+          </div>
+          <form
+            onSubmit={(ev) => { ev.preventDefault(); setKScope('mine'); void createPersonal(); }}
+            className="k-create-form"
           >
-            General
-          </button>
-          <button
-            className={view === 'workflows' || view === 'new' ? 'active' : ''}
-            onClick={() => setView('workflows')}
-          >
-            Workflows
-            {activeCount > 0 && (
-              <span className="badge muted" style={{ marginLeft: 7, fontSize: 10 }}>
-                {activeCount}
-              </span>
-            )}
-          </button>
+            <input
+              value={pkNewTitle}
+              onChange={(ev) => setPkNewTitle(ev.target.value)}
+              placeholder="e.g. How I like reports, key contacts, my domain…"
+              aria-label="New knowledge note title"
+            />
+            <button className="btn" type="submit" disabled={pkCreating || !pkNewTitle.trim()}>
+              {pkCreating ? <span className="spin" /> : 'Add note'}
+            </button>
+          </form>
         </div>
 
-        {/* ══════════════════════════════════════════════════════════════
-            KNOWLEDGE — four groups: All · My · Shared · Marketplace
-            My      = personal entries about the user (feeds their own agents)
-            Shared  = the domain operating manual (four guided sections)
-            Market  = certified general-knowledge entries about other domains
-        ══════════════════════════════════════════════════════════════ */}
-        {view === 'overview' && (
-          <>
-            <p className="lead" style={{ marginTop: 18 }}>
-              General knowledge that grounds your agents. <strong>My knowledge</strong> is
-              personal context about how you work; <strong>Shared in Domain</strong> is the
-              domain&rsquo;s operating manual; <strong>Marketplace</strong> is certified
-              knowledge from across the org.
-            </p>
+        {/* Scope switcher — the OS-wide four groups. */}
+        <div className="seg" style={{ marginTop: 14 }}>
+          {SCOPE_GROUPS.map((g) => {
+            const n = g.key === 'mine' ? (personal?.mine.length ?? 0)
+              : g.key === 'shared' ? (personal?.domain.length ?? 0)
+              : g.key === 'marketplace' ? (personal?.marketplace.length ?? 0)
+              : undefined; // 'all' has no single count
+            return (
+              <button key={g.key} type="button" className={kScope === g.key ? 'on' : ''} onClick={() => setKScope(g.key)}>
+                {g.label('Knowledge')}{n !== undefined ? ` (${n})` : ''}
+              </button>
+            );
+          })}
+        </div>
 
-            {/* ── CREATE — the tab's focal point: capture a note in one line, or
-                start a workflow. Primary action lives up top, never buried. ── */}
-            <div className="k-create">
-              <div className="k-create-lead">
-                <div className="k-create-title">New knowledge</div>
-                <p className="hint" style={{ margin: 0 }}>
-                  Jot a personal note about how you work — it grounds your own agents and
-                  can be promoted to the domain later.
+        {/* ── ONE folder shell (identical to Files/Data/Metrics): the scope segment
+            above drives which lane's entries show; the LEFT folder rail filters them;
+            the MAIN area lists the entries. No more three simultaneous lanes. ── */}
+        {(() => {
+          // The active lane's entries — the scope segment picks it (My/Domain/Company),
+          // and 'all' concatenates the three. Each entry lives in exactly one lane
+          // (by visibility), so the concat never duplicates. `editable` is per-entry:
+          // Personal = always; Shared/Company = owner or a publisher (unchanged governance).
+          const lane =
+            kScope === 'mine' ? (personal?.mine ?? [])
+            : kScope === 'shared' ? (personal?.domain ?? [])
+            : kScope === 'marketplace' ? (personal?.marketplace ?? [])
+            : [...(personal?.mine ?? []), ...(personal?.domain ?? []), ...(personal?.marketplace ?? [])];
+          const editableOf = (e: PersonalKnowledgeSummary) =>
+            e.visibility === 'Personal' ? true : (e.owner === uid || canPublish);
+
+          const active = lane
+            .filter((e) => !e.archived)
+            .filter((e) => isUnderFolder(pkFolder, e.folder ?? '/'));
+          const archived = lane.filter((e) => e.archived);
+
+          const emptyCopy =
+            kScope === 'shared' ? 'No shared notes yet. Promote a personal note to share it with your domain.'
+            : kScope === 'marketplace' ? 'Nothing certified yet. Admins certify general knowledge to Company.'
+            : 'No personal knowledge yet. Add a note above — it stays private to you.';
+
+          return (
+            <div style={{ marginTop: 20 }}>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+                <p className="hint" style={{ margin: 0, maxWidth: 620 }}>
+                  Notes are grounded reference for your agents. Organise <strong>My knowledge</strong> in
+                  folders on the left; the scope tabs above switch between My, Domain and Company.
                 </p>
-              </div>
-              <form
-                onSubmit={(ev) => { ev.preventDefault(); setKScope('mine'); void createPersonal(); }}
-                className="k-create-form"
-              >
-                <input
-                  value={pkNewTitle}
-                  onChange={(ev) => setPkNewTitle(ev.target.value)}
-                  placeholder="e.g. How I like reports, key contacts, my domain…"
-                  aria-label="New knowledge note title"
-                />
-                <button className="btn" type="submit" disabled={pkCreating || !pkNewTitle.trim()}>
-                  {pkCreating ? <span className="spin" /> : 'Add note'}
-                </button>
                 <button
-                  type="button"
-                  className="btn ghost"
-                  onClick={() => { setView('new'); }}
-                  title="Document a business process as a workflow"
-                >
-                  + Workflow
-                </button>
-              </form>
-            </div>
-
-            {/* Scope switcher — the OS-wide four groups. */}
-            <div className="seg" style={{ marginTop: 14 }}>
-              {SCOPE_GROUPS.map((g) => {
-                const n = g.key === 'mine' ? (personal?.mine.length ?? 0)
-                  : g.key === 'shared' ? (
-                      (domainKnowledge?.sections.filter((s) => s.content).length ?? 0) +
-                      (personal?.domain.length ?? 0)
-                    )
-                  : g.key === 'marketplace' ? (personal?.marketplace.length ?? 0)
-                  : undefined; // 'all' has no single count
-                return (
-                  <button key={g.key} type="button" className={kScope === g.key ? 'on' : ''} onClick={() => setKScope(g.key)}>
-                    {g.label('Knowledge')}{n !== undefined ? ` (${n})` : ''}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* The three scope lanes in a flex column so `order` can float
-                My knowledge to the top in the combined "All" view (the tab's
-                focal content), ahead of Shared and Marketplace. */}
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-
-            {/* ── SHARED: the domain operating manual (four guided sections) ── */}
-            {(kScope === 'all' || kScope === 'shared') && (
-              <div style={{ marginTop: 20, order: 2 }}>
-                <div className="section-title">Shared in Domain · the domain operating manual</div>
-                <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
-                  Pinned as base context for every agent in this domain. Keep it short and current.
-                </p>
-                {dkLoading ? (
-                  <div className="stub-page"><span className="spin" /> Loading…</div>
-                ) : domainKnowledge ? (
-                  <>
-                    {domainKnowledge.sections.map((section) => (
-                      <div key={section.id} className="k-section">
-                        <div className="k-section-head">
-                          <span className="k-section-label">{section.title}</span>
-                          {editingSection !== section.id && (
-                            <button className="btn ghost sm" onClick={() => startEditSection(section.id)}>Edit</button>
-                          )}
-                        </div>
-                        {editingSection === section.id ? (
-                          <>
-                            <textarea
-                              className="k-section-editor"
-                              rows={6}
-                              value={sectionDraft}
-                              onChange={(e) => setSectionDraft(e.target.value)}
-                              placeholder={SECTION_PLACEHOLDERS[section.id]}
-                              autoFocus
-                            />
-                            <div className="row" style={{ gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
-                              <button className="btn ghost sm" onClick={() => setEditingSection(null)} disabled={dkSaving}>Cancel</button>
-                              <button className="btn sm" onClick={() => void saveSectionDraft()} disabled={dkSaving}>
-                                {dkSaving ? <span className="spin" /> : 'Save'}
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <div className="k-section-body">
-                            {section.content ? (
-                              <pre className="k-prose">{section.content}</pre>
-                            ) : (
-                              <span className="muted" style={{ fontSize: 13, fontStyle: 'italic' }}>
-                                {SECTION_PLACEHOLDERS[section.id]}
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                    {dkMsg && (
-                      dkMsg === 'Saved.'
-                        ? <div className="hint" style={{ marginTop: 8, color: 'var(--teal)' }}>{dkMsg}</div>
-                        : <div className="error" style={{ marginTop: 8 }}>{dkMsg}</div>
-                    )}
-                  </>
-                ) : (
-                  <div className="stub-page">Could not load domain knowledge.</div>
-                )}
-
-                {/* Personal notes promoted to the domain (Shared visibility). They
-                    ride the same governed ladder; each carries its source-domain tag. */}
-                {personal && personal.domain.length > 0 && (
-                  <div style={{ marginTop: 18 }}>
-                    <div className="section-title" style={{ marginTop: 0, fontSize: 12 }}>Shared notes</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
-                      {personal.domain.map((e) => renderPersonalEntry(e, e.owner === uid || canPublish))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── MY KNOWLEDGE: personal general-knowledge entries — the tab's
-                focal lane (order 1 in the combined view). ── */}
-            {(kScope === 'all' || kScope === 'mine') && (
-              <div style={{ marginTop: 24, order: 1 }}>
-                <div className="section-title" style={{ marginTop: 0 }}>My knowledge</div>
-                <p className="hint" style={{ marginTop: 0 }}>
-                  Personal notes about your role and how you work — feeds your own agents &amp; assistant. Owner-only.
-                  Add one above; promote a note to share it with your domain.
-                </p>
-
-                {pkMsg && pkMsg !== 'Saved.' && pkMsg !== 'Promoted.' && !pkMsg.startsWith('Requested') ? <div className="error" style={{ marginTop: 8 }}>{pkMsg}</div> : null}
-                {(pkMsg === 'Promoted.' || pkMsg.startsWith('Requested')) ? <div className="hint" style={{ marginTop: 8, color: 'var(--teal)' }}>{pkMsg}</div> : null}
-
-                {personal === null ? (
-                  <div className="stub-page"><span className="spin" /> Loading…</div>
-                ) : personal.mine.length === 0 ? (
-                  <div className="stub-page" style={{ marginTop: 8 }}>
-                    No personal knowledge yet. Add a note above — it stays private to you.
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
-                    {personal.mine.map((e) => renderPersonalEntry(e, true))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── MARKETPLACE: certified general-knowledge entries ── */}
-            {(kScope === 'all' || kScope === 'marketplace') && (
-              <div style={{ marginTop: 24, order: 3 }}>
-                <div className="section-title">Marketplace · certified knowledge</div>
-                {personal === null ? (
-                  <div className="stub-page"><span className="spin" /> Loading…</div>
-                ) : personal.marketplace.length === 0 ? (
-                  <div className="stub-page" style={{ marginTop: 8 }}>
-                    Nothing certified yet. Admins certify general knowledge into the marketplace.
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
-                    {personal.marketplace.map((e) => renderPersonalEntry(e, e.owner === uid || canPublish))}
-                  </div>
-                )}
-              </div>
-            )}
-            </div>
-          </>
-        )}
-
-        {/* ══════════════════════════════════════════════════════════════
-            WORKFLOWS — tile grid
-        ══════════════════════════════════════════════════════════════ */}
-        {(view === 'workflows' || view === 'new') && (
-          <>
-            <div className="row" style={{ marginTop: 18, justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 10 }}>
-              <p className="lead" style={{ margin: 0 }}>
-                One tile per business process — steps, decision rules, and tacit knowledge
-                that agents follow.
-              </p>
-              <div className="row" style={{ gap: 8 }}>
-                <button
-                  className={`btn ghost sm ${showArchived ? 'active' : ''}`}
+                  className="btn ghost sm"
+                  style={{ opacity: showArchived ? 1 : 0.7 }}
                   onClick={() => setShowArchived((s) => !s)}
+                  title="Archived notes are hidden by default"
                 >
                   {showArchived ? 'Hide archived' : 'Show archived'}
                 </button>
-                <button
-                  className="btn sm"
-                  onClick={() => setView(view === 'new' ? 'workflows' : 'new')}
-                >
-                  {view === 'new' ? 'Cancel' : '+ New workflow'}
-                </button>
               </div>
-            </div>
 
-            {view === 'new' && (
-              <div className="k-new-form">
-                <form
-                  onSubmit={(e) => { e.preventDefault(); void createWorkflow(); }}
-                  className="row"
-                  style={{ gap: 10, marginTop: 14, alignItems: 'flex-start' }}
-                >
-                  <input
-                    type="text"
-                    value={newTitle}
-                    onChange={(e) => setNewTitle(e.target.value)}
-                    placeholder="Workflow name — e.g. Bank Submission, Customer Onboarding…"
-                    autoFocus
-                    style={{ flex: 1 }}
+              {pkMsg && pkMsg !== 'Saved.' && pkMsg !== 'Promoted.' && !pkMsg.startsWith('Requested') ? <div className="error" style={{ marginTop: 8 }}>{pkMsg}</div> : null}
+              {(pkMsg === 'Promoted.' || pkMsg.startsWith('Requested')) ? <div className="hint" style={{ marginTop: 8, color: 'var(--teal)' }}>{pkMsg}</div> : null}
+
+              <FolderLayout
+                allLabel="All knowledge"
+                allCount={active.length}
+                allSelected={pkFolder === '/'}
+                onSelectAll={() => setPkFolder('/')}
+                rail={
+                  <KnowledgeFolderRail
+                    nodes={pkFolderNodes}
+                    items={lane.map((e) => ({ id: e.id, folder: e.folder ?? '/', name: e.title }))}
+                    selectedPath={pkFolder}
+                    onSelect={setPkFolder}
+                    onChanged={() => { void loadPersonal(); void loadFolders(); }}
                   />
-                  <button className="btn" type="submit" disabled={creating || !newTitle.trim()}>
-                    {creating ? <span className="spin" /> : 'Create'}
-                  </button>
-                </form>
-                {createError && <div className="error" style={{ marginTop: 8 }}>{createError}</div>}
-              </div>
-            )}
-
-            {wfLoading ? (
-              <div className="stub-page" style={{ marginTop: 24 }}>
-                <span className="spin" /> Loading workflows…
-              </div>
-            ) : wfError ? (
-              <div className="error" style={{ marginTop: 16 }}>{wfError}</div>
-            ) : (
-              <>
-                {/* Scope switcher — the OS-wide four groups: All · My · Shared · Marketplace. */}
-                <div className="seg" style={{ marginTop: 18 }}>
-                  {SCOPE_GROUPS.map((g) => (
-                    <button key={g.key} type="button" className={wfScope === g.key ? 'on' : ''} onClick={() => setWfScope(g.key)}>
-                      {g.label('Workflows')}{wfCounts ? ` (${wfCounts[g.key]})` : ''}
-                    </button>
-                  ))}
-                </div>
-
-                {scopedWorkflows.length > 0 ? (
-                  <div className="k-workflow-grid" style={{ marginTop: 16 }}>{scopedWorkflows.map(renderCell)}</div>
-                ) : null}
-
-                {scopedWorkflows.length === 0 && !showArchived && (
-                  <div className="stub-page" style={{ marginTop: 32 }}>
-                    {wfScope === 'mine' || wfScope === 'all'
-                      ? 'No workflows yet. Create one above to document a business process.'
-                      : wfScope === 'shared'
-                        ? 'Nothing shared in your domain yet — publish a workflow to share it.'
-                        : 'Nothing in the marketplace yet.'}
+                }
+              >
+                {personal === null ? (
+                  <div className="stub-page"><span className="spin" /> Loading…</div>
+                ) : active.length === 0 ? (
+                  <div className="stub-page">{emptyCopy}</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {active.map((e) => renderPersonalEntry(e, editableOf(e)))}
                   </div>
                 )}
 
                 {showArchived && (
-                  archivedWorkflows.length > 0 ? (
+                  archived.length > 0 ? (
                     <>
-                      <div className="section-title" style={{ marginTop: 28 }}>Archived</div>
-                      <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
-                        Archived workflows are hidden from agents and the working lists.
-                        Restore brings one back; Delete removes it permanently.
+                      <div className="section-title" style={{ marginTop: 20, fontSize: 12 }}>Archived</div>
+                      <p className="hint" style={{ marginTop: 0, marginBottom: 8 }}>
+                        Archived notes are hidden from your agents. Open one to Restore it or Delete it permanently.
                       </p>
-                      <div className="k-workflow-grid">{archivedWorkflows.map(renderCell)}</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {archived.map((e) => renderPersonalEntry(e, editableOf(e)))}
+                      </div>
                     </>
                   ) : (
-                    <div className="hint" style={{ marginTop: 20 }}>No archived workflows.</div>
+                    <div className="hint" style={{ marginTop: 16 }}>No archived notes.</div>
                   )
                 )}
+              </FolderLayout>
+            </div>
+          );
+        })()}
 
-                {!canPublish && allWorkflows.some((w) => w.status === 'draft') && (
-                  <div className="hint" style={{ marginTop: 16 }}>
-                    Draft workflows are visible to you and domain builders.
-                    A builder or admin publishes them to make them live.
-                  </div>
-                )}
-              </>
-            )}
-          </>
-        )}
-
-
-        {/* Talk to Knowledge — governed retrieval over workflows + knowledge entries. */}
+        {/* Talk to Knowledge — governed retrieval over knowledge entries. */}
         {(() => {
           const talk = TALK_PRESENTATION.knowledge;
           return (
@@ -758,6 +488,35 @@ export default function KnowledgePage() {
           );
         })()}
       </div>
+
+      {/* Folder picker modal — used by the "Move…" button on any knowledge entry. */}
+      <FolderPickerModal
+        open={pkMoveId !== null}
+        tab="knowledge"
+        personalNodes={pkFolderNodes}
+        title="Move note to folder"
+        onConfirm={async ({ path }) => {
+          const id = pkMoveId;
+          setPkMoveId(null);
+          if (!id) return;
+          await fetch(`/api/knowledge/personal/${id}/folder`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ folder: path }),
+          });
+          await loadPersonal();
+          await loadFolders();
+        }}
+        onCancel={() => setPkMoveId(null)}
+        onCreate={async (_scope, path) => {
+          await fetch('/api/folders', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ tab: 'knowledge', scope: 'personal', path }),
+          });
+          await loadFolders();
+        }}
+      />
 
       <style>{KnowledgeStyles}</style>
     </ConfirmProvider>
@@ -769,8 +528,7 @@ export default function KnowledgePage() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const KnowledgeStyles = `
-/* Create call-to-action — the tab's focal affordance. A quiet gold-lined panel
-   (not a loud hero): title + one-line helper on the left, capture form on the right. */
+/* Create call-to-action — a quiet gold-lined panel. */
 .k-create {
   display: flex;
   align-items: center;
@@ -843,82 +601,5 @@ const KnowledgeStyles = `
   word-break: break-word;
   margin: 0;
   color: var(--text);
-}
-.k-agent-output {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  cursor: text;
-  user-select: text;
-}
-
-/* Workflow grid */
-.k-workflow-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(256px, 1fr));
-  gap: 14px;
-  margin-top: 12px;
-}
-/* A workflow card + its lifecycle action row (archive / restore / delete). */
-.k-wf-cell { display: flex; flex-direction: column; gap: 6px; }
-.k-wf-actions {
-  display: flex;
-  gap: 6px;
-  justify-content: flex-end;
-  opacity: 0.7;
-  transition: opacity 0.14s;
-}
-.k-wf-cell:hover .k-wf-actions { opacity: 1; }
-.k-wf-actions .k-danger { color: var(--danger, #d9534f); border-color: var(--danger, #d9534f); }
-
-/* New workflow form */
-.k-new-form {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 18px;
-  margin-top: 14px;
-}
-
-/* Workflow tile (also in WorkflowTile.tsx but scoped here too for detail view) */
-.workflow-tile {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 16px 18px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  text-align: left;
-  transition: border-color 0.14s, box-shadow 0.14s;
-  color: var(--text);
-  font-family: var(--font-body);
-  width: 100%;
-}
-.workflow-tile:hover {
-  border-color: var(--gold-line);
-  box-shadow: 0 0 0 1px var(--gold-line), 0 4px 14px rgba(200,162,74,0.07);
-}
-.workflow-tile-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-}
-.workflow-tile-title {
-  font-family: var(--font-head);
-  font-weight: 600;
-  font-size: 15px;
-  letter-spacing: 0.3px;
-  line-height: 1.25;
-  flex: 1;
-}
-.workflow-tile-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
 }
 `;

@@ -744,17 +744,12 @@ litellmAgentKey:
     - sovereign-default   # standard/worker tier (STACKIT gpt-oss-20b)
     - sovereign-mock      # back-compat alias -> same standard/worker tier
     - sovereign-reasoning # reasoning tier (STACKIT Qwen3-VL-235B)
-    - sovereign-reasoning-fast # fast reasoning + fallback (STACKIT Qwen3-VL)
     - sovereign-embed     # offline embeddings (mock-model)
-    - sovereign-vision    # vision route -> STACKIT Qwen3-VL
-    - sovereign-premium   # last-resort fallback -> STACKIT Qwen3-VL
   # HARD COST GUARDRAIL: a dedicated per-model USD cap for the pay-per-token
   # STACKIT routes. LiteLLM blocks calls to a model once its cap is hit —
-  # independent of the overall cap.
-  modelMaxBudget:
-    sovereign-premium: 2
-    sovereign-vision: 2
-    sovereign-reasoning-fast: 2
+  # independent of the overall cap. (The pruned duplicate Qwen routes that carried
+  # these caps are gone; the reasoning tier is covered by the overall maxBudget.)
+  modelMaxBudget: {}
   # Per-key rate limits with graceful queueing (security.md). rpm/tpm soft-limit
   # the key; max_parallel_requests caps in-flight calls; the router's num_retries
   # back-pressures bursts instead of hard-failing.
@@ -910,6 +905,12 @@ litellm:
   # turned on by an admin, once: UI → Model Hub → "Select Models to Make Public".
   envVars:
     SERVER_ROOT_PATH: "/tools/litellm"
+    # DURABLE admin-registered models. Without this, models an admin adds via the
+    # Models & Providers wizard (LiteLLM /model/new) live in the router's memory and
+    # VANISH on pod restart. With store-in-db they persist in the existing
+    # CloudNativePG `litellm` database (DATABASE_URL above). The static model_list
+    # below is still the shipped SEED — LiteLLM MERGES config models + DB models.
+    STORE_MODEL_IN_DB: "true"
   # Middleware tier — wave 1. deploymentAnnotations lands on the Deployment
   # metadata (Argo ordering). NOTE: litellm-helm exposes NO priorityClassName
   # value, so this pod runs at the cluster-default priority (0) — already below
@@ -957,44 +958,24 @@ litellm:
       # --- Reasoning tier (STACKIT Qwen3-VL-235B, pay-per-token) ---------------
       # `sovereign-reasoning` is the reasoning default (the routing.ts reasoning
       # tier points here). STACKIT-routed; the key is empty unless stackitPremium
-      # is configured. A *connection* failure still trips the router breaker
-      # (allowed_fails) and fails over to `sovereign-reasoning-fast`.
+      # is configured.
       - model_name: sovereign-reasoning
         litellm_params:
           model: openai/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8   # == stackitPremium.chatModelId
           api_base: os.environ/STACKIT_API_BASE
           api_key: os.environ/STACKIT_API_KEY
           timeout: 300                        # generous: reasoning generations are long
-      # --- Fast reasoning + fallback (STACKIT Qwen, pay-per-token, capped) ------
-      # `sovereign-reasoning-fast` is the explicit FAST alternative AND the LiteLLM
-      # fallback for `sovereign-reasoning`. Pay-per-token, so it carries a hard
-      # per-model spend cap on the agent key (modelMaxBudget). Key is empty unless
-      # stackitPremium is configured (then it only errors if reached).
-      - model_name: sovereign-reasoning-fast
-        litellm_params:
-          model: openai/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8   # == stackitPremium.chatModelId
-          api_base: os.environ/STACKIT_API_BASE
-          api_key: os.environ/STACKIT_API_KEY
       # --- Offline embeddings (mock-model, deterministic 384-dim) -------------
       - model_name: sovereign-embed
         litellm_params:
           model: openai/mock-embed
           api_base: http://mock-model:8080/v1
           api_key: "sk-mock-unused"
-      # --- STACKIT premium: VISION route + LAST-RESORT fallback (pay-per-token) -
-      # Not the default. Key is empty unless stackitPremium is configured, so these
-      # only succeed when STACKIT is wired; otherwise they error (acceptable — they
-      # are the final fallback). Spend is capped on the virtual key (modelMaxBudget).
-      - model_name: sovereign-vision          # vision inputs route here
-        litellm_params:
-          model: openai/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8   # == stackitPremium.visionModelId
-          api_base: os.environ/STACKIT_API_BASE
-          api_key: os.environ/STACKIT_API_KEY
-      - model_name: sovereign-premium         # last-resort text fallback
-        litellm_params:
-          model: openai/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8   # == stackitPremium.chatModelId
-          api_base: os.environ/STACKIT_API_BASE
-          api_key: os.environ/STACKIT_API_KEY
+      # NOTE: this list is the shipped SEED only — the four aliases the OS actually
+      # uses (sovereign-default/-mock/-reasoning/-embed). The former extras
+      # (local-qwen, sovereign-reasoning-fast/-vision/-premium — all duplicate
+      # STACKIT Qwen routes or the WireGuard tunnel) are pruned; admins add their own
+      # backends self-service via Models & Providers (durable via store_model_in_db).
     # ------------------------------------------------------------------------
     # Router — fallback chain, retries, timeouts, circuit-breaking, load-balancing.
     # STACKIT managed three-tier set: reasoning (Qwen3-VL-235B) · standard/worker
@@ -1009,16 +990,19 @@ litellm:
       timeout: 120                            # per-request timeout (s)
       allowed_fails: 3                        # circuit-breaking: trip after N fails...
       cooldown_time: 60                       # ...then cool the deployment down (s)
-      fallbacks:
-        # If the reasoning tier (sovereign-reasoning) trips the breaker, fail over
-        # to the fast reasoning route (sovereign-reasoning-fast). Both resolve to
-        # STACKIT; the fast route carries the per-model spend cap on the agent key.
-        - sovereign-reasoning: ["sovereign-reasoning-fast"]
+      # No static fallbacks: the pruned model_list is the four seed aliases, none of
+      # which is a duplicate reasoning route to fail over to. If the reasoning tier
+      # trips the breaker the request errors honestly (num_retries still applies);
+      # admins who want a fallback register a second backend via Models & Providers.
     litellm_settings:
       success_callback: ["langfuse"]          # gateway-level tracing to Langfuse
       drop_params: true
     general_settings:
       master_key: os.environ/PROXY_MASTER_KEY
+      # Persist admin-registered models (via /model/new) in the litellm Postgres DB
+      # so they survive pod restarts. LiteLLM merges these DB models with the static
+      # model_list above; the seed aliases below remain the shipped defaults.
+      store_model_in_db: true
     # MCP gateway — register tool servers; agents call them via LiteLLM
     # (per-key access). The governed Trino lakehouse query tool; Superset/
     # OpenMetadata/dbt MCP servers get added as they come online.
@@ -1511,6 +1495,45 @@ dagster:
         resources:
           requests: { cpu: 50m, memory: 384Mi }
           limits: { cpu: "1", memory: 1Gi }   # headroom for dbt materializations
+        # ── dbt.projectSource: git (epic #146 Phase 4) ────────────────────────────
+        # The dagster user-code is a SUBCHART: its values are static YAML and cannot
+        # be Helm-conditionalized, so the git-source path is OFF by default (this block
+        # is commented → default render is byte-identical). To ACTIVATE it, set
+        # `dbt.projectSource: git` AND uncomment the initContainers/volumes/volumeMounts
+        # below (they use per-deployment keys the dagster-user-deployments subchart
+        # supports). The init-container shallow-clones the analytics repo's dbt/ subdir
+        # into the shared /opt/dbt/project volume (falling back to the baked image on a
+        # clone failure) and runs `dbt parse` so target/manifest.json exists before the
+        # grpc server (and @dbt_assets) loads. FORGEJO_PASS should come from the forgejo
+        # admin secret — inline shown for parity with dbt-build; prefer valueFrom in prod.
+        # volumeMounts:
+        #   - { name: dbt-project, mountPath: /opt/dbt/project }
+        # volumes:
+        #   - name: dbt-project
+        #     emptyDir: {}
+        # initContainers:
+        #   - name: clone-analytics-dbt
+        #     image: "sovereign-os/dagster:0.2.0"
+        #     imagePullPolicy: IfNotPresent
+        #     command: ["/bin/sh", "-c"]
+        #     args:
+        #       - |
+        #         set -e
+        #         cp -a /opt/dbt/project/. /work/ 2>/dev/null || true
+        #         URL="http://${FORGEJO_USER}:${FORGEJO_PASS}@forgejo-http:3000/${FORGEJO_USER}/analytics.git"
+        #         if git clone --depth 1 "$URL" /tmp/analytics 2>/dev/null && [ -d /tmp/analytics/dbt ]; then
+        #           cp -a /tmp/analytics/dbt/. /work/
+        #           echo "cloned analytics/dbt -> /opt/dbt/project"
+        #         else
+        #           echo "WARNING: analytics clone failed; keeping baked dbt project."
+        #         fi
+        #         dbt parse --project-dir /work --profiles-dir /work --no-version-check \
+        #           || echo "WARNING: dbt parse failed (manifest may be stale)."
+        #     env:
+        #       - { name: FORGEJO_USER, value: gitadmin }   # = forgejo.gitea.admin.username
+        #       - { name: FORGEJO_PASS, value: "<forgejo admin password>" }
+        #     volumeMounts:
+        #       - { name: dbt-project, mountPath: /work }
   # App tier — wave 2. NOTE: the dagster subchart exposes NO priorityClassName for
   # webserver/daemon/user-code, so these run at the cluster-default priority (0),
   # already below the infra tier (DB protected). Documented gap.
@@ -1559,6 +1582,21 @@ dbt:
     # `analytics` literal drifted from marts.schema (`sales`) and was killed by the
     # warehouse re-provision, which is what broke the Catalog + default query.
     schema: sales
+  # Where the dbt project comes from (epic #146 Phase 4):
+  #   image (DEFAULT) — the project baked into sovereign-os/dbt at /opt/dbt/project
+  #                     (today's behavior, byte-identical).
+  #   git             — an init-container shallow-clones the `analytics` Forgejo repo's
+  #                     dbt/ subdir over /opt/dbt/project before the build runs; on a
+  #                     clone failure it falls back to the baked image path.
+  # Flip to `git` to build from the analytics monorepo (requires analyticsRepo.enabled).
+  projectSource: image
+  # Forgejo source (used ONLY when projectSource=git). Reuses the forgejo admin
+  # credentials (forgejo.gitea.admin.username/password).
+  git:
+    forgejoUrl: http://forgejo-http:3000
+    repo: analytics
+    # Subdir inside the repo that holds the dbt project (dbt_project.yml lives here).
+    subdir: dbt
 
 # -----------------------------------------------------------------------------
 # Cube — semantic/metrics layer reading the marts THROUGH central Trino
@@ -1587,15 +1625,58 @@ cube:
   # new image. Static demo seed models are preserved (separate .yml files).
   modelSync:
     enabled: true
+    # Where the sidecar reads governed Cube models from (epic #146 Phase 3):
+    #   os-ui  (DEFAULT) — poll os-ui GET /api/cube/models (today's behavior, unchanged).
+    #   git             — list+fetch cube/models/metrics/* and cube/models/seed/* from
+    #                     the `analytics` Forgejo repo via the contents API (basic auth
+    #                     from the forgejo admin secret). Same safeName guard + atomic
+    #                     write; on a Forgejo outage it KEEPS the last-written models.
+    # DEFAULT os-ui keeps the sidecar byte-identical — flip to `git` to source from the
+    # analytics monorepo (requires analyticsRepo.enabled so the repo is seeded first).
+    source: os-ui
     # In-cluster os-ui Service. The endpoint is cluster-internal (unauthenticated by
     # design — it emits only governed model definitions, never row data).
     osUiUrl: http://os-ui:3000
     pollSeconds: 30
+    # Forgejo source (used ONLY when source=git). Basic auth reuses the forgejo admin
+    # credentials (forgejo.gitea.admin.username/password) — the same principal the
+    # analytics-seed Job authenticates as.
+    git:
+      forgejoUrl: http://forgejo-http:3000
+      repo: analytics
     resources:
       requests: { cpu: 20m, memory: 32Mi }
       limits: { cpu: 100m, memory: 96Mi }
   local:
     apiSecret: cube-local-dev-secret
+  # ---------------------------------------------------------------------------
+  # Cube SQL API (Postgres-wire) — Power BI / BI-tool consumption of GOVERNED metrics.
+  # OFF by default: turning it on opens a second listener (CUBEJS_PG_SQL_PORT) that
+  # speaks the Postgres protocol so Power BI's "Get Data → PostgreSQL" connects to
+  # Cube. Queries still resolve Cube → Trino → OPA (governed measures/dimensions, NOT
+  # raw tables). Per-DOMAIN scope: a report authenticates as the domain's read-only BI
+  # principal `bi_<domain>`; Cube's checkSqlAuth (templates/cube/cube-config.js) maps
+  # that username to the domain's securityContext → Trino/OPA RLS. This is DOMAIN-LEVEL
+  # RLS (all viewers of a domain share it), NOT per-individual-viewer RLS.
+  #
+  # Exposure is the OPERATOR's job: in-cluster this is only the `cube-sql` Service on
+  # `port`. To let Power BI Desktop / on-prem gateway reach it, publish a TCP ingress /
+  # LoadBalancer to that Service and set `host` to the external hostname (the
+  # /api/powerbi/connection-info route reads CUBE_SQL_HOST/PORT via os-ui env).
+  sqlApi:
+    enabled: false
+    # CUBEJS_PG_SQL_PORT — the Postgres-wire listener port (container + Service).
+    port: 15432
+    # The single SQL login Cube authenticates. Per-domain principals `bi_<domain>` all
+    # share this password (Cube verifies one CUBEJS_SQL_PASSWORD); the USERNAME selects
+    # the domain securityContext. Password is generated + kept in the cube-sql-secrets
+    # Secret (never committed); set `password` explicitly for GitOps/Argo (lookup can't
+    # preserve it there). `user` is the fallback/admin login checkSqlAuth also accepts.
+    user: cube
+    password: ""
+    # Host the /api/powerbi/connection-info route advertises to builders. Default = the
+    # in-cluster Service; override with the published ingress host when exposed.
+    host: cube-sql
 
 # -----------------------------------------------------------------------------
 # Northpeak gold-mart materialization (templates/lakehouse/northpeak-marts-init.yaml).
@@ -1631,6 +1712,71 @@ marts:
 # -----------------------------------------------------------------------------
 openmetadata:
   enabled: true
+  # Phase 2 — scoped, integrity-safe write-back of OS-produced assets into a
+  # customer's existing OpenMetadata. Default OFF (matches OPENMETADATA_CONNECT_ENABLED
+  # on the app). When enabled, a post-install Job provisions the dedicated OS namespace
+  # (Service sovereign_os + Domain "Sovereign OS Products" + SovereignOS classification +
+  # custom props) and renders the least-privilege sovereign-os-writer Role/Policy (write
+  # ONLY inside the OS namespace). Idempotent; dry-emits unless an OM admin JWT is wired.
+  osWriteback:
+    enabled: false
+    apiUrl: "http://openmetadata:8585"
+    image: "curlimages/curl:8.9.1"
+    # Optional Secret holding the OM ADMIN jwt (key: admin-jwt) used ONCE to create the
+    # namespace + writer bot Role/Policy. Absent → the Job dry-emits (no writes).
+    adminSecretName: "sovereign-os-writer-admin"
+    nodeSelector: {}
+  # NATIVE metadata ingestion for the OS's OWN Trino/Iceberg lakehouse (#147 — a
+  # HOLLOW catalog fix). A K8s CronJob runs OM's own `metadata ingest` framework
+  # (the openmetadata/ingestion image) — the same workflow Airflow would run, just
+  # K8s-scheduled (pipelineServiceClientConfig is disabled, so there is no Airflow).
+  # One run ingests every iceberg schema/table/column into OM (+ optional dbt models
+  # & lineage). GATED OFF by default: needs a VALID ingestion-bot JWT (mint a FRESH
+  # one from the running OM — a DB-seeded token 401s "Invalid token" against the live
+  # signing keys) in the jwtSecretName Secret, then flip `enabled: true`.
+  ingestion:
+    enabled: false
+    image:
+      repository: docker.getcollate.io/openmetadata/ingestion
+      tag: "1.13.0"                  # MUST track the openmetadata subchart version
+    # Cron. Default: hourly, so the catalog stays current (not a one-shot).
+    schedule: "17 * * * *"
+    # OM Database Service name the Iceberg lakehouse lands under. MUST match os-ui
+    # OPENMETADATA_SERVICE (default `trino`) so Catalog deep links resolve.
+    service: "trino"
+    omApi: "http://openmetadata:8585/api"
+    # The Secret + key holding the bot JWT — the SAME secret the os-ui Catalog reads.
+    jwtSecretName: "os-ui-openmetadata"
+    nodeSelector: {}
+    trino:
+      hostPort: "trino:8080"
+      username: "openmetadata-ingest"   # identifies the read principal to Trino/OPA
+      catalog: "iceberg"
+    # dbt models + descriptions + column lineage. Requires the dbt-build Job to
+    # publish target/manifest.json + catalog.json to the source below (S3 default —
+    # see docs/components/openmetadata.md for the one-line upload step).
+    dbt:
+      enabled: false
+      configType: "s3"                  # s3 | local
+      s3:
+        bucket: "dbt"
+        prefix: "artifacts/"
+        endpoint: "http://seaweedfs-s3:8333"
+        region: "us-east-1"
+        secretName: "object-storage-credentials"
+        accessKeyIdKey: "AWS_ACCESS_KEY_ID"
+        secretAccessKeyKey: "AWS_SECRET_ACCESS_KEY"
+      local:
+        manifestPath: "/opt/dbt/project/target/manifest.json"
+        catalogPath: "/opt/dbt/project/target/catalog.json"
+    # Table→table lineage mined from Trino's query log (a second ingest pass).
+    # DISABLED: the openmetadata/ingestion 1.13.0 DatabaseServiceQueryLineagePipeline
+    # is missing the `includeTags`/`overrideMetadata` attributes the workflow expects
+    # (framework bug) → the pass errors. Metadata + dbt ingestion are unaffected. Re-enable
+    # once the ingestion image is upgraded past that bug.
+    lineage:
+      enabled: false
+      queryLogDays: "1"
   replicaCount: 1
   openmetadata:
     config:
@@ -1940,6 +2086,45 @@ trino:
   s3:
     region: us-east-1
     pathStyleAccess: true
+  # External-warehouse FEDERATED catalogs (opt-in; default EMPTY so nothing changes).
+  # Each entry mounts one external lakehouse as a governed Trino catalog. Paired with
+  # os-ui's EXTERNAL_CONNECTORS_ENABLED flag (default off). Get `properties` from the
+  # connection's registration snippet (warehouse_registration MCP tool / UI) — it is
+  # exactly what providerFor(platform).catalogProps renders. Secrets are NEVER inlined:
+  # props reference ${ENV:VAR}, injected from a Secret via `secretEnv`. Registration is
+  # this values edit + a rolling restart (the pod's catalog dir is a read-only mount).
+  #   externalCatalogs:
+  #     - name: glue_sales           # keyless: IRSA via trino.serviceAccount below
+  #       platform: glue
+  #       properties: |
+  #         connector.name=iceberg
+  #         iceberg.catalog.type=glue
+  #         hive.metastore.glue.region=eu-central-1
+  #         fs.native-s3.enabled=true
+  #         s3.region=eu-central-1
+  #       secretEnv: []
+  #     - name: snow_fin             # secret-backed: key-pair via ${ENV:SNOWFLAKE_PRIVATE_KEY}
+  #       platform: snowflake
+  #       properties: |
+  #         connector.name=snowflake
+  #         connection-url=jdbc:snowflake://ORG-ACCT.snowflakecomputing.com
+  #         connection-private-key=${ENV:SNOWFLAKE_PRIVATE_KEY}
+  #         snowflake.database=ANALYTICS
+  #         snowflake.warehouse=WH
+  #       secretEnv:
+  #         - name: SNOWFLAKE_PRIVATE_KEY
+  #           secretName: trino-snowflake
+  #           key: private-key
+  externalCatalogs: []
+  # Optional ServiceAccount for the Trino pod — the IRSA (AWS) / Workload-Identity
+  # (GCP) carrier for KEYLESS Glue / BigQuery federation. Default off (no SA) so the
+  # base deployment is unchanged. Set create: true and add the cloud annotation, e.g.
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/<trino-glue-role>   (AWS)
+  #   iam.gke.io/gcp-service-account: trino@<project>.iam.gserviceaccount.com  (GCP)
+  serviceAccount:
+    create: false
+    name: trino
+    annotations: {}
   # OPA governance + resource groups are layered in their own phases (the chart
   # renders access-control.properties + resource-groups.properties from these).
   opa:
@@ -2022,12 +2207,45 @@ superset:
       limits: { cpu: "1", memory: 1536Mi }
   extraSecretEnv:
     SUPERSET_SECRET_KEY: "sovereign-os-superset-local-dev-secret-key"
+    # STABLE secret that signs embedded-dashboard GUEST TOKENS. Must be 32+ chars and
+    # MUST NOT rotate on every deploy — rotating it invalidates every live guest token.
+    # (Left as the insecure Superset 27-char default, the guest_token mint 403s.) The
+    # embedded config below reads it via os.environ. For a real deployment override this
+    # from a K8s secret (values.stackit-selfhosted.yaml).
+    SUPERSET_GUEST_TOKEN_JWT_SECRET: "sovereign-os-superset-embedded-guest-token-signing-secret"
   configOverrides:
     simplecache: |
       CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache"}
       DATA_CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache"}
       FILTER_STATE_CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache"}
       EXPLORE_FORM_DATA_CACHE_CONFIG = {"CACHE_TYPE": "SimpleCache"}
+    # ------------------------------------------------------------------------
+    # Embedded dashboards. The EMBEDDED_SUPERSET feature flag MUST be on or the
+    # guest_token API 403s (even for admin). Guest tokens sign with the STABLE
+    # SUPERSET_GUEST_TOKEN_JWT_SECRET above and carry the read-only Gamma role
+    # (the role the OS SSO map lands most users on — NOT Public), so an embedded
+    # viewer sees only what a Gamma user may, scoped further by the token's RLS.
+    # configOverrides entries merge by key, so this adds to (not replaces) the map.
+    # ------------------------------------------------------------------------
+    embedded: |
+      FEATURE_FLAGS = {"EMBEDDED_SUPERSET": True}
+      GUEST_ROLE_NAME = "Gamma"
+      GUEST_TOKEN_JWT_SECRET = os.environ["SUPERSET_GUEST_TOKEN_JWT_SECRET"]
+      GUEST_TOKEN_JWT_EXP_SECONDS = 300
+    # ------------------------------------------------------------------------
+    # Reverse-proxy prefix awareness. The OS embeds Superset SAME-ORIGIN through
+    # the os-ui proxy at `<os-host>/tools/superset` (lib/tool-proxy.ts) — this is
+    # what makes the embedded-dashboard iframe load at all: Superset ships
+    # `X-Frame-Options: SAMEORIGIN` + a Talisman CSP with no `frame-ancestors`, so
+    # a CROSS-origin iframe (os.* framing superset.*) is blocked by the browser.
+    # Under the `/tools/superset` prefix Superset must honor the proxy's
+    # `X-Forwarded-Prefix` so the embedded page emits `/tools/superset/...`
+    # asset + API URLs instead of root-absolute ones that would escape the prefix
+    # and 404 against os-ui. PROXY_FIX_CONFIG already carries x_prefix:1 by
+    # default; we just switch ProxyFix ON. configOverrides merge by key.
+    # ------------------------------------------------------------------------
+    proxyfix: |
+      ENABLE_PROXY_FIX = True
     # ------------------------------------------------------------------------
     # OS single sign-on. The os-ui reverse proxy (/tools/superset) injects the
     # trusted X-Forwarded-User + X-Forwarded-Roles headers for the already-
@@ -2184,6 +2402,16 @@ softwareDelivery:
   appsDomain: apps.local
 
 # -----------------------------------------------------------------------------
+# Analytics monorepo (epic #146 Phase 1).
+# Seeds the tenant-level `analytics` Forgejo repo with the dbt project,
+# static Cube seed models, Dagster definitions and a validate-only CI workflow.
+# Nothing reads the repo at runtime yet — this is purely additive.
+# Default false: opt in per-overlay when Forgejo is enabled.
+# -----------------------------------------------------------------------------
+analyticsRepo:
+  enabled: false
+
+# -----------------------------------------------------------------------------
 # Harbor — production image registry for the Software golden path (per-app
 # builds: Forgejo Actions -> Harbor -> Argo CD -> subdomain). DEFAULT-OFF heavy
 # workload: locally CI uses Forgejo's built-in OCI registry, so the bundle is
@@ -2222,27 +2450,12 @@ ciRunner:
   dindImage: docker:27-dind
   builderTag: "0.1.0"          # tag for the ci-builder job image (docker CLI + buildx)
 
-# -----------------------------------------------------------------------------
-# Admin Console — DEPRECATED / OFF BY DEFAULT.
-#
-# The Admin Console's functionality (live status, on/off toggling, addresses,
-# logins, per-component docs) is now built NATIVELY into the OS UI's
+# Admin Console — REMOVED. Its functionality (live status, on/off toggling,
+# addresses, logins, per-component docs) is now built NATIVELY into the OS UI's
 # Platform -> Components tab: the OS UI server reads the in-cluster Kubernetes
 # API + the baked-in docs/components/*.md directly, so there is no separate
-# service and no cross-pod fetch (the old fragile "fetch failed" path).
-#
-# This block + templates/admin-console/* remain only so an operator can still
-# stand up the legacy standalone service for debugging by setting enabled=true.
-# Nothing in the stack depends on it. Leave it off.
-# -----------------------------------------------------------------------------
-adminConsole:
-  enabled: false
-  image:
-    repository: sovereign-os/admin-console   # built locally, loaded into kind
-    tag: "0.1.0"
-  resources:
-    requests: { cpu: 25m, memory: 48Mi }
-    limits: { cpu: 250m, memory: 128Mi }
+# service and no cross-pod fetch (the old fragile "fetch failed" path). Nothing
+# in the stack depended on it, so the standalone service + values block are gone.
 
 # -----------------------------------------------------------------------------
 # OS UI — the Next.js front door. App shell + live surfaces:
@@ -2322,6 +2535,13 @@ osUI:
   # auth-mechanism JWT (docs/components/openmetadata.md). Without it the Catalog
   # skips OpenMetadata honestly. NEVER commit a real token.
   openmetadataJwt: ""
+  # External OpenMetadata CONNECTIONS (Phase 1 — read/discover only). OFF by default:
+  # when true, os-ui lets an operator model an EXTERNAL OpenMetadata as an om-catalog
+  # Connection (base URL + vaulted bot JWT + optional default OM Service) and folds its
+  # domains/data-products/tables into the Catalog as DLS-scoped discovery, plus the MCP
+  # read tools (list_domains/list_data_products/list_tables/search_catalog/get_om_lineage).
+  # No writes to OM in this phase. Distinct from openmetadataJwt above (the bundled OM).
+  openmetadataConnectEnabled: false
   # Auth session-signing secret (HMAC-SHA256 for the login cookie). Leave EMPTY:
   # the chart generates a strong random value into the `os-ui-session` Secret on
   # first install and preserves it across `helm upgrade`. Set a value (or wire an
@@ -2449,7 +2669,9 @@ mail:
 terminal:
   enabled: false
   # Roles permitted to open a terminal (maps to lib/session.ts Role union).
-  allowedRoles: ["builder", "admin"]
+  # Admin-only by default: the raw shell is an operator surface. Builders reach the
+  # governed Query console but NOT the shell. Override to widen per environment.
+  allowedRoles: ["admin"]
   # Shared HMAC secret: the OS UI mints a short-lived single-use token, the broker
   # verifies it. OVERRIDE per environment (or wire an ExternalSecret). The OS UI
   # reads the same value via TERMINAL_BROKER_SECRET. Never commit a real value.
@@ -2684,9 +2906,51 @@ kserve:
     # A trained model artifact in the MLflow object-storage bucket (replace with a
     # real registry path). Demo path under the `mlflow` bucket.
     storageUri: "s3://mlflow/models/sample-sklearn"
+  # Seed hook: trains a tiny demo churn model and publishes it to the sampleModel
+  # storage path so the InferenceService has an artifact to serve on first deploy.
+  # Without it the predictor's storage-initializer loops on "No model found in
+  # models/sample-sklearn" (Init:CrashLoopBackOff). Idempotent + non-blocking —
+  # a re-run overwrites the same artifact; a failed upload never blocks the release.
+  seed:
+    enabled: true
+    # SAME image as the kserve-mlserver ClusterServingRuntime => identical
+    # sklearn/joblib, so the pickled model is version-safe by construction.
+    trainImage:
+      repository: docker.io/seldonio/mlserver
+      tag: "1.5.0"
+    # model-settings.json names the model `churn_model` — matches the UI's
+    # /v2/models/churn_model/infer call (os-ui lib/science/churn.ts).
+    modelName: churn_model
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { cpu: "1", memory: 1Gi }
+  # Per-model InferenceServices the OS deploys AFTER training (Phase 2/3). Each
+  # entry renders a CPU sklearn InferenceService serving s3://mlflow/models/<model>/
+  # — the exact path lib/science/training.ts uploads the trained artifact to. The
+  # os-ui train route submits the training Job; listing a model here makes its
+  # served endpoint declarative (GitOps-friendly). Empty by default (a fresh tenant
+  # trains + deploys through the UI); the Northpeak seed / an operator adds entries.
+  servedModels: []
+    # - name: lead_scoring            # == ServiceModel.model (KServe IS name + /v2/models path)
+    #   format: sklearn
+
+# -----------------------------------------------------------------------------
+# Science TRAINING RUNTIME (Layer 4) — a per-model batch/v1 Job (submitted by the
+# os-ui train route via the in-cluster k8s API) trains a small CPU sklearn model
+# from a governed Gold product THROUGH Trino (least-privilege read principal), logs
+# to MLflow and uploads the artifact to s3://mlflow/models/<model>/. This block only
+# holds the trainer IMAGE + the read principal; the Job is not a chart object (it is
+# created per-train at runtime). CPU-only; no GPU. See images/ml-trainer/.
+# -----------------------------------------------------------------------------
+mlTrainer:
+  image:
+    repository: sovereign-os/ml-trainer   # built locally (linux/amd64), loaded into kind
+    tag: "0.1.0"
+  # The LEAST-PRIVILEGE Trino principal the trainer reads Gold as (BI/science read,
+  # NOT a write role). The Trino->OPA row/column plugin enforces its entitlements.
+  trino:
+    user: science-reader
+    catalog: iceberg
 
 # -----------------------------------------------------------------------------
 # ML agent (LangGraph) — drives features -> train+track -> deploy from plain

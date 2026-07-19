@@ -12,9 +12,14 @@ import {
   type App,
 } from '@/lib/software/apps';
 import { trace } from '@/lib/infra/agent-governed';
-import { enqueue, decide as decideApproval, listApprovals } from '@/lib/governance/approvals';
+import {
+  enqueue,
+  decide as decideApproval,
+  listApprovals,
+  ensureHydrated as ensureApprovalsHydrated,
+} from '@/lib/governance/approvals';
 import { securityScan } from './scan.ts';
-import { detectSurface } from './metadata.ts';
+import { resolveSurface } from './metadata.ts';
 import { getSnapshot } from './server.ts';
 import { deployApp, runnerStatus, type RunnerApp, type RunnerOutcome, type RunnerStatus } from './runner.ts';
 import { roleAtLeast } from '@/lib/core/session';
@@ -210,9 +215,13 @@ export async function startPreview(appId: string, user: CurrentUser): Promise<Ap
 
 // ---------------------------------------------------------- Request deploy -----
 
+/** The just-filed Governance approval, minimally described for the UI's shared
+ *  "this needs approval" notice (Policies & Approvals link + inline-approve gate). */
+export type FiledApprovalRef = { id: string; domain: string; approverRole: 'builder' | 'domain_admin' | 'admin'; scope: 'own' | 'domain' | 'tenant' };
+
 export type DeployRequestResult =
   | { kind: 'auto-deployed'; app: App }
-  | { kind: 'review'; app: App; card: ReviewCard };
+  | { kind: 'review'; app: App; card: ReviewCard; approval: FiledApprovalRef };
 
 /**
  * Request a domain deploy. Routine in-envelope updates to an already-live app
@@ -231,10 +240,11 @@ export async function requestDeploy(
   }
   if (app.status === 'archived') throw withStatus(new Error('Archived apps cannot deploy'), 409);
 
-  // Detect the app's UI/API surface at deploy from the code + manifest the agent
+  // Resolve the app's UI/API surface at deploy from the code + manifest the agent
   // wrote (the deploy manifest reveals whether it binds a web server vs only an
-  // API), so the monitor view is honest to what actually ships.
-  app.surface = detectSurface(appFiles(app));
+  // API), so the monitor view is honest to what actually ships — but a declaration
+  // (the creator's recorded intent) WINS over the heuristic.
+  app.surface = resolveSurface(appFiles(app), app.declaredSurface);
 
   const requested = requestedEnvelope(app);
   const broadened = scopeBroadened(app.deploy.approved, requested);
@@ -279,8 +289,8 @@ export async function requestDeploy(
   app.deploy.reviewCardId = card.id;
   await persistApp(app);
 
-  // Surface in the Governance inbox so a Builder sees it alongside other holds.
-  enqueue({
+  // Surface in the Governance inbox so a Domain admin sees it alongside other holds.
+  const approval = enqueue({
     kind: 'app_deploy',
     title: `Deploy review: ${app.name}`,
     detail:
@@ -293,6 +303,7 @@ export async function requestDeploy(
     requestedBy: user.id,
     tool: 'request_deploy',
     payload: { appId: app.id, cardId: card.id },
+    approverRole: 'domain_admin',
   });
 
   void trace({
@@ -302,10 +313,41 @@ export async function requestDeploy(
     output: { cardId: card.id, scanPassed: scan.passed },
     decision: scan.passed ? 'requires_approval' : 'deny',
   });
-  return { kind: 'review', app, card };
+  return {
+    kind: 'review',
+    app,
+    card,
+    approval: { id: approval.id, domain: approval.domain, approverRole: approval.approverRole, scope: approval.scope },
+  };
 }
 
 // ----------------------------------------------------------- Decide deploy -----
+
+/**
+ * The app-state transition a decided deploy applies — the ONE seam both the
+ * normal `decideDeploy` path and the self-heal reconcile share, so a healed app
+ * lands in exactly the same state (envelope recorded + release bumped + runner
+ * rolled on approve; back to preview on deny). Mutates + persists the app.
+ */
+async function applyDeployDecisionToApp(
+  app: App,
+  decision: 'approve' | 'deny',
+  approvedEnvelope: DeployEnvelope | null,
+): Promise<void> {
+  if (decision === 'approve') {
+    app.deploy.state = 'live';
+    app.deploy.approved = approvedEnvelope ?? requestedEnvelope(app);
+    app.deploy.reviewCardId = null;
+    app.deploy.releases += 1; // approved go-live ships a new release/version.
+    // Provision the real in-cluster runner on the app's per-app host; the served
+    // URL + `pipeline.live = ok` only land once the pod is actually running
+    // (offline stays honestly pending — the go-live decision is still recorded).
+    applyRunnerOutcome(app, await deployApp(runnerAppFor(app)));
+  } else {
+    app.deploy.state = 'preview'; // back to the free preview loop to fix it
+    app.deploy.reviewCardId = null;
+  }
+}
 
 /**
  * Approve or deny a deploy. THE ROLE GATE: only a Builder/Admin in the app's
@@ -340,18 +382,10 @@ export async function decideDeploy(
       );
     }
     card.decision = 'approved';
-    app.deploy.state = 'live';
-    app.deploy.approved = card.requested;
-    app.deploy.reviewCardId = null;
-    app.deploy.releases += 1; // approved go-live ships a new release/version.
-    // Provision the real in-cluster runner on the app's per-app host; the served
-    // URL + `pipeline.live = ok` only land once the pod is actually running
-    // (offline stays honestly pending — the go-live decision is still recorded).
-    applyRunnerOutcome(app, await deployApp(runnerAppFor(app)));
+    await applyDeployDecisionToApp(app, 'approve', card.requested);
   } else {
     card.decision = 'denied';
-    app.deploy.state = 'preview'; // back to the free preview loop to fix it
-    app.deploy.reviewCardId = null;
+    await applyDeployDecisionToApp(app, 'deny', null);
   }
   card.decidedBy = user.id;
   card.decidedAt = new Date().toISOString();
@@ -377,6 +411,61 @@ function listGovernanceForCard(cardId: string): string[] {
   return listApprovals({ status: 'pending' })
     .filter((a) => a.kind === 'app_deploy' && (a.payload as { cardId?: string })?.cardId === cardId)
     .map((a) => a.id);
+}
+
+// -------------------------------------------------------- Self-heal reconcile ---
+
+/**
+ * SELF-HEAL: an app stuck in `review` whose Governance app_deploy approval was
+ * ALREADY decided must be reconciled to its true state on load. This heals apps
+ * orphaned before the approve→decideDeploy write-back existed (the item is
+ * `approved`/`rejected`, yet the app kept `deploy.state === 'review'` with a
+ * `reviewCardId`) AND guards against any future effect that misses.
+ *
+ * We cannot route through `decideDeploy` for these: its in-process review card is
+ * gone after a restart (that's why they orphaned). Instead we apply the SAME
+ * transition via the shared `applyDeployDecisionToApp` seam, sourcing the approved
+ * envelope from the card if it survives, else from the app's current requested
+ * envelope. Idempotent (only fires while state === 'review' with a reviewCardId),
+ * fail-soft (a reconcile error NEVER breaks loading the app), and a no-op when no
+ * matching decided approval exists (the app is left exactly as-is).
+ */
+export async function reconcileDeployApproval(app: App): Promise<boolean> {
+  try {
+    if (app.deploy.state !== 'review' || !app.deploy.reviewCardId) return false;
+    const cardId = app.deploy.reviewCardId;
+    // Ensure durable approvals are hydrated (memoized) so a fresh pod sees the
+    // already-decided app_deploy record persisted in the os-approvals index.
+    await ensureApprovalsHydrated();
+    // Match the decided governance approval by card id, else by app id (the
+    // payload carries both). Only decided items heal; pending leaves it in review.
+    const decided = listApprovals({})
+      .filter((a) => a.kind === 'app_deploy' && a.status !== 'pending')
+      .find((a) => {
+        const p = a.payload as { cardId?: string; appId?: string };
+        return p?.cardId === cardId || p?.appId === app.id;
+      });
+    if (!decided) return false;
+
+    if (decided.status === 'approved') {
+      const card = cards().get(cardId);
+      await applyDeployDecisionToApp(app, 'approve', card?.requested ?? null);
+    } else {
+      await applyDeployDecisionToApp(app, 'deny', null);
+    }
+    await persistApp(app);
+    void trace({
+      principal: app.mcpPrincipal,
+      tool: 'generate',
+      input: { action: 'reconcile_deploy', cardId, approvalId: decided.id, approvalStatus: decided.status },
+      output: { state: app.deploy.state },
+      decision: decided.status === 'approved' ? 'allow' : 'deny',
+    });
+    return true;
+  } catch {
+    // Fail-soft: a reconcile problem must never break loading the app.
+    return false;
+  }
 }
 
 // ------------------------------------------------------- Runner status poll ----

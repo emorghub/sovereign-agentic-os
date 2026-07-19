@@ -74,16 +74,38 @@ export type EffectDeps = {
   promoteArtifact?: LadderApplier;
   /** App promote/certify (Personal→Shared→Certified single-step advance). */
   promoteApp?: LadderApplier;
+  /** Execute an APPROVED OpenMetadata write-back (apply_om_sync). Resolves the
+   *  connection + dataset AS the approver (DLS), recomputes the plan server-side
+   *  and writes through the least-privilege writer bot. Injected by the route so
+   *  this module (and its tests) stay free of the server-only OM bridge. */
+  applyOmSync?: (
+    payload: { connId: string; datasetId: string; humanServiceFqn?: string | null },
+    approver: { id: string; role: Principal['role']; domains: string[] },
+  ) => Promise<{ ok: boolean; summary: string; live: boolean }>;
+  /** Decide a Software deploy-review card AS the approver — flips the software
+   *  release/app deploy state (review → live | preview) so approving the app_deploy
+   *  item in Policies & Approvals actually clears the app's "awaiting review".
+   *  Injected by the route (server-only `review.ts`) so this module stays light. */
+  decideDeploy?: (
+    cardId: string,
+    approver: { id: string; role: Principal['role']; domains: string[] },
+    decision: 'approve' | 'deny',
+  ) => Promise<{ appName: string; state: string; live: boolean }>;
 };
 
 /** The model-service Actor for a human approver (agents can never decide — the
  *  `assertHuman` guard in model-service enforces this; we set isAgent:false). */
 function modelActor(approver: EffectApprover, fallbackRole: Principal['role'], domain: string): ModelActor {
   const p = approverPrincipal(approver, fallbackRole, domain);
-  // model-service's Actor role is a narrower 'user'|'builder'|'admin'; map the
-  // 4-rank session role onto it (domain_admin acts at builder rank for models —
-  // it may promote, and certification stays admin-only, so this is safe).
-  const role: ModelActor['role'] = p.role === 'admin' ? 'admin' : p.role === 'builder' || p.role === 'domain_admin' ? 'builder' : 'user';
+  // model-service's Actor role is 'user'|'builder'|'domain_admin'|'admin'; map the
+  // 4-rank session role onto it, PRESERVING domain_admin so the shared edit-scope
+  // rule can grant it manage rights on in-domain models (certification stays
+  // admin-only). Only the base creator collapses to the science 'user' rank.
+  const role: ModelActor['role'] =
+    p.role === 'admin' ? 'admin'
+    : p.role === 'domain_admin' ? 'domain_admin'
+    : p.role === 'builder' ? 'builder'
+    : 'user';
   return { id: p.id, role, domains: p.domains, isAgent: false };
 }
 
@@ -110,6 +132,33 @@ export async function applyEffect(a: Approval, approver: EffectApprover, deps: E
   const p = a.payload ?? {};
   const who = approverId(approver);
   switch (a.kind) {
+    case 'app_deploy': {
+      // Approval IS the action: a Software deploy-review filed by `requestDeploy`.
+      // Approving it in Policies & Approvals must write BACK to the software release
+      // record — flip the app's deploy state review → live (or preview on reject) so
+      // the Software app no longer shows "awaiting review". Without this dep the item
+      // would be marked approved in the queue but the app would stay stuck. We route
+      // through the SAME `decideDeploy` seam the Software UI uses (scan re-check +
+      // envelope recorded + runner rolled), so both front doors converge.
+      const cardId = s(p.cardId);
+      if (!cardId) throw new Error('app_deploy requires payload.cardId');
+      if (!deps.decideDeploy) throw new Error('app_deploy requires the injected decideDeploy applier (not injected)');
+      const full = typeof approver === 'string'
+        ? { id: approver, role: 'builder' as Principal['role'], domains: [a.domain] }
+        : approver;
+      const out = await deps.decideDeploy(cardId, full, 'approve');
+      return {
+        ok: true,
+        applied: `Deploy approved: “${out.appName}” is now ${out.state}${out.live ? '' : ' (runner pending)'}.`,
+        live: out.live,
+        audit: {
+          action: 'deploy',
+          subject: out.appName,
+          reason: `Software deploy-review approved by ${who}`,
+          detail: { cardId, appId: p.appId, state: out.state },
+        },
+      };
+    }
     case 'deploy_review': {
       // Live path = Argo CD sync; unwired here, so mock + mark live:false.
       const app = s(p.app, a.title);
@@ -279,10 +328,40 @@ export async function applyEffect(a: Approval, approver: EffectApprover, deps: E
         },
       };
     }
+    case 'connection_write': {
+      // OpenMetadata write-back (apply_om_sync): EXECUTE the held write on approval.
+      // The plan is recomputed server-side from the datasetId (the held payload can
+      // never smuggle a wider write). The injected bridge resolves conn + dataset AS
+      // the approver (DLS) and writes through the least-privilege writer bot.
+      if (a.tool === 'apply_om_sync' && deps.applyOmSync) {
+        const connId = s(p.connId);
+        const datasetId = s(p.datasetId);
+        const approverP = approverPrincipal(approver, 'builder', a.domain);
+        const out = await deps.applyOmSync(
+          { connId, datasetId, humanServiceFqn: p.humanServiceFqn as string | null | undefined },
+          approverP,
+        );
+        return {
+          ok: out.ok,
+          applied: out.ok
+            ? `OpenMetadata write-back applied: ${out.summary}`
+            : `OpenMetadata write-back did not complete: ${out.summary}`,
+          live: out.live,
+          audit: {
+            action: 'approve',
+            subject: a.tool,
+            reason: `OpenMetadata sync approved by ${who}`,
+            detail: { kind: a.kind, connId, datasetId, agent: a.agent },
+          },
+        };
+      }
+      // Fall through: other connection_write kinds (legacy agent write-backs) are
+      // cleared below alongside knowledge_certify.
+    }
+    // eslint-disable-next-line no-fallthrough
     // Legacy agent write-backs — consolidated here for the control plane. The
     // rich apply (CRM patch / curate fact) stays in the Agents route; here we
     // record that the held action was cleared.
-    case 'connection_write':
     case 'knowledge_certify':
     default: {
       return {

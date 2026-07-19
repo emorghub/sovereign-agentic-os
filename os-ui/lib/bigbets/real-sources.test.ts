@@ -13,7 +13,7 @@ import { sourceFor, __resetSources } from './sources.ts';
 import { realizedValue } from './value.ts';
 import { createBet, __resetBets } from './store.ts';
 import { listRealArtifacts } from './real-sources.ts'; // side-effect: registers the real reader
-import { createDataset, __resetStore as __resetData } from '@/lib/data/store';
+import { createDataset, __resetStore as __resetData } from '@/lib/data';
 import '@/lib/strategy/pillars'; // side-effect: pins the governed metric catalogue to globalThis
 import type { Actor, Principal } from './model.ts';
 
@@ -66,6 +66,7 @@ test('value: realized value reflects a REAL linked metric (catalogue-resolved)',
   const bet = createBet(aliceActor, {
     name: 'Lift gross margin',
     problem: { who: 'Finance', need: 'raise margin', obstacle: 'leakage', impact: '€360k' },
+    pillarId: 'pillar_finance',
     metricId: 'finance.grossMargin',
     valueBasis: 'uplift',
     targetValue: 500_000,
@@ -84,6 +85,7 @@ test('value: no metric linked → honest empty state (metricResolved false, not 
   const bet = createBet(aliceActor, {
     name: 'Unmetered bet',
     problem: { who: 'Ops', need: 'do a thing', obstacle: 'none', impact: 'tbd' },
+    pillarId: 'pillar_ops',
     targetValue: 100_000,
     goLive: '2026-12-01',
   });

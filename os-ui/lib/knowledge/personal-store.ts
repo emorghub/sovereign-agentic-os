@@ -7,6 +7,9 @@ import { roleAtLeast } from '../core/session.ts';
 import type { Role } from '../core/session.ts';
 import { osMirror } from '../infra/os-mirror.ts';
 import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
+import { canManageArtifact, type ArtifactScope } from '../governance/edit-scope.ts';
+import { normaliseFolderPath } from '../core/folders.ts';
+import { createFolder, type FolderScope, type Principal as FolderPrincipal } from '../folders/index.ts';
 
 /**
  * PERSONAL general-knowledge store — the "My knowledge" layer of the Knowledge
@@ -33,6 +36,7 @@ export type PersonalKnowledgeRecord = {
   title: string;
   md: string;
   visibility: Visibility;
+  folder: string;
   updatedAt: string;
   archived?: boolean;
 };
@@ -71,6 +75,7 @@ const mirror = osMirror({
         domain: { type: 'keyword' },
         title: { type: 'keyword' },
         visibility: { type: 'keyword' },
+        folder: { type: 'keyword' },
         updatedAt: { type: 'date' },
         md: { type: 'text', index: false },
         archived: { type: 'boolean' },
@@ -131,8 +136,12 @@ function canView(rec: PersonalKnowledgeRecord, user: Principal): boolean {
 }
 
 function canEdit(rec: PersonalKnowledgeRecord, user: Principal): boolean {
-  if (rec.owner === user.id) return true;
-  return roleAtLeast(user.role, 'builder') && user.domains.includes(rec.domain);
+  // Fail-closed edit-scope: owner always; a Personal entry is owner-only (no admin/
+  // domain_admin reaches another user's private know-how). Shared / Marketplace
+  // admits an in-domain domain_admin or a platform admin. (Closes the gap where any
+  // in-domain Builder could mutate/unshare another's entry.)
+  const scope: ArtifactScope = rec.visibility === 'Personal' ? 'personal' : rec.visibility === 'Marketplace' ? 'certified' : 'shared';
+  return canManageArtifact(user, { owner: rec.owner, domain: rec.domain, scope });
 }
 
 function requireView(id: string, user: Principal): PersonalKnowledgeRecord {
@@ -188,7 +197,7 @@ export function getPersonalKnowledge(id: string, user: Principal): PersonalKnowl
 
 export function createPersonalKnowledge(
   user: Principal,
-  input: { title: string; md?: string; domain?: string },
+  input: { title: string; md?: string; domain?: string; folder?: string },
 ): PersonalKnowledgeRecord {
   ensureSeeded();
   const domain = input.domain && user.domains.includes(input.domain) ? input.domain : user.domains[0] ?? 'default';
@@ -201,10 +210,32 @@ export function createPersonalKnowledge(
     title,
     md: input.md ?? '',
     visibility: 'Personal',
+    folder: normaliseFolderPath(input.folder),
     updatedAt: now(),
   };
   st().entries.set(id, rec);
   writeThrough(rec);
+  return rec;
+}
+
+/** Move a personal knowledge entry into a folder. Edit-scoped — owner, in-domain domain_admin, or admin. */
+export function moveKnowledge(id: string, user: Principal, folder: string): PersonalKnowledgeRecord {
+  const rec = requireEdit(id, user);
+  const normalised = normaliseFolderPath(folder);
+  versions.record(id, user.id, { title: rec.title, md: rec.md, folder: rec.folder }, 'move');
+  rec.folder = normalised;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  // Upsert an explicit folder row — best-effort, swallow errors so a move is never rolled back.
+  if (normalised !== '/') {
+    const scope: FolderScope = rec.visibility === 'Personal' ? 'personal' : 'domain';
+    const principal: FolderPrincipal = { id: user.id, role: user.role, domains: user.domains };
+    try {
+      createFolder(principal, { tab: 'knowledge', scope, path: normalised, domain: rec.domain });
+    } catch {
+      /* folder-registry mirror is best-effort */
+    }
+  }
   return rec;
 }
 
@@ -282,10 +313,11 @@ export function restorePersonalKnowledgeVersion(id: string, user: Principal, ver
 // (owner files request_promotion → Builder approves → Admin certifies). The role
 // gate here is a defence-in-depth backstop; the seam is the primary gate.
 
-/** Personal → Shared. Builder+ only (the effect seam already enforced SoD). */
+/** Personal → Shared. Domain admin+ only (the effect seam already enforced SoD). */
 export function promotePersonalKnowledge(id: string, user: Principal): PersonalKnowledgeRecord {
-  if (!roleAtLeast(user.role, 'builder')) fail('Only builders and admins can promote knowledge', 403);
-  const rec = requireEdit(id, user);
+  if (!roleAtLeast(user.role, 'domain_admin')) fail('Only domain admins and admins can promote knowledge', 403);
+  // Approver authority is the role gate above — approvers need not own the entry.
+  const rec = requireView(id, user);
   if (rec.visibility !== 'Personal') fail('This knowledge is already promoted', 409);
   rec.visibility = 'Shared';
   rec.updatedAt = now();
@@ -296,10 +328,33 @@ export function promotePersonalKnowledge(id: string, user: Principal): PersonalK
 /** Shared → Marketplace. Admin only. */
 export function certifyPersonalKnowledge(id: string, user: Principal): PersonalKnowledgeRecord {
   if (!roleAtLeast(user.role, 'admin')) fail('Only admins can certify knowledge to the marketplace', 403);
-  const rec = requireEdit(id, user);
+  const rec = requireView(id, user);
   if (rec.visibility === 'Marketplace') fail('This knowledge is already certified', 409);
   if (rec.visibility !== 'Shared') fail('Promote this knowledge to the domain before certifying', 409);
   rec.visibility = 'Marketplace';
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return rec;
+}
+
+/** Marketplace → Shared. Admin only (only an admin certified it). */
+export function decertifyPersonalKnowledge(id: string, user: Principal): PersonalKnowledgeRecord {
+  if (!roleAtLeast(user.role, 'admin')) fail('Only admins can revoke knowledge from the marketplace', 403);
+  const rec = requireView(id, user);
+  if (rec.visibility !== 'Marketplace') fail('This knowledge is not certified', 409);
+  rec.visibility = 'Shared';
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return rec;
+}
+
+/** Shared → Personal. Owner or in-domain builder/admin (mirrors who could promote). */
+export function unsharePersonalKnowledge(id: string, user: Principal): PersonalKnowledgeRecord {
+  const rec = requireEdit(id, user); // owner OR in-domain builder/admin
+  if (rec.visibility !== 'Shared') {
+    fail(rec.visibility === 'Marketplace' ? 'Revoke from the marketplace before unsharing' : 'This knowledge is already personal', 409);
+  }
+  rec.visibility = 'Personal';
   rec.updatedAt = now();
   writeThrough(rec);
   return rec;

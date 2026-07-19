@@ -12,9 +12,12 @@ import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import { useToolWindow } from '@/components/ToolWindowProvider';
 import { useApi } from '@/lib/useApi';
+import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
+import type { FiledApproval } from '@/lib/governance/approval-notice';
 import { getUrlParam, patchUrl } from '@/lib/core/url-params';
 import { roleAtLeast, type Role as SessionRole } from '@/lib/core/session';
 import DomainTag from '@/components/DomainTag';
+import ProgressStepper, { type Step, type StepState } from '@/components/core/ProgressStepper';
 
 type Visibility = 'Personal' | 'Shared' | 'Certified';
 type Tool = { name: string; description: string; write: boolean };
@@ -54,24 +57,58 @@ type Connection = { id: string; name: string; principal: string; visibility: Vis
 type Data = { user: { id: string; role: SessionRole }; app: App; connection: Connection };
 
 const STAGES = ['forgejo', 'actions', 'harbor', 'argocd', 'live'] as const;
-const STAGE_LABEL: Record<string, string> = {
-  forgejo: 'Forgejo',
-  actions: 'CI',
-  harbor: 'Harbor',
-  argocd: 'Argo CD',
-  live: 'Live',
+
+/**
+ * The REAL software build/deploy pipeline stages, honestly labelled for the shared
+ * <ProgressStepper> — the same fancy progress UX the Agents Build/Run phases wear:
+ * scaffold the repo → build the image (CI) → publish to the registry → deploy →
+ * live/health. Harbor is a default-off heavy workload (`disabled`); when off it is
+ * shown as a skipped/done step (CI uses Forgejo's registry locally), never a failure.
+ */
+const STAGE_STEP_LABEL: Record<(typeof STAGES)[number], string> = {
+  forgejo: 'Scaffold repo',
+  actions: 'Build image (CI)',
+  harbor: 'Publish to registry',
+  argocd: 'Deploy',
+  live: 'Live / health',
 };
-function stageClass(s: string): string {
-  if (s === 'ok') return 'badge ok';
-  if (s === 'pending') return 'badge warn';
-  if (s === 'disabled') return 'badge muted';
-  return 'badge err';
+
+/**
+ * Map the pipeline's per-stage status (`ok | pending | offline | disabled`) onto the
+ * stepper's states, driven by ACTUAL status — not a timer:
+ *   • ok        → done (teal ✓)
+ *   • offline   → fail (red ✗ — a real stage failure/unreachable)
+ *   • disabled  → done (skipped — Harbor off is not a failure)
+ *   • pending   → active (the FIRST pending stage) then pending for the rest.
+ * Settlement is honest: all ✓ once every stage is ok/skipped; ✗ on the failing stage.
+ */
+function pipelineSteps(pipeline: Record<string, string>): { steps: Step[]; active: boolean; done: boolean; ok: boolean } {
+  let firstPendingSeen = false;
+  const steps: Step[] = STAGES.map((s) => {
+    const status = pipeline[s] ?? 'pending';
+    let state: StepState;
+    if (status === 'ok' || status === 'disabled') state = 'done';
+    else if (status === 'offline') state = 'fail';
+    else {
+      // pending — the first one is the live "in-flight" step; the rest wait.
+      state = firstPendingSeen ? 'pending' : 'active';
+      firstPendingSeen = true;
+    }
+    return { key: s, label: STAGE_STEP_LABEL[s], state };
+  });
+  const anyFail = steps.some((st) => st.state === 'fail');
+  const anyPending = steps.some((st) => st.state === 'active' || st.state === 'pending');
+  const done = anyFail || !anyPending; // settled: a failure, or nothing left in flight
+  return { steps, active: !done, done, ok: !anyFail };
 }
 function visBadge(v: Visibility): string {
   return `badge vis-${v.toLowerCase()}`;
 }
 function visDisplayLabel(v: Visibility): string {
-  return v === 'Shared' ? 'Shared in Domain' : v;
+  // Display vocabulary: Shared → "Domain", Certified → "Company" (My stays for Personal).
+  if (v === 'Shared') return 'Domain';
+  if (v === 'Certified') return 'Company';
+  return v;
 }
 function deployBadge(state: App['deploy']['state']): { cls: string; label: string } {
   if (state === 'live') return { cls: 'badge ok', label: 'Live' };
@@ -80,8 +117,9 @@ function deployBadge(state: App['deploy']['state']): { cls: string; label: strin
   return { cls: 'badge muted', label: 'Draft' };
 }
 function promoteLabel(v: Visibility): string | null {
-  if (v === 'Personal') return 'Promote to Shared';
-  if (v === 'Shared') return 'Promote to Marketplace';
+  // Display verbs: Personal → "Promote to Domain"; Shared → "Certify to Company".
+  if (v === 'Personal') return 'Promote to Domain';
+  if (v === 'Shared') return 'Certify to Company';
   return null;
 }
 
@@ -89,6 +127,7 @@ export default function AppPage() {
   const params = useParams<{ id: string }>();
   const search = useSearchParams();
   const { openTool } = useToolWindow();
+  const { notifyApprovalFiled } = useApprovalNotifier();
   const id = params?.id;
   const { data, loading, error, reload } = useApi<Data>(`/api/apps/${id ?? ''}`);
 
@@ -97,6 +136,7 @@ export default function AppPage() {
   const [deployMsg, setDeployMsg] = useState('');
   const [showApi, setShowApi] = useState(false);
   const [manage, setManage] = useState(false);
+  const [confirmDemote, setConfirmDemote] = useState(false);
 
   // Persist whether Edit mode is open in the URL so a reload restores the editor
   // instead of the default Monitor view.
@@ -133,8 +173,12 @@ export default function AppPage() {
             ? '✓ Preview running — open the app UI above.'
             : '✓ Preview requested — the in-cluster runner is provisioning; the URL appears once the pod is ready (or stays pending if no cluster is reachable).',
         );
-      else if (body.kind === 'review') setDeployMsg('✓ Sent to a Builder for review (see Deploy reviews).');
-      else setDeployMsg('✓ Routine update — published within the approved envelope.');
+      else if (body.kind === 'review') {
+        setDeployMsg('✓ Deploy review filed — approve it in Policies & Approvals.');
+        // ONE OS-wide "this needs approval" confirmation (Policies link + inline approve).
+        const approval = body.approval as FiledApproval | undefined;
+        if (approval?.id) notifyApprovalFiled(approval, 'app deploy', reload);
+      } else setDeployMsg('✓ Routine update — published within the approved envelope.');
       reload();
     } catch (e) {
       setDeployMsg((e as Error).message);
@@ -150,7 +194,23 @@ export default function AppPage() {
     try {
       const res = await fetch(`/api/apps/${id}/promote`, { method: 'POST' });
       const body = await res.json();
-      setMsg(res.ok ? `✓ Promoted to ${body.app.visibility === 'Shared' ? 'Shared in Domain' : body.app.visibility}.` : `✗ ${body.error}`);
+      setMsg(res.ok ? `✓ Promoted to ${visDisplayLabel(body.app.visibility)}.` : `✗ ${body.error}`);
+      reload();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function demote() {
+    if (!id || busy) return;
+    setBusy(true);
+    setMsg('');
+    try {
+      const res = await fetch(`/api/apps/${id}/demote`, { method: 'POST' });
+      const body = await res.json();
+      setMsg(res.ok ? `✓ Revoked → ${visDisplayLabel(body.app.visibility)}.` : `✗ ${body.error}`);
       reload();
     } catch (e) {
       setMsg((e as Error).message);
@@ -232,6 +292,12 @@ export default function AppPage() {
   const version = app.deploy.releases > 0 ? `v${app.deploy.releases}` : 'Unpublished';
   const canEditCode = roleAtLeast(data.user.role, 'builder');
   const canPromoteUI = promoteLabel(app.visibility);
+  // Revoke sharing (demote one rung): Admin revokes Certified→Shared; Builder+ unshares Shared→Personal.
+  const canDemoteUI =
+    (app.visibility === 'Certified' && data.user.role === 'admin') ||
+    (app.visibility === 'Shared' && roleAtLeast(data.user.role, 'builder'));
+  const demoteLabel = app.visibility === 'Certified' ? 'Revoke from Company' : 'Unshare';
+  const confirmDemoteLabel = app.visibility === 'Certified' ? 'Confirm revoke → Domain' : 'Confirm unshare → My';
   // A deploy is already awaiting a Builder — block re-requesting (it would open a
   // duplicate review card and orphan the pending one). Point to the review inbox.
   const inReview = app.deploy.state === 'review';
@@ -246,6 +312,29 @@ export default function AppPage() {
           <div className="sw-app-head-meta">
             <span className={visBadge(app.visibility)}>{visDisplayLabel(app.visibility)}</span>
             {(app.visibility === 'Shared' || app.visibility === 'Certified') ? <DomainTag domain={app.domain} /> : null}
+            {/* Prominent promote — role-gated (Personal→Shared: Builder+, Shared→Marketplace: Admin).
+                The full "cascades to data/files/MCP" context still lives in the Manage panel below. */}
+            {canPromoteUI &&
+            ((app.visibility === 'Personal' && roleAtLeast(data.user.role, 'builder')) ||
+              (app.visibility === 'Shared' && data.user.role === 'admin')) ? (
+              <button className="btn sm" onClick={promote} disabled={busy} title="Promote this app's visibility">
+                {busy ? <span className="spin" /> : canPromoteUI}
+              </button>
+            ) : null}
+            {canDemoteUI ? (
+              confirmDemote ? (
+                <>
+                  <button className="btn sm" onClick={() => { setConfirmDemote(false); demote(); }} disabled={busy} style={{ background: 'var(--danger, #b42318)' }}>
+                    {busy ? <span className="spin" /> : confirmDemoteLabel}
+                  </button>
+                  <button className="btn ghost sm" onClick={() => setConfirmDemote(false)} disabled={busy}>Cancel</button>
+                </>
+              ) : (
+                <button className="btn ghost sm" onClick={() => setConfirmDemote(true)} disabled={busy} title="Revoke this app's sharing one rung">
+                  {demoteLabel}
+                </button>
+              )
+            ) : null}
             <span className={dep.cls}>{dep.label}</span>
             <span className="badge muted">{version}</span>
             {app.mode === 'offline' ? <span className="badge muted">git not ready</span> : null}
@@ -255,6 +344,27 @@ export default function AppPage() {
               <button className={mode === 'monitor' ? 'active' : ''} onClick={() => setMode('monitor')}>Monitor</button>
               <button className={mode === 'edit' ? 'active' : ''} onClick={() => setMode('edit')}>Edit</button>
             </div>
+            {/* Discoverable lifecycle: Archive (or Restore + Delete when archived) right
+                in the header — not buried under Manage. Owner or domain-admin+ (the server
+                re-checks via canManageArtifact). Full cluster incl. version history stays
+                under Manage. */}
+            {(app.owner === data.user.id || roleAtLeast(data.user.role, 'domain_admin')) ? (
+              <LifecycleActions
+                id={app.id}
+                name={app.name}
+                kind="app"
+                visibility={app.visibility === 'Shared' ? 'shared' : app.visibility === 'Certified' ? 'certified' : 'personal'}
+                archived={app.status === 'archived'}
+                handlers={{
+                  onArchive: () => lifecycle('archive'),
+                  onRestore: () => lifecycle('unarchive'),
+                  onDelete: () => lifecycle('delete'),
+                }}
+                onChanged={() => reload()}
+                showVersions={false}
+                compact
+              />
+            ) : null}
             <Link className="sw-quiet-link" href="/software">All software</Link>
           </div>
         </div>
@@ -298,11 +408,24 @@ export default function AppPage() {
               </div>
 
               <div className="sw-health">
-                {STAGES.map((s) => (
-                  <span key={s} className={stageClass(app.pipeline[s] ?? 'pending')}>
-                    {STAGE_LABEL[s]}: {app.pipeline[s] ?? 'pending'}
-                  </span>
-                ))}
+                {(() => {
+                  const p = pipelineSteps(app.pipeline);
+                  return (
+                    <ProgressStepper
+                      steps={p.steps}
+                      active={p.active}
+                      done={p.done}
+                      ok={p.ok}
+                      commentary={
+                        p.done
+                          ? p.ok
+                            ? 'Build & deploy complete.'
+                            : 'A build/deploy stage did not complete — see the marked stage.'
+                          : 'Building & deploying…'
+                      }
+                    />
+                  );
+                })()}
               </div>
 
               {(surface.api && showApi) ? (
@@ -344,7 +467,7 @@ export default function AppPage() {
                 </div>
                 <div className="row" style={{ gap: 8, alignItems: 'center', flexShrink: 0 }}>
                   <button className="btn ghost" onClick={() => deployAction('preview')} disabled={busy}>Preview</button>
-                  <button className="btn" onClick={() => deployAction()} disabled={publishDisabled} title={inReview ? 'A deploy is awaiting a Builder in Deploy reviews' : undefined}>
+                  <button className="btn lg" onClick={() => deployAction()} disabled={publishDisabled} title={inReview ? 'A deploy is awaiting a Builder in Deploy reviews' : undefined}>
                     {publishLabel}
                   </button>
                 </div>
@@ -402,13 +525,29 @@ export default function AppPage() {
 
                 <div className="section-title">Promotion ladder</div>
                 <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
-                  Personal → Shared (Builder/Admin) → Marketplace (Admin only). Cascades to the app&apos;s data, files and MCP connection.
+                  My → Domain (Builder/Admin) → Company (Admin only). Cascades to the app&apos;s data, files and MCP connection.
                 </p>
-                {canPromoteUI ? (
-                  <button className="btn" onClick={promote} disabled={busy}>{busy ? <span className="spin" /> : canPromoteUI}</button>
-                ) : (
-                  <span className="badge vis-certified">In the Marketplace</span>
-                )}
+                <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                  {canPromoteUI ? (
+                    <button className="btn" onClick={promote} disabled={busy}>{busy ? <span className="spin" /> : canPromoteUI}</button>
+                  ) : (
+                    <span className="badge vis-certified">In Company</span>
+                  )}
+                  {canDemoteUI ? (
+                    confirmDemote ? (
+                      <>
+                        <button className="btn sm" onClick={() => { setConfirmDemote(false); demote(); }} disabled={busy} style={{ background: 'var(--danger, #b42318)' }}>
+                          {busy ? <span className="spin" /> : confirmDemoteLabel}
+                        </button>
+                        <button className="btn ghost sm" onClick={() => setConfirmDemote(false)} disabled={busy}>Cancel</button>
+                      </>
+                    ) : (
+                      <button className="btn ghost sm" onClick={() => setConfirmDemote(true)} disabled={busy} title="Revoke this app's sharing one rung">
+                        {demoteLabel}
+                      </button>
+                    )
+                  ) : null}
+                </div>
 
                 <div className="section-title">Lifecycle</div>
                 <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -450,7 +589,7 @@ export default function AppPage() {
                   ? 'Edit the code directly below, or ask the “Ask the OS” assistant (top-right) to build changes for you.'
                   : 'Ask the “Ask the OS” assistant (top-right) to describe the changes you want — it writes code, commits to Forgejo, and prepares a release.'}
               </span>
-              <button className="btn" onClick={() => deployAction()} disabled={publishDisabled} title={inReview ? 'A deploy is awaiting a Builder in Deploy reviews' : undefined}>
+              <button className="btn lg" onClick={() => deployAction()} disabled={publishDisabled} title={inReview ? 'A deploy is awaiting a Builder in Deploy reviews' : undefined}>
                 {publishLabel}
               </button>
             </div>

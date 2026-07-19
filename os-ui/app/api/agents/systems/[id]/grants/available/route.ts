@@ -5,9 +5,25 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { getSystem } from '@/lib/agents/store';
 import { listDatasets, ensureHydrated } from '@/lib/data/store';
-import { listWorkflows } from '@/lib/knowledge/store';
+import { listWorkflows, ensureHydrated as ensureWorkflowsHydrated } from '@/lib/knowledge/store';
+import { listPersonalKnowledge, ensureHydrated as ensurePersonalHydrated } from '@/lib/knowledge/personal-store';
 import { listMetrics } from '@/lib/metrics/store';
 import { listConnectionsForUser } from '@/lib/connections';
+import { listFiles, ensureHydrated as ensureFilesHydrated } from '@/lib/files/store';
+import { listFolders, ensureHydrated as ensureFoldersHydrated, type FolderTab } from '@/lib/folders';
+import { grantFolderNodes } from '@/lib/agents/grant-folders';
+import { resolveManual } from '@/lib/knowledge/manual';
+import { listPillars } from '@/lib/strategy/pillars';
+import type { PillarScope } from '@/lib/strategy';
+import { listBets, ensureHydrated as ensureBetsHydrated } from '@/lib/bigbets/store';
+import {
+  MANUAL_SCOPES,
+  planGrantId,
+  manualLabel,
+  manualAvailableScope,
+  pillarPlanId,
+  bigBetPlanId,
+} from '@/lib/agents/plan-grants';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,12 +35,62 @@ export const dynamic = 'force-dynamic';
  * (personal + own-domain shared + marketplace), so this never leaks another
  * user's private drafts or another domain's artifacts.
  *
- * Response: `{ items: [{ id, name, scope: 'personal'|'domain'|'marketplace' }] }`.
+ * Response: `{ items: [{ id, name, scope, folder? }], folders?: [{ path, scope }] }`.
+ * DATA items additionally carry `layers` (which medallion layers are BUILT) so the
+ * grant picker only ever offers a real, queryable Bronze/Silver/Gold choice. For the
+ * FOLDERED kinds (data · knowledge · files) each item carries its `folder` path AND
+ * the response returns the folder nodes for the personal + domain trees, so the
+ * Wave-3 checkbox tree can render folders + items and emit folder grants. The feed is
+ * ALREADY DLS-scoped, so a folder that holds ungrantable items simply shows fewer
+ * items — the tree renders tri-state and the "grants N of M" honesty follows.
+ *
+ * The Plan-item kinds return grantable PLAN targets rather than raw artifacts:
+ * `operating-manual` (the manual scopes the caller may view), `strategy` (the Strategic
+ * Pillars via `listPillars`) and `big-bets` (the Big Bets via `listBets`). Each item's
+ * `id` is the encoded `grants.plan` id (`manual:*` / `pillar:*` / `bigbet:*`) and its
+ * `scope` groups it My/Domain/Company like the others. All three use the SAME RLS/DLS
+ * listing the corresponding tab uses, so nothing the caller can't see is ever offered.
  */
-type Kind = 'data' | 'knowledge' | 'connection' | 'metric';
-const KINDS: Kind[] = ['data', 'knowledge', 'connection', 'metric'];
+// `connections` (plural) is the Simple-builder GrantKind spelling; `connection`
+// (singular) is the original Grants-panel spelling — both resolve to the same list.
+type Kind =
+  | 'data' | 'knowledge' | 'files' | 'connection' | 'connections' | 'metric'
+  | 'operating-manual' | 'strategy' | 'big-bets';
+const KINDS: Kind[] = [
+  'data', 'knowledge', 'files', 'connection', 'connections', 'metric',
+  'operating-manual', 'strategy', 'big-bets',
+];
 
-type Item = { id: string; name: string; scope: 'personal' | 'domain' | 'marketplace' };
+/** Strategy pillar tier → the picker's My/Domain/Company (personal/domain/marketplace) bucket. */
+function pillarScopeBucket(scope: PillarScope): 'personal' | 'domain' | 'marketplace' {
+  if (scope === 'personal') return 'personal';
+  if (scope === 'tenant') return 'marketplace'; // Company tier ↔ marketplace bucket, matching scopeLabel
+  return 'domain';
+}
+
+/** The kinds that carry folders — the ones whose feed returns folder nodes. */
+const FOLDER_TABS: Record<string, FolderTab> = { data: 'data', knowledge: 'knowledge', files: 'files' };
+
+type Item = {
+  id: string;
+  name: string;
+  scope: 'personal' | 'domain' | 'marketplace';
+  /** DATA only: which medallion layers are built (so the picker offers real layers). */
+  layers?: ('bronze' | 'silver' | 'gold')[];
+  /** FOLDERED kinds only: the folder path this item lives in (normalised; `'/'` = root). */
+  folder?: string;
+};
+
+type FolderNodeOut = { path: string; scope: 'personal' | 'domain' };
+
+/** The built medallion layers of a dataset summary, from its B/S/G dots. */
+function builtLayers(dots: { bronze: boolean; silver: boolean; gold: boolean }): ('bronze' | 'silver' | 'gold')[] {
+  const out: ('bronze' | 'silver' | 'gold')[] = [];
+  if (dots.bronze) out.push('bronze');
+  if (dots.silver) out.push('silver');
+  if (dots.gold) out.push('gold');
+  return out;
+}
 
 function fail(e: unknown) {
   const status = (e as { status?: number })?.status ?? 500;
@@ -50,16 +116,32 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       await ensureHydrated();
       const g = listDatasets(principal);
       items = [
-        ...g.mine.map((d) => ({ id: d.id, name: d.name, scope: 'personal' as const })),
-        ...g.domain.map((d) => ({ id: d.id, name: d.name, scope: 'domain' as const })),
-        ...g.marketplace.map((d) => ({ id: d.id, name: d.name, scope: 'marketplace' as const })),
+        ...g.mine.map((d) => ({ id: d.id, name: d.name, scope: 'personal' as const, layers: builtLayers(d.dots), folder: d.folder })),
+        ...g.domain.map((d) => ({ id: d.id, name: d.name, scope: 'domain' as const, layers: builtLayers(d.dots), folder: d.folder })),
+        ...g.marketplace.map((d) => ({ id: d.id, name: d.name, scope: 'marketplace' as const, layers: builtLayers(d.dots), folder: d.folder })),
       ];
     } else if (kind === 'knowledge') {
-      const g = listWorkflows(principal);
+      // Hydrate both knowledge stores before listing (best-effort; OS-mirror backed).
+      await Promise.all([ensureWorkflowsHydrated(), ensurePersonalHydrated()]);
+      const wf = listWorkflows(principal);
+      const pk = listPersonalKnowledge(principal);
       items = [
-        ...g.mine.map((w) => ({ id: w.id, name: w.title, scope: 'personal' as const })),
-        ...g.domain.map((w) => ({ id: w.id, name: w.title, scope: 'domain' as const })),
-        ...g.marketplace.map((w) => ({ id: w.id, name: w.title, scope: 'marketplace' as const })),
+        // Workflows (wf_xxx) — no folder support ⇒ live at root.
+        ...wf.mine.map((w) => ({ id: w.id, name: w.title, scope: 'personal' as const, folder: '/' })),
+        ...wf.domain.map((w) => ({ id: w.id, name: w.title, scope: 'domain' as const, folder: '/' })),
+        ...wf.marketplace.map((w) => ({ id: w.id, name: w.title, scope: 'marketplace' as const, folder: '/' })),
+        // Personal knowledge entries (pk_xxx) — same canView scoping, separate store; foldered.
+        ...pk.mine.map((p) => ({ id: p.id, name: p.title, scope: 'personal' as const, folder: p.folder })),
+        ...pk.domain.map((p) => ({ id: p.id, name: p.title, scope: 'domain' as const, folder: p.folder })),
+        ...pk.marketplace.map((p) => ({ id: p.id, name: p.title, scope: 'marketplace' as const, folder: p.folder })),
+      ];
+    } else if (kind === 'files') {
+      await ensureFilesHydrated();
+      const g = listFiles(principal);
+      items = [
+        ...g.mine.map((f) => ({ id: f.id, name: f.name, scope: 'personal' as const, folder: f.folder })),
+        ...g.domain.map((f) => ({ id: f.id, name: f.name, scope: 'domain' as const, folder: f.folder })),
+        ...g.marketplace.map((f) => ({ id: f.id, name: f.name, scope: 'marketplace' as const, folder: f.folder })),
       ];
     } else if (kind === 'metric') {
       await ensureHydrated();
@@ -70,8 +152,39 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         ...g.domain.map((m) => ({ id: m.id, name: nm(m), scope: 'domain' as const })),
         ...g.marketplace.map((m) => ({ id: m.id, name: nm(m), scope: 'marketplace' as const })),
       ];
+    } else if (kind === 'operating-manual') {
+      // The three Operating-Manual scopes the caller may VIEW — gated by the SAME
+      // `resolveManual` the Operating-Manual tab uses (My = own, Domain = in-domain,
+      // Company = everyone). Each grantable item's id encodes its scope (`manual:<scope>`)
+      // so the grant records the exact governed target; granting provisions the read tool.
+      items = MANUAL_SCOPES
+        .filter((scope) => resolveManual(scope, principal).canView)
+        .map((scope) => ({ id: planGrantId(scope), name: manualLabel(scope), scope: manualAvailableScope(scope) }));
+    } else if (kind === 'strategy') {
+      // The Strategic Pillars the caller may VIEW — the SAME RLS-scoped `listPillars`
+      // the Strategy tab (and the Big Bets create dropdown) uses; never leaks another
+      // user's personal pillar or another domain's. Each grant id encodes the pillar
+      // (`pillar:<id>`); granting provisions the governed `get_pillar` read tool.
+      const pillars = await listPillars(user);
+      items = pillars.map((p) => ({
+        id: pillarPlanId(p.id),
+        name: p.name,
+        scope: pillarScopeBucket(p.scope),
+      }));
+    } else if (kind === 'big-bets') {
+      // The Big Bets the caller may VIEW — the SAME canView-scoped `listBets` the Big
+      // Bets tab uses. Scope buckets by ownership/reach: the caller's own bets → My,
+      // Admin-owned cross-domain bets → Company, otherwise the owning Domain. Each grant
+      // id encodes the bet (`bigbet:<id>`); granting provisions `get_big_bet`.
+      await ensureBetsHydrated();
+      const bets = listBets(principal);
+      items = bets.map((b) => ({
+        id: bigBetPlanId(b.id),
+        name: b.name,
+        scope: b.owner === user.id ? ('personal' as const) : b.crossDomain ? ('marketplace' as const) : ('domain' as const),
+      }));
     } else {
-      // connection — the async, already canView-scoped list.
+      // connection / connections — the async, already canView-scoped list.
       const conns = await listConnectionsForUser(user);
       items = conns.map((c) => ({
         id: c.id,
@@ -81,7 +194,30 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       }));
     }
 
-    return NextResponse.json({ items });
+    // For the foldered kinds, also return the folder nodes (personal + domain trees)
+    // so the Wave-3 checkbox tree can render folders alongside items. Two sources are
+    // UNIONED so the tree is never blank when items sit in a folder:
+    //   1. the governed `listFolders(viewer, tab, scope)` registry rows (explicit, incl.
+    //      EMPTY folders) — the SAME the tabs use, never another user's private tree;
+    //   2. the IMPLICIT ancestor folders synthesized from each grantable item's own
+    //      `folder` path. Files use an implicit-rail model (a file's folder often exists
+    //      only as a path on the file, with no registry row), so without this the Files
+    //      section rendered BLANK even though the user has folders. Data/Knowledge get
+    //      the same union for consistency. Every synthesized node inherits ITS ITEM's
+    //      scope (marketplace items fold under no tree — the picker only trees My/Domain).
+    let folders: FolderNodeOut[] | undefined;
+    const tab = FOLDER_TABS[kind];
+    if (tab) {
+      await ensureFoldersHydrated();
+      const viewer = { id: user.id, role: user.role, domains: user.domains };
+      const explicit = [
+        ...listFolders(viewer, tab, 'personal').map((f) => ({ path: f.path, scope: 'personal' as const })),
+        ...listFolders(viewer, tab, 'domain').map((f) => ({ path: f.path, scope: 'domain' as const })),
+      ];
+      folders = grantFolderNodes(explicit, items);
+    }
+
+    return NextResponse.json(folders ? { items, folders } : { items });
   } catch (e) {
     return fail(e);
   }

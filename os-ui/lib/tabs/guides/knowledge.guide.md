@@ -1,12 +1,34 @@
 # Knowledge — golden path
 
+## Where things live now
+
+The Plan section splits this into three sibling tabs — don't conflate them:
+
+- **Workflows** is its own tab. The authored, step-by-step "how work gets done"
+  records (steps · actors · rules · tacit) live there and are the subject of the
+  `author_knowledge` / `index_knowledge` / `publish_knowledge` loop below.
+- **Operating Manual** is its own tab with three scopes — **My · Domain · Company** —
+  for the durable policy/handbook prose (get · update · list-versions · restore per
+  scope), separate from workflows.
+- **Knowledge** is now **reference-only**: the canonical, searchable, RLS-scoped
+  knowledge store you read from (`search_knowledge` · `list_knowledge` ·
+  `get_knowledge`) to ground agents. Authoring still flows through this surface's
+  `author_knowledge`, but the browsing home for the workflow records is the
+  Workflows tab.
+
 ## What this is
 
-The Knowledge tab is the OS's canonical store for how work gets done. A
-workflow holds three kinds of content that complement each other:
+The knowledge store is the OS's canonical store for how work gets done. A
+workflow holds these kinds of content that complement each other:
 
-- **steps** — ordered sequence of actions, each owned by a Human, Software, or
-  Agent actor, with inputs, outputs, and an optional per-step inline tacit note.
+- **steps** — ordered sequence of actions, each owned by an actor, with inputs,
+  outputs, and an optional per-step inline tacit note.
+- **actors** — the workflow's first-class actor registry. Each actor is a described
+  entity (name · category · description) in one of five categories: **Human ·
+  Software · Agent · Customer · Partner**. Customer and Partner are *external*
+  (outside the organisation) and render as visually distinct swimlane lanes. Steps
+  reference actors from this registry; omit `actors` and one is derived from the
+  steps' distinct (category, name) pairs automatically.
 - **rules** — guardrails (`hard: true` = must-not-violate; `hard: false` = soft
   guideline). Both workflow-level and step-level rules are supported.
 - **tacit** — unstructured know-how that resists formalization: the gotchas, the
@@ -25,7 +47,8 @@ tab.
    authoring a duplicate. Call `list_knowledge` to browse by domain.
 
 2. **Author.** Call `author_knowledge` with the real params (see below). The tool
-   creates a Personal draft — a single `workflow.md` in the governed store.
+   creates a My-scope draft (yours, no approval) — a single `workflow.md` in the
+   governed store.
 
 3. **Index.** Call `index_knowledge` to chunk, embed, and make the workflow
    retrievable via semantic search. This step is required before the workflow
@@ -35,9 +58,9 @@ tab.
    or its tacit content. Confirm it surfaces in the top results. This closes the
    authoring loop.
 
-5. ⛔ **Builder publishes.** A Builder or Admin calls `publish_knowledge` to move
-   the workflow from Personal to Shared. Published workflows are visible to domain
-   members and can be referenced by agent systems.
+5. ⛔ **Domain admin publishes.** A domain admin (or tenant admin) calls
+   `publish_knowledge` to promote the workflow from My to Domain. Published
+   workflows are visible to domain members and can be referenced by agent systems.
 
 **Note:** `search_knowledge` hits carry provenance metadata (author, domain, tier).
 Always cite the source when you relay knowledge to a user.
@@ -52,12 +75,21 @@ author_knowledge({
   steps: [                   // ordered steps
     {
       title:      string,    // required
-      actor:      "Human" | "Software" | "Agent",
-      actor_name: string?,   // e.g. "Loan Officer"
+      actor:      "Human" | "Software" | "Agent" | "Customer" | "Partner",
+                             // Customer + Partner are EXTERNAL actors
+      actor_name: string?,   // e.g. "Loan Officer"; matches actors[].name
       inputs:     string[],  // artefacts consumed
       outputs:    string[],  // artefacts produced
       tacit:      string?,   // per-step inline note — gotchas, edge cases,
                              // undocumented nuances for THIS step
+    }
+  ],
+  actors: [                  // optional actor registry (else derived from steps)
+    {
+      name:        string,   // required — e.g. "Salesforce API"
+      category:    "Human" | "Software" | "Agent" | "Customer" | "Partner",
+      description: string?,  // its role — applies to EVERY category, e.g.
+                             // "Salesforce API — nightly REST ingestion"
     }
   ],
   rules: [                   // workflow-level decision rules
@@ -107,11 +139,17 @@ author_knowledge({
 |---|---|
 | `search_knowledge`, `list_knowledge`, `get_knowledge` | Creator |
 | `author_knowledge`, `index_knowledge` | Creator (own work) |
-| ⛔ `publish_knowledge` | Builder or Admin |
+| `retire_knowledge` (archive/delete) | Creator (own My-scope); domain admin+ for a Domain workflow |
+| ⛔ `publish_knowledge` | Domain admin (or tenant admin) |
 
-OPA enforces domain scope. Unpublished workflows are Personal and invisible to
+`retire_knowledge` is lineage-aware: retiring a workflow still consumed by an App
+or Agent system is blocked (409) — remove those uses first. `action: "delete"` is
+physical + irreversible (purges the index) and refuses a still-published workflow;
+`action: "archive"` (default) is a reversible soft-hide.
+
+OPA enforces domain scope. Unpublished workflows are My-scope and invisible to
 agents. A creator cannot publish their own knowledge — file the workflow and hand
-off to a Builder.
+off to a domain admin.
 
 **Worked example (with tacit):**
 
@@ -139,7 +177,7 @@ author_knowledge({
   rules: [{ text: "Exceptions > 10 000 EUR need CFO sign-off", hard: true }],
   tacit: "## Seasonal note\nVolume spikes 3× in December — request extra headcount by Nov 15.\n\n## System quirk\nThe ERP auto-closes exceptions older than 90 days without notification."
 })
-→ { id: "wf_04F...", status: "draft", visibility: "Personal" }
+→ { id: "wf_04F...", status: "draft", visibility: "My" }
 
 index_knowledge({ workflowId: "wf_04F..." })
 → { workflow: { unitCount: 6 }, domain: { unitCount: 1 } }
@@ -149,5 +187,5 @@ search_knowledge({ query: "reconcile invoice exceptions" })
    { id: "wf_04F...:tacit:doc:0", score: 0.87, provenance: { type: "tacit" } }]
 ```
 
-A Builder then calls `publish_knowledge({ workflowId: "wf_04F..." })` to make it
-available to agents.
+A domain admin then calls `publish_knowledge({ workflowId: "wf_04F..." })` to make
+it available to agents.
