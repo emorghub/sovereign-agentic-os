@@ -122,10 +122,21 @@ export async function liveDataReachable(): Promise<boolean> {
   return Boolean(res && res.ok);
 }
 
+/**
+ * Is the governed WRITE path (query-tool → Trino) reachable? The Silver/Gold
+ * transform CTAS never touches Cube, so gating those stages on Cube health would
+ * silently offline-mock a transform that could have run for real (and vice versa).
+ * This probes the service the transform actually writes through.
+ */
+export async function queryToolReachable(): Promise<boolean> {
+  const res = await withTimeout(`${config.queryToolUrl}/health`, { method: 'GET' }, 2500);
+  return Boolean(res && res.ok);
+}
+
 // ----------------------------------------------- dlt / dbt / dbt-trino / trino ---
 
 /** A probe SELECT through the governed query-tool (Trino + OPA). True ⇒ live. */
-async function probeQueryable(fqn: string, principal?: string): Promise<boolean> {
+export async function probeQueryable(fqn: string, principal?: string): Promise<boolean> {
   try {
     const r = await queryRun(`SELECT 1 FROM ${fqn} LIMIT 1`, principal);
     return Array.isArray(r.rows);

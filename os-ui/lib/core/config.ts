@@ -436,6 +436,49 @@ export const config = {
   // above), which is unchanged. See docs/openmetadata-connectors.md (Phase 1).
   openmetadataConnectEnabled: env('OPENMETADATA_CONNECT_ENABLED', '').toLowerCase() === 'true',
 
+  // ---- OpenMetadata DQ write-back (Phase 2 DQ). GATED OFF by default: pushing
+  // OS-authored data-quality rules + results into OM as first-class TestSuites /
+  // TestCases / testCaseResults (the DQ leg of the integrity-safe write-back). When
+  // OFF, the per-run result-append is a NO-OP and the governed `sync_quality_to_catalog`
+  // trigger reports it honestly — the OS-side DQ run ALWAYS succeeds regardless. Writes
+  // additionally fail closed outside the tested OM version range and require the
+  // least-privilege writer bot. See docs/research/data-quality-plan.md (D4).
+  openmetadataDqWritebackEnabled: env('OPENMETADATA_DQ_WRITEBACK_ENABLED', '').toLowerCase() === 'true',
+
+  // ---- Analytics-monorepo APPLY (#146 Phase 1). GATED OFF by default: the
+  // registry-apply enforcement point — THE only door from git into compute
+  // (plan §3 step 6). When OFF, `POST/GET /api/analytics/apply` reports it
+  // honestly and writes nothing; when ON it still requires admin / an admin
+  // service-principal session and re-runs OPA/tier/promotion checks as the mapped
+  // principal, REJECTING any pushed OS-managed file the emitters can't round-trip
+  // (single-writer invariant — the registry stays authoritative). The end-to-end
+  // path is live-verify-pending (needs Forgejo + analyticsRepo.enabled + Actions).
+  analyticsApplyEnabled: env('ANALYTICS_APPLY_ENABLED', '').toLowerCase() === 'true',
+
+  // ---- Per-user git token mint (#146 Phase 2, Option B — ADR 0006). GATED OFF by
+  // default: mints a SHORT-TTL, repo-scoped Forgejo access token for the caller's
+  // OS-mirrored Forgejo user so `sos git` can clone/push AS the real user (real git
+  // attribution + Forgejo branch protection mapped to the OS ladder). When OFF,
+  // `POST /api/git/token` reports it honestly and mints nothing. The Forgejo ADMIN
+  // credential used to provision users + mint tokens is the EXISTING `forgejo*`
+  // secret above (referenced, never inlined/logged); the minted token is returned
+  // ONCE over the governed channel and NEVER logged, stored, or echoed. Live-verify
+  // pending: real Forgejo user-create + scoped-token mint + a raw `git push`.
+  gitTokenMintEnabled: env('GIT_TOKEN_MINT_ENABLED', '').toLowerCase() === 'true',
+  // The minted token's lifetime, in seconds (default 1h). Forgejo access tokens have
+  // no server-enforced TTL, so the OS treats this as the token's REVOKE-BY horizon:
+  // it names each token with its mint epoch, returns `expiresAt`, and the central
+  // revoke path (`sos login` refresh / deactivation hook) deletes expired/old tokens.
+  gitTokenTtlSeconds: Number(env('GIT_TOKEN_TTL_SECONDS', '')) || 3600,
+
+  // ---- OpenMetadata catalog ingestion (#147). GATED OFF by default: the governed
+  // "refresh catalog" orchestrator folds the additive metadata + DQ write-back over
+  // EVERY governed gold/silver mart so OM reflects the live lakehouse in one pass.
+  // When OFF, the `refresh_catalog` trigger reports it honestly and writes nothing;
+  // when ON it still requires an om-catalog connection + the least-privilege writer bot
+  // and fails closed outside the tested OM version range. Read paths are unaffected.
+  openmetadataIngestEnabled: env('OPENMETADATA_INGEST_ENABLED', '').toLowerCase() === 'true',
+
   // ---- Folder grants (Wave 3 agent-grant kernel). The MAX number of folder
   // grants one agent may carry — a folder grant resolves at run time to every
   // item under it (lib/core/folders → resolveFolderGrant), so this bounds the

@@ -15,6 +15,8 @@ import {
   setDocs as setDatasetDocs,
   requestPromotion as requestDatasetPromotion,
   getDataset,
+  archiveDataset,
+  deleteDataset,
   defineMeasure,
   buildGoldJoin as commitGoldJoin,
   addCheck,
@@ -46,6 +48,12 @@ import type { ExecuteIdentity } from '@/lib/infra/governed';
 import type { Layer, Quality, DataVisibility, Grant, ColumnDoc, DatasetUpstream } from '@/lib/data';
 import { measureFromForm, measureMember, type MetricForm, type GuidedFilter, type GuidedWindow } from '@/lib/metrics/model';
 import type { MeasureType } from '@/lib/data/metrics';
+import { buildMetric } from '@/lib/metrics/build/server';
+import { exploreMetric } from '@/lib/metrics/build/explore-server';
+import type { Granularity } from '@/lib/metrics/explorer';
+import { getMetric } from '@/lib/metrics/store';
+import { governMetric, canPromote as canPromoteMetric } from '@/lib/metrics/governance';
+import { transition as transitionDataset } from '@/lib/data/store';
 
 import {
   createWorkflow,
@@ -74,11 +82,14 @@ import { indexWorkflow, indexDomain, purgeKnowledgeUnits } from '@/lib/knowledge
 import {
   createFile,
   setDocs as setFileDocs,
+  attachObject,
+  objectKeyForAsset,
   requestPromotion as requestFilePromotion,
   applyApprovedFilePromotion,
   type FilePromotionRequest,
 } from '@/lib/files/store';
 import { reindexFile } from '@/lib/files/pipeline-server';
+import { putBlob } from '@/lib/files/object-store';
 import type { Sensitivity } from '@/lib/files/asset-schema';
 
 import { saveDashboard } from '@/lib/dashboards/store';
@@ -114,6 +125,9 @@ import {
 import { isTemplateKey } from '@/lib/agents/templates';
 import { buildSystem } from '@/lib/agents/build/server';
 
+import { patchAppDesign, getAppForUser, type AppEpic } from '@/lib/software/apps';
+import { normalizeContextGrants } from '@/lib/core/context-grants';
+
 /**
  * The GOVERNED WRITE tools of the OS MCP — one per authoring action a case study
  * needs (create a dataset, author a workflow, upload a file, define a metric, build
@@ -130,6 +144,14 @@ import { buildSystem } from '@/lib/agents/build/server';
 
 type Principal = { id: string; domains: string[]; role: Role };
 const P = (u: CurrentUser): Principal => ({ id: u.id, domains: u.domains, role: u.role });
+
+/** Mint a delegated token directly from the MCP user (already authenticated via MCP session).
+ *  Unlike `delegatedToken` in `lib/infra/identity-server`, this does NOT call requireUser()
+ *  (which reads from the HTTP session via next/headers) — the MCP user IS the authenticated
+ *  identity, so we delegate directly. R2 is preserved: the token carries the caller's sub. */
+function mcpToken(user: CurrentUser, scope: 'personal' | 'domain' | 'marketplace' = 'domain') {
+  return delegate(claimsFromUser({ id: user.id, domains: user.domains, role: user.role }), scope);
+}
 
 function fail(message: string, status: number): never {
   const e = new Error(message) as Error & { status?: number };
@@ -647,6 +669,45 @@ export const dataWriteTools: McpTool[] = [
       return { datasetId, name: dataset.name, ...report };
     },
   },
+  {
+    name: 'retire_dataset',
+    tab: 'data',
+    minRole: 'creator',
+    description:
+      'RETIRE a dataset you can edit — the Data tab’s lifecycle, the counterpart to `retire_knowledge`: `archive` (the default: reversible soft-hide, retains the record + medallion versions + history; it just stops showing in the default list) or `delete` (PHYSICAL, irreversible removal of the registry record). Same governed store the Data tab + `/api/data/datasets/[id]` call. LINEAGE-AWARE on delete: blocked with a typed 409 if any domain still imports the data product (mirrors deleteDataset — remove subscribers first). Role gate (edit scope, re-checked in-lib): the OWNER may retire their own Personal/unshared dataset; a SHARED/domain dataset needs a same-domain Builder+ (or Admin). Idempotency: retiring a missing dataset is a typed not_found (no existence leak). Use to clean up stray/duplicate datasets (e.g. leftovers from a runaway agent loop).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        datasetId: { type: 'string', description: 'The dataset id to retire (from list_datasets).' },
+        action: {
+          type: 'string',
+          enum: ['archive', 'delete'],
+          description: 'archive = reversible soft-hide (default); delete = physical, irreversible removal.',
+        },
+      },
+      required: ['datasetId'],
+      examples: [{ datasetId: 'ds_ab12cd' }, { datasetId: 'ds_ab12cd', action: 'delete' }],
+    },
+    call: async (user, args) => {
+      const id = str(args.datasetId).trim();
+      if (!id) fail('retire_dataset needs a `datasetId`', 400);
+      const action = str(args.action).trim() || 'archive';
+      if (action !== 'archive' && action !== 'delete') {
+        fail("retire_dataset `action` must be 'archive' or 'delete'", 400);
+      }
+      const p = P(user);
+      // View-scope + existence guard first (typed 403/404) so a role/lineage message
+      // never leaks a dataset the caller can't even see.
+      const d = getDataset(id, p);
+      if (action === 'archive') {
+        const rec = archiveDataset(id, p); // edit-gated in-lib (owner or same-domain Builder+)
+        return { id, name: rec.name, action: 'archive', archived: true, reversible: true };
+      }
+      // PHYSICAL delete: edit-gated + lineage-aware (409 if imported) in-lib.
+      deleteDataset(id, p);
+      return { id, name: d.name, action: 'delete', deleted: true, reversible: false };
+    },
+  },
 ];
 
 /** MCP in-band ingest cap (~2 MB) — bigger files go through the UI's streaming upload. */
@@ -889,38 +950,117 @@ export const fileWriteTools: McpTool[] = [
     tab: 'files',
     minRole: 'creator',
     description:
-      'Upload a governed file (private object-store file at v1) with optional extracted `text` (indexed for search), folder, tags, description and sensitivity. Same path as the Files tab upload. `restricted` sensitivity is stored-but-not-indexed. A `description` + ≥1 tag make it eligible for `promote_file`.',
+      'Upload a governed file (private object-store file at v1) into the Files tab — the SAME governed path as the UI upload. ' +
+      'For BINARY files (PDFs, images, Office docs, etc.) provide the raw bytes as `base64Content` (standard base64) and set `mimeType` (e.g. "application/pdf"). ' +
+      'The decoded bytes are stored in the governed object store so Download returns the REAL file byte-for-byte. ' +
+      'For plain-text files (Markdown, CSV, JSON, TXT) you may omit `base64Content` and pass the content as `text` instead; it is indexed for search. ' +
+      'Do NOT pass a markdown description of a binary file as `text` and omit the bytes — that produces a misleading text-only record. ' +
+      'MCP in-band limit: ~4 MB of base64 (≈3 MB decoded). Larger files must be uploaded through the Files tab UI. ' +
+      '`restricted` sensitivity is stored-but-not-indexed. A `description` + ≥1 tag make the file eligible for `promote_file`.',
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: 'File name, e.g. "refund-policy.md".' },
+        name: { type: 'string', description: 'File name including extension, e.g. "invoice-2026-01.pdf".' },
+        base64Content: {
+          type: 'string',
+          description:
+            'The file\'s raw bytes encoded as standard base64. Required for binary files (PDF, PNG, DOCX, XLSX, …). ' +
+            'Must be paired with `mimeType`. Omit for plain-text files where `text` carries the content.',
+        },
+        mimeType: {
+          type: 'string',
+          description:
+            'MIME type of the file, e.g. "application/pdf", "image/png", "application/vnd.openxmlformats-officedocument.wordprocessingml.document". ' +
+            'Required when `base64Content` is provided.',
+        },
         folder: { type: 'string', description: 'Optional folder path.' },
-        text: { type: 'string', description: 'Extracted/preview text (chunked + embedded for search).' },
+        text: {
+          type: 'string',
+          description:
+            'Extracted/preview text for search indexing. For plain-text files pass the full content here. ' +
+            'For binary files this is OPTIONAL supplemental text (e.g. a pre-extracted transcript or summary) — do NOT use it as a substitute for the real bytes.',
+        },
         tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags (≥1 needed to promote).' },
         description: { type: 'string', description: 'What this file is (needed to promote it).' },
         sensitivity: { type: 'string', enum: ['public', 'internal', 'confidential', 'restricted'], description: 'Governs indexing (restricted ⇒ not indexed).' },
         domain: { type: 'string', description: 'One of YOUR domains; defaults to your first.' },
       },
       required: ['name'],
-      examples: [{ name: 'refund-policy.md', folder: 'policies', text: 'Refunds are processed within 5 days.', tags: ['policy'], description: 'Customer refund policy', sensitivity: 'internal' }],
+      examples: [
+        {
+          name: 'invoice-2026-01.pdf',
+          base64Content: 'JVBERi0xLjQK…',
+          mimeType: 'application/pdf',
+          folder: 'invoices',
+          tags: ['invoice', 'finance'],
+          description: 'January 2026 supplier invoice',
+          sensitivity: 'confidential',
+        },
+        {
+          name: 'refund-policy.md',
+          text: 'Refunds are processed within 5 days.',
+          folder: 'policies',
+          tags: ['policy'],
+          description: 'Customer refund policy',
+          sensitivity: 'internal',
+        },
+      ],
     },
     call: async (user, args) => {
       const name = str(args.name).trim();
       if (!name) fail('upload_file needs a `name`', 400);
+
+      // Validate + decode binary content when provided.
+      const b64 = typeof args.base64Content === 'string' ? args.base64Content : '';
+      const mimeType = typeof args.mimeType === 'string' ? args.mimeType.trim() : '';
+      if (b64 && !mimeType) fail('upload_file: `mimeType` is required when `base64Content` is provided', 400);
+
+      let binaryBytes: Buffer | null = null;
+      if (b64) {
+        // Decode base64 → raw bytes; fail clearly on corrupt input (never silently store garbage).
+        try {
+          binaryBytes = Buffer.from(b64, 'base64');
+        } catch {
+          fail('upload_file: `base64Content` is not valid base64', 400);
+        }
+        // ~4 MB base64 ≈ 3 MB decoded; match the ingest cap.
+        if (binaryBytes.length > INGEST_MAX_BYTES) {
+          fail(
+            `upload_file: decoded content is ${(binaryBytes.length / 1048576).toFixed(1)} MB — the MCP in-band limit is ${INGEST_MAX_BYTES / 1048576} MB. ` +
+              'Upload larger files through the Files tab UI.',
+            400,
+          );
+        }
+      }
+
       const p = P(user);
       const tags = strArr(args.tags);
+      const textArg = typeof args.text === 'string' ? args.text : undefined;
+
       const asset = createFile(p, {
         name,
         folder: str(args.folder) || undefined,
-        text: typeof args.text === 'string' ? args.text : undefined,
+        text: textArg,
+        bytes: binaryBytes ? binaryBytes.length : undefined,
         tags,
         sensitivity: (str(args.sensitivity) as Sensitivity) || undefined,
         domain: str(args.domain) || undefined,
       });
+
+      // Store the original bytes in the governed object store so Download returns the
+      // REAL file (identical path to the UI multipart upload: putBlob + attachObject).
+      if (binaryBytes) {
+        const key = objectKeyForAsset(asset);
+        if (key) {
+          await putBlob(key, binaryBytes, mimeType);
+          attachObject(asset.id, p, { contentType: mimeType, bytes: binaryBytes.length });
+        }
+      }
+
       const description = str(args.description);
       const documented = description ? setFileDocs(asset.id, p, { description, tags }) : asset;
       try {
-        await reindexFile(documented, str(args.text));
+        await reindexFile(documented, textArg ?? '');
       } catch {
         /* indexing is best-effort; the upload already succeeded */
       }
@@ -1148,7 +1288,113 @@ export const metricWriteTools: McpTool[] = [
 
       const measure = measureFromForm(form); // MetricError → typed bad_request with the real reason
       const dataset = defineMeasure(datasetId, P(user), measure);
-      return { datasetId, measure, member: measureMember(dataset, measure), cube: scaffoldCubeYaml(dataset) };
+      const token = mcpToken(user);
+      const build = await buildMetric(dataset, measure, token);
+      return {
+        datasetId,
+        measure,
+        member: build.member,
+        cube: scaffoldCubeYaml(dataset),
+        ...(build.pending ? { pending: true, note: 'Metric saved — live value appears within ~30 s as the query engine syncs.' } : {}),
+      };
+    },
+  },
+  {
+    name: 'preview_metric',
+    tab: 'metrics',
+    minRole: 'creator',
+    description:
+      'Preview the number a metric definition will produce — same governed Cube query, same per-viewer RLS, without persisting anything. Use this BEFORE define_metric to validate the number. Returns rows + mode (live/offline-mock) + the SQL. If the measure has not synced yet, returns pending: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        datasetId: { type: 'string', description: 'Gold, governed dataset id.' },
+        name: { type: 'string', description: 'Proposed metric name.' },
+        aggregation: { type: 'string', enum: ['count', 'count_distinct', 'count_distinct_approx', 'sum', 'avg', 'min', 'max', 'number'] },
+        column: { type: 'string' },
+        dimensions: { type: 'array', items: { type: 'string' } },
+        timeDimension: { type: 'string', description: 'Time column to slice by.' },
+        granularity: { type: 'string', enum: ['day', 'week', 'month', 'quarter', 'year'] },
+        limit: { type: 'number', description: 'Max rows (default 20, max 100).' },
+      },
+      required: ['datasetId', 'name', 'aggregation'],
+      examples: [{ datasetId: 'ds_ab12cd', name: 'Revenue', aggregation: 'sum', column: 'net_amount', dimensions: ['region'] }],
+    },
+    call: async (user, args) => {
+      const datasetId = str(args.datasetId).trim();
+      if (!datasetId) fail('preview_metric needs a datasetId', 400);
+      const name = str(args.name).trim() || 'preview';
+      const form: MetricForm = {
+        name,
+        aggregation: str(args.aggregation) as MeasureType,
+        column: str(args.column),
+        dimensions: strArr(args.dimensions),
+      };
+      const measure = measureFromForm(form);
+      const dataset = getDataset(datasetId, P(user));
+      const draft = { ...dataset, measures: [...dataset.measures.filter((m) => m.name !== measure.name), measure] };
+      const token = mcpToken(user);
+      const result = await exploreMetric(draft, measure, token, {
+        dimensions: strArr(args.dimensions),
+        timeDimension: str(args.timeDimension) || undefined,
+        granularity: (str(args.granularity) as Granularity) || undefined,
+        limit: typeof args.limit === 'number' ? Math.min(args.limit, 100) : 20,
+      });
+      return { datasetId, measure, ...result };
+    },
+  },
+  {
+    name: 'promote_metric',
+    tab: 'metrics',
+    minRole: 'creator',
+    description:
+      'Promote a metric one rung on the governance ladder (Personal→Domain or Domain→Company). A creator OWNER files a request (returned as { requested: true, approval }); a builder+ runs the consistency-gated govern flow directly. Mirrors the Metrics tab promote button.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        metricId: { type: 'string', description: 'Metric id: <datasetId>.<measureName>, e.g. "ds_ab12cd.revenue".' },
+      },
+      required: ['metricId'],
+      examples: [{ metricId: 'ds_ab12cd.revenue' }],
+    },
+    call: async (user, args) => {
+      const id = str(args.metricId).trim();
+      if (!id) fail('promote_metric needs a metricId', 400);
+      const record = getMetric(id, P(user));
+      if (record.tier === 'marketplace') fail('This metric is already certified', 409);
+      const transition: 'promote' | 'certify' = record.tier === 'personal' ? 'promote' : 'certify';
+      // Creator owner at Personal → file a governed request
+      if (transition === 'promote' && record.owner === user.id && !canPromoteMetric(user.role)) {
+        const dup = listApprovals({ status: 'pending' }).find(
+          (a) => a.kind === 'artifact_promote' && a.payload?.artifactKind === 'metric' && a.payload?.id === id,
+        );
+        if (dup) return { requested: true, approval: dup };
+        const approval = enqueue({
+          kind: 'artifact_promote',
+          title: `Promote "${record.measure.name}" to a ${record.dataset.domain} domain metric`,
+          detail: `${user.id} requests promoting the metric "${record.measure.name}" to a shared domain asset. A domain admin must approve.`,
+          agent: user.id,
+          domain: record.dataset.domain,
+          requestedBy: user.id,
+          tool: 'metric_promote',
+          payload: { artifactKind: 'metric', id, name: record.measure.name },
+          approverRole: 'domain_admin',
+          scope: 'domain',
+        });
+        return { requested: true, approval };
+      }
+      // Approver path — consistency-gated govern flow
+      const token = mcpToken(user);
+      const resolve = async (): Promise<number | null> => {
+        const r = await exploreMetric(record.dataset, record.measure, token, {});
+        const total = r.rows.reduce((sum, row) => sum + Number(row[r.member] ?? 0), 0);
+        return r.rows.length ? total : null;
+      };
+      const result = await governMetric(record, transition, { id: user.id, role: user.role }, resolve);
+      if (!result.ok) fail(`${result.reason ?? 'governance gate failed'} (consistency: ${result.consistency.rows.filter((r) => !r.ok).map((r) => r.detail).join('; ')})`, 403);
+      if (record.dataset.tier === 'dataset') fail('Promote the underlying dataset to a governed asset in the Data tab first', 409);
+      transitionDataset(record.dataset.id, P(user), transition);
+      return { item: { id, tier: result.record.tier } };
     },
   },
 ];
@@ -1764,6 +2010,99 @@ export function __setRunOsTeamForTests(fn: RunTeamFn | null): void {
   runTeamOverride = fn;
 }
 
+// ============================== SOFTWARE =======================================
+export const softwareWriteTools: McpTool[] = [
+  {
+    name: 'set_app_design',
+    tab: 'software',
+    minRole: 'creator',
+    description:
+      "Set or update the app's Define/Design fields: `purpose` (stated intent, ≤2000 chars), `epics` (Design epics + user stories), and `grants` (governed context grants — Connections · Data · Knowledge · Files · Metrics at read-only | read-propose | read-write). Each field is optional; unset fields are untouched. Governance: owner, owning-domain admin, or platform admin only — same edit scope as the UI PATCH (`patchAppDesign`). Grants are capability metadata (id + access level), never raw credentials. Before: list_software / get_software (need the appId). After: get_software to read the updated design back.",
+    inputSchema: {
+      type: 'object',
+      description: 'Patch the Define/Design surfaces of an app you may edit. All patch fields except appId are optional.',
+      properties: {
+        appId: { type: 'string', description: 'App id from list_software.' },
+        purpose: { type: 'string', description: "The app's stated purpose (Define stage), ≤2000 chars." },
+        epics: {
+          type: 'array',
+          description: 'Design epics. Each groups user stories under technical/UX/governance requirements.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              title: { type: 'string' },
+              description: { type: 'string' },
+              requirements: {
+                type: 'object',
+                properties: {
+                  technical: { type: 'string' },
+                  ux: { type: 'string' },
+                  governance: { type: 'string' },
+                },
+              },
+              stories: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    title: { type: 'string' },
+                    asA: { type: 'string' },
+                    iWant: { type: 'string' },
+                    soThat: { type: 'string' },
+                    acceptance: { type: 'string' },
+                  },
+                  required: ['id', 'title', 'asA', 'iWant', 'soThat'],
+                },
+              },
+            },
+            required: ['id', 'title'],
+          },
+        },
+        grants: {
+          type: 'object',
+          description:
+            'Governed context grants: which OS artifacts this app may access and at what level. Each kind maps to { id, access } entries. Grants are capability metadata — never raw credentials.',
+          properties: {
+            connections: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, access: { type: 'string', enum: ['read-only', 'read-propose', 'read-write'] } }, required: ['id', 'access'] } },
+            data:        { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, access: { type: 'string', enum: ['read-only', 'read-propose', 'read-write'] } }, required: ['id', 'access'] } },
+            knowledge:   { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, access: { type: 'string', enum: ['read-only', 'read-propose', 'read-write'] } }, required: ['id', 'access'] } },
+            files:       { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, access: { type: 'string', enum: ['read-only', 'read-propose', 'read-write'] } }, required: ['id', 'access'] } },
+            metrics:     { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, access: { type: 'string', enum: ['read-only', 'read-propose', 'read-write'] } }, required: ['id', 'access'] } },
+          },
+        },
+      },
+      required: ['appId'],
+      examples: [
+        { appId: 'app_ab12cd', purpose: 'Track and resolve customer support tickets in real time.' },
+        {
+          appId: 'app_ab12cd',
+          epics: [{
+            id: 'epic_1', title: 'Ticket triage',
+            description: 'Auto-prioritise incoming tickets',
+            requirements: { technical: 'ML classifier', ux: 'Simple inbox view', governance: 'No PII in logs' },
+            stories: [{ id: 'story_1', title: 'Auto-label', asA: 'Support agent', iWant: 'tickets labelled on arrival', soThat: 'I can triage faster', acceptance: 'Label appears within 5 s' }],
+          }],
+        },
+        { appId: 'app_ab12cd', grants: { connections: [{ id: 'conn_xyz', access: 'read-only' }], data: [], knowledge: [], files: [], metrics: [] } },
+      ],
+    },
+    call: async (user, args) => {
+      const appId = str(args.appId).trim();
+      if (!appId) fail('set_app_design needs an `appId` (from list_software)', 400);
+      // Confirm visibility before patching (patchAppDesign also checks, but an
+      // explicit view-gate here gives a typed not_found on an invisible app id).
+      await getAppForUser(appId, user);
+      return patchAppDesign(appId, user, {
+        purpose: args.purpose !== undefined ? str(args.purpose) : undefined,
+        epics: args.epics !== undefined ? (args.epics as AppEpic[]) : undefined,
+        grants: args.grants !== undefined ? normalizeContextGrants(args.grants) : undefined,
+      });
+    },
+  },
+];
+
 export const ALL_WRITE_TOOLS: McpTool[] = [
   ...dataWriteTools,
   ...knowledgeWriteTools,
@@ -1773,6 +2112,8 @@ export const ALL_WRITE_TOOLS: McpTool[] = [
   ...bigbetWriteTools,
   ...agentWriteTools,
   ...promotionTools,
+  // Software design fields (set_app_design via patchAppDesign — governed path).
+  ...softwareWriteTools,
   // mcp-v2 surfaces wave — Strategy (pillar CRUD) + Marketplace (rate) writes.
   ...strategyWriteTools,
   ...marketplaceWriteTools,

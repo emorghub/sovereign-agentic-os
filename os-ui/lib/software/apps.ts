@@ -3,6 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
+import { emptyContextGrants, normalizeContextGrants, type ContextGrants } from '@/lib/core/context-grants';
 import type { CurrentUser } from '@/lib/core/auth';
 import { canPromote, roleAtLeast } from '@/lib/core/session';
 import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
@@ -28,8 +29,13 @@ import type {
   AppManifest,
   AppSurface,
   ConsumedResource,
+  ScaffoldFile,
   SurfaceDeclaration,
 } from '@/lib/software/model';
+import { viteOsFiles } from '@/lib/software/scaffolds/vite-os';
+import { vendorSdkForRepo, applySdkFileDep } from '@/lib/software/app-sdk-vendor';
+import { vendorUiForRepo, applyUiFileDep } from '@/lib/software/app-ui-vendor';
+import { snapshotFiles, getSnapshot } from '@/lib/software/snapshot';
 import { generateAndCompile } from '@/lib/software/auto-mcp';
 import { parseAppManifest, renderAppYaml, defaultOpenApi, resolveSurface } from '@/lib/software/metadata';
 import { osMirror } from '@/lib/infra/os-mirror';
@@ -72,11 +78,61 @@ export type AppFile = {
 
 export type AppChatMessage = { role: 'user' | 'assistant'; content: string; at: string };
 
+/**
+ * A DESIGN user story under an EPIC (Software golden path — Design stage). Plain
+ * agile shape: the classic "As a … I want … so that …" plus acceptance criteria.
+ */
+export type AppStory = {
+  id: string;
+  title: string;
+  asA: string;
+  iWant: string;
+  soThat: string;
+  acceptance: string;
+  /**
+   * Lightweight per-story BUILD status (Software Build stage — story-targeted
+   * build). Optional + defaults to undefined (treated as 'todo') so pre-status
+   * apps load unchanged; set to 'done' when a Build run for this story completes.
+   */
+  status?: 'todo' | 'building' | 'done';
+};
+
+/**
+ * A DESIGN epic (Software golden path — Design stage). Groups user stories and
+ * carries the technical / UX / governance requirements that shape them. Git/Jira
+ * push is a labelled follow-up — the design lives on the app record for now.
+ */
+export type AppEpic = {
+  id: string;
+  title: string;
+  description: string;
+  requirements: { technical: string; ux: string; governance: string };
+  stories: AppStory[];
+};
+
 export type App = {
   id: string;
   slug: string;
   name: string;
   description: string;
+  /**
+   * The app's stated PURPOSE — what it's for, in the builder's own words (Define
+   * stage). Optional + defaults to '' so pre-Define apps still load; the Define
+   * gate reads it (completed when non-empty).
+   */
+  purpose: string;
+  /**
+   * The DESIGN epics + user stories (Design stage). Optional + defaults to `[]` so
+   * pre-Design apps still load; the Design gate completes at ≥1 epic with ≥1 story.
+   */
+  epics: AppEpic[];
+  /**
+   * Governed CONTEXT GRANTS the app may use — Connections · Data · Knowledge ·
+   * Files · Metrics at Read / Read+propose / Read+write (the core ContextGrants
+   * model). Replaces the bespoke single-connection consume UI on the Define stage.
+   * Optional + defaults to an empty grants object so pre-grants apps still load.
+   */
+  grants: ContextGrants;
   template: AppTemplateKey;
   owner: string;
   domain: string;
@@ -140,11 +196,12 @@ export type App = {
 
 // ----------------------------------------------------------------- Templates --
 
-export type AppTemplateKey = 'nextjs-supabase' | 'service' | 'script' | 'dashboard';
+export type AppTemplateKey = 'nextjs-supabase' | 'service' | 'script' | 'dashboard' | 'vite-os';
 
 /** Runtime kind per template (drives the per-template/per-runtime adapter). */
 export const TEMPLATE_RUNTIME: Record<AppTemplateKey, 'web' | 'service' | 'script' | 'dashboard'> = {
   'nextjs-supabase': 'web',
+  'vite-os': 'web',
   service: 'service',
   script: 'script',
   dashboard: 'dashboard',
@@ -211,18 +268,21 @@ function nextjsSupabaseTemplate(): Template {
   return {
     key: 'nextjs-supabase',
     label: 'Next.js + Supabase app',
+    // GENERIC on purpose: a fresh app knows nothing about its domain yet, so it
+    // seeds a neutral `records` starter (matching openapi.yaml/defaultOpenApi);
+    // the build chat / first commits replace it with the app's real capabilities.
     tools: () => [
-      { name: 'list_renewals', description: 'List contract renewals (read).', write: false },
-      { name: 'get_renewal', description: 'Get one renewal by id (read).', write: false },
-      { name: 'add_renewal', description: 'Add a contract renewal (write).', write: true },
-      { name: 'export_renewals', description: 'Export renewals to a file (write).', write: true },
+      { name: 'list_records', description: 'List records (read).', write: false },
+      { name: 'get_record', description: 'Get one record by id (read).', write: false },
+      { name: 'add_record', description: 'Add a record (write).', write: true },
+      { name: 'export_records', description: 'Export records to a file (write).', write: true },
     ],
     designDecisions: (name) =>
       [
         `# ${name} — design decisions`,
         '',
         '- **Stack:** Next.js (App Router) frontend + Supabase (Postgres, Auth, Storage) backend.',
-        '- **Data model:** a single `renewals` table (id, account, product, amount, renews_on, status).',
+        '- **Data model:** a single `records` starter table (id, name, category, amount, due_on, status) — replace with the app\'s real model.',
         '- **Access:** Supabase Row-Level Security scopes every row to the signed-in owner.',
         '- **Operational vs analytical:** live app rows stay in Supabase; analytical copies follow',
         '  the Data golden path as a Personal data product.',
@@ -232,15 +292,15 @@ function nextjsSupabaseTemplate(): Template {
       [
         `# ${name} — data descriptions`,
         '',
-        '## Table: `renewals`',
+        '## Table: `records` (generic starter — replace with the real model)',
         '| field | type | meaning |',
         '|---|---|---|',
         '| `id` | uuid | primary key |',
-        '| `account` | text | customer / counterparty name |',
-        '| `product` | text | the contracted product or plan |',
-        '| `amount` | numeric | annual contract value |',
-        '| `renews_on` | date | next renewal date |',
-        '| `status` | text | `upcoming` \\| `renewed` \\| `churned` |',
+        '| `name` | text | the record\'s display name |',
+        '| `category` | text | free-form grouping |',
+        '| `amount` | numeric | a numeric value, if relevant |',
+        '| `due_on` | date | a relevant date, if any |',
+        '| `status` | text | `active` \\| `done` \\| `archived` |',
       ].join('\n'),
     docs: (name, sub) =>
       [
@@ -250,8 +310,8 @@ function nextjsSupabaseTemplate(): Template {
         '',
         '## Use',
         '1. Sign in (Supabase Auth).',
-        '2. Add upcoming renewals; the list view sorts by `renews_on`.',
-        '3. Your agents can call the app MCP tools (`list_renewals`, `add_renewal`, …).',
+        '2. Add records; the list view sorts by `due_on`.',
+        '3. Your agents can call the app MCP tools (`list_records`, `add_record`, …).',
       ].join('\n'),
     files: (name, slug) => [
       {
@@ -278,17 +338,18 @@ function nextjsSupabaseTemplate(): Template {
       {
         path: 'supabase/migrations/0001_init.sql',
         content:
-          'create table if not exists renewals (\n' +
+          '-- Generic starter table; replace with the app\'s real data model.\n' +
+          'create table if not exists records (\n' +
           '  id uuid primary key default gen_random_uuid(),\n' +
           '  owner uuid not null default auth.uid(),\n' +
-          '  account text not null,\n' +
-          '  product text,\n' +
+          '  name text not null,\n' +
+          '  category text,\n' +
           '  amount numeric,\n' +
-          '  renews_on date,\n' +
-          "  status text not null default 'upcoming'\n" +
+          '  due_on date,\n' +
+          "  status text not null default 'active'\n" +
           ');\n' +
-          'alter table renewals enable row level security;\n' +
-          'create policy "owner_rw" on renewals\n' +
+          'alter table records enable row level security;\n' +
+          'create policy "owner_rw" on records\n' +
           '  using (owner = auth.uid()) with check (owner = auth.uid());\n',
       },
       {
@@ -392,14 +453,89 @@ function dashboardTemplate(): Template {
   };
 }
 
+/**
+ * Vite + React + TypeScript + Tailwind + shadcn/ui SPA wired to the OS client SDK.
+ * The generated app calls os.whoami() + os.context() on boot and renders the
+ * app's granted context (datasets / metrics / knowledge) plus one live metric
+ * sample — so a brand-new app already shows real governed data.
+ *
+ * Served as static files from nginx on port 8080 (multi-stage Dockerfile).
+ * Uses permissive-licensed dependencies only (MIT / Apache-2.0 / BSD).
+ */
+function viteOsTemplate(): Template {
+  return {
+    key: 'vite-os',
+    label: 'Vite + React OS app (SPA, nginx)',
+    tools: (slug) => [
+      { name: 'list_records', description: 'List records (read).', write: false },
+      { name: 'get_record', description: 'Get one record by id (read).', write: false },
+      { name: `${slug.replace(/-/g, '_')}_refresh`, description: 'Refresh the app data (write).', write: true },
+    ],
+    designDecisions: (name) =>
+      [
+        `# ${name} — design decisions`,
+        '',
+        '- **Stack:** Vite + React + TypeScript + Tailwind CSS + shadcn/ui primitives.',
+        '- **OS integration:** `@sovereign-os/app-sdk` — `os.whoami()`, `os.context()`, `os.queryMetric()`.',
+        '- **Data access:** governed grants (datasets / metrics / knowledge) — no raw credentials.',
+        '- **Served by:** nginx on port 8080 via a multi-stage Docker build.',
+        '- **MCP:** capabilities auto-exposed as governed tools (read: list/get; write: refresh).',
+      ].join('\n'),
+    dataDescriptions: (name) =>
+      [
+        `# ${name} — data descriptions`,
+        '',
+        '## Governed context',
+        'The app consumes governed context from the OS SDK — datasets, metrics, and knowledge',
+        'that a domain admin has explicitly granted. No raw data is embedded in the app.',
+        '',
+        '## Starter data model',
+        '| field | type | meaning |',
+        '|---|---|---|',
+        '| `id` | string | record identifier |',
+        '| `value` | number \\| string | primary value |',
+        '| `unit` | string | unit of measure (optional) |',
+      ].join('\n'),
+    docs: (name, sub) =>
+      [
+        `# ${name}`,
+        '',
+        `Live at **https://${sub}** (once CI → Harbor → Argo CD have synced).`,
+        '',
+        '## Use',
+        '1. Open the app — it calls `os.whoami()` and `os.context()` on boot.',
+        '2. The starter page renders your granted datasets, metrics, and knowledge.',
+        '3. Replace `src/App.tsx` with your real UI.',
+        '4. Your agents can call the app MCP tools (`list_records`, `refresh`, …).',
+      ].join('\n'),
+    files: (name, slug) => [
+      // The vite-os scaffold files (package.json, Dockerfile, src/*, nginx.conf, …)
+      // come from the standalone template data module so they stay pure-data and
+      // never get compiled by os-ui's own Next.js / tsc build.
+      ...viteOsFiles(name, slug),
+      // Append the CI workflow last — same ordering convention as nextjsSupabaseTemplate:
+      // source files first, CI workflow last so the first push triggers the build
+      // with the Dockerfile already committed.
+      //
+      // NOTE: viteOsFiles already includes .forgejo/workflows/ci.yml because it
+      // follows the same "workflow is just another template file" shape.  The
+      // scaffoldRepo() seeder re-orders: source first, workflows last.
+    ],
+  };
+}
+
 const TEMPLATES: Record<AppTemplateKey, Template> = {
   'nextjs-supabase': nextjsSupabaseTemplate(),
+  'vite-os': viteOsTemplate(),
   service: genericTemplate('service', 'Service / API'),
   script: genericTemplate('script', 'Script / scheduled job'),
   dashboard: dashboardTemplate(),
 };
 
+// `vite-os` is listed first: it is the default for a new app (a governed
+// frontend over the OS API). The other templates stay selectable.
 export const APP_TEMPLATES: { key: AppTemplateKey; label: string }[] = [
+  { key: 'vite-os', label: 'Vite + React OS app (SPA, governed)' },
   { key: 'nextjs-supabase', label: 'Web app (Next.js + Supabase)' },
   { key: 'service', label: 'Service / API' },
   { key: 'script', label: 'Script / scheduled job' },
@@ -478,6 +614,11 @@ async function getCache(): Promise<Map<string, App>> {
         app.declaredSurface,
       );
     }
+    // Back-compat: apps persisted before the Define/Design/grants fields existed
+    // must still load — default purpose/epics to empty and normalise grants.
+    if (typeof app.purpose !== 'string') app.purpose = '';
+    if (!Array.isArray(app.epics)) app.epics = [];
+    app.grants = normalizeContextGrants(app.grants);
     map.set(app.id, app);
     // Re-hydrate the in-process MCP grant so agents can call it after a restart.
     if (app.connectionId) rehydrateConnection(app);
@@ -532,6 +673,35 @@ function b64(s: string): string {
 }
 
 /**
+ * For a `vite-os` app, append the vendored OS-client SDK source and rewrite its
+ * package.json to a local `file:` dependency. For every other template the file
+ * set is returned unchanged. Keeps the deployed image buildable offline.
+ */
+function withVendoredSdk(tpl: Template, files: ScaffoldFile[]): ScaffoldFile[] {
+  if (tpl.key !== 'vite-os') return files;
+  const withDep = files.map((f) =>
+    f.path === 'package.json' ? { ...f, content: applySdkFileDep(f.content) } : f,
+  );
+  return [...withDep, ...vendorSdkForRepo()];
+}
+
+/**
+ * For a `vite-os` app, append the vendored OS design-system source
+ * (`@sovereign-os/ui` — theme + AppShell + primitives) and rewrite its package.json
+ * to a local `file:` dependency, exactly mirroring `withVendoredSdk`. So the built
+ * Docker image resolves `import { AppShell } from '@sovereign-os/ui'` and
+ * `@import '@sovereign-os/ui/theme.css'` offline/sovereignly. Other templates pass
+ * through unchanged.
+ */
+function withVendoredUi(tpl: Template, files: ScaffoldFile[]): ScaffoldFile[] {
+  if (tpl.key !== 'vite-os') return files;
+  const withDep = files.map((f) =>
+    f.path === 'package.json' ? { ...f, content: applyUiFileDep(f.content) } : f,
+  );
+  return [...withDep, ...vendorUiForRepo()];
+}
+
+/**
  * Best-effort: create the per-app Forgejo repo + seed the template files. Returns
  * a live result when Forgejo is reachable, or an offline shell otherwise — the
  * golden path still works for teaching, honestly labelled.
@@ -570,9 +740,15 @@ async function scaffoldRepo(
   // trigger fires against a tree with no build context and the run cannot build an
   // image — so the workflow must be the final file committed.
   const isWorkflow = (p: string) => p.startsWith('.forgejo/workflows/');
+  // Governed-frontend apps (vite-os) import `@sovereign-os/app-sdk` AND wear the OS
+  // design system `@sovereign-os/ui`. VENDOR both sources into the repo + rewrite
+  // package.json to local `file:` deps so the built Docker image resolves them with
+  // no external registry — fully sovereign / offline. (Order: SDK first, then UI —
+  // each rewrites the package.json dep it owns and appends its own vendor/ files.)
+  const baseFiles = withVendoredUi(tpl, withVendoredSdk(tpl, tpl.files(name, slug)));
   const ordered = [
-    ...tpl.files(name, slug).filter((f) => !isWorkflow(f.path)),
-    ...tpl.files(name, slug).filter((f) => isWorkflow(f.path)),
+    ...baseFiles.filter((f) => !isWorkflow(f.path)),
+    ...baseFiles.filter((f) => isWorkflow(f.path)),
   ];
   for (const f of ordered) {
     const r = await forgejoWrite(`/repos/${owner}/${slug}/contents/${f.path}`, {
@@ -696,6 +872,53 @@ async function repoTree(app: App): Promise<RepoFileMeta> {
   return { mode: app.mode, branch, files };
 }
 
+/**
+ * The app's LIVE repo tree (path + content) straight from Forgejo — the code that
+ * will actually ship. The deploy security scan reads THIS when Forgejo is
+ * reachable, so editor saves and direct `git push`es are scanned too (the
+ * in-process snapshot only sees what flowed through `commitToApp`). Returns null
+ * when Forgejo is unreachable or the repo is empty/unreadable — the caller falls
+ * back to the snapshot, honestly labelled offline. Bounded (`maxFiles`), and an
+ * unreadable blob (binary/oversized) is skipped so the rest still gets scanned.
+ */
+export async function liveRepoFiles(app: App, maxFiles = 300): Promise<ScaffoldFile[] | null> {
+  try {
+    const tree = await repoTree(app);
+    if (tree.files.length === 0) return null; // empty/uninitialised repo → snapshot
+    const out: ScaffoldFile[] = [];
+    for (const path of tree.files.slice(0, maxFiles)) {
+      try {
+        const f = await repoRead(app, path);
+        out.push({ path: f.path, content: f.content });
+      } catch {
+        /* non-file / binary blob — skip it, scan the rest */
+      }
+    }
+    return out.length > 0 ? out : null;
+  } catch {
+    return null; // Forgejo unreachable / API error → snapshot fallback
+  }
+}
+
+/**
+ * The app's CURRENT frontend files for the in-browser instant preview, resolved on
+ * the same honest ladder the rest of the tab uses: LIVE Forgejo tree → in-process
+ * snapshot → fresh template. VIEW-gated only (getAppForUser), so any user who can
+ * see the app can preview it; the preview itself calls the OS as the signed-in user
+ * so governance still decides what data renders. `mode` tells the UI which source
+ * it got (live vs the committed snapshot/template) so it can label honestly.
+ */
+export async function previewFilesForApp(
+  appId: string,
+  user: CurrentUser,
+): Promise<{ files: ScaffoldFile[]; template: AppTemplateKey; mode: 'live' | 'snapshot' }> {
+  const app = await getAppForUser(appId, user);
+  const live = await liveRepoFiles(app);
+  if (live && live.length > 0) return { files: live, template: app.template, mode: 'live' };
+  const snap = getSnapshot(app.id) ?? templateFiles(app.template, app.name, app.slug);
+  return { files: snap, template: app.template, mode: 'snapshot' };
+}
+
 /** Read one file's decoded UTF-8 content + its current blob SHA (for commit). */
 export async function readAppFile(appId: string, user: CurrentUser, path: string): Promise<RepoFile> {
   ensureBuilder(user);
@@ -755,6 +978,10 @@ export async function saveAppFile(
   }
   if (!res.ok) throw withStatus(new Error(`Forgejo error saving file (${res.status}).`), 502);
   const d = res.data as { content?: { sha?: string }; commit?: { html_url?: string } };
+  // Keep the scan/diff snapshot in step with the editor save — without this, a
+  // secret pasted here was INVISIBLE to the deploy security scan when offline.
+  const prior = getSnapshot(app.id) ?? templateFiles(app.template, app.name, app.slug);
+  snapshotFiles(app.id, [...prior.filter((f) => f.path !== clean), { path: clean, content: input.content }]);
   app.updatedAt = now();
   writeThrough(app);
   void trace({
@@ -832,14 +1059,28 @@ export async function getAppForUser(appId: string, user: CurrentUser): Promise<A
   return a;
 }
 
+/**
+ * Fetch an app AND assert the caller may EDIT it (owner or in-domain domain_admin+ —
+ * the same edit-scope `patchAppDesign` uses). Used by the Design-stage seed route so
+ * a mere viewer cannot write files into the app repo. Throws 404 (unseeable) / 403.
+ */
+export async function getEditableAppForUser(appId: string, user: CurrentUser): Promise<App> {
+  const a = await getAppForUser(appId, user);
+  if (!isOwnerOrAdminApp(a, user)) throw withStatus(new Error('Not permitted to edit this app'), 403);
+  return a;
+}
+
 // -------------------------------------------------------------------- Create ---
 
 export async function createApp(
   user: CurrentUser,
-  input: { name: string; description?: string; template?: AppTemplateKey; domain?: string; surface?: SurfaceDeclaration },
+  input: { name: string; description?: string; template?: AppTemplateKey; domain?: string; surface?: SurfaceDeclaration; purpose?: string },
 ): Promise<App> {
   const map = await getCache();
-  const tpl = TEMPLATES[input.template ?? 'nextjs-supabase'] ?? TEMPLATES['nextjs-supabase'];
+  // Default a fresh app to the governed frontend-over-the-OS-API scaffold
+  // (`vite-os`): it wires itself to the OS SDK and renders real granted data on
+  // boot. The other templates remain selectable via `input.template`.
+  const tpl = TEMPLATES[input.template ?? 'vite-os'] ?? TEMPLATES['vite-os'];
   // An explicit surface declaration (intent) wins over the scaffold's heuristic.
   const declaredSurface: SurfaceDeclaration | undefined =
     input.surface === 'ui' || input.surface === 'api' || input.surface === 'both' ? input.surface : undefined;
@@ -872,7 +1113,7 @@ export async function createApp(
       name: `${name} data`,
       description: `Operational data product auto-created by the ${name} app (Personal to ${user.id}).`,
       tags: ['app-data', 'personal', slug],
-      spec: { app: slug, table: 'renewals', backend: 'supabase' },
+      spec: { app: slug, table: 'records', backend: 'supabase' },
       domain,
     });
     dataArtifactId = dataArt.id;
@@ -905,6 +1146,9 @@ export async function createApp(
     slug,
     name,
     description,
+    purpose: (input.purpose ?? '').slice(0, 2000),
+    epics: [],
+    grants: emptyContextGrants(),
     template: tpl.key,
     owner: user.id,
     domain,
@@ -1023,6 +1267,31 @@ export async function updateAppDocs(
   if (patch.designDecisions !== undefined) a.designDecisions = patch.designDecisions;
   if (patch.dataDescriptions !== undefined) a.dataDescriptions = patch.dataDescriptions;
   if (patch.docs !== undefined) a.docs = patch.docs;
+  a.updatedAt = now();
+  map.set(a.id, a);
+  writeThrough(a);
+  return a;
+}
+
+/**
+ * Persist the Define + Design surfaces — the app's PURPOSE, its DESIGN epics/stories,
+ * and its governed CONTEXT GRANTS. Same fail-closed edit-scope as `updateAppDocs`
+ * (owner, owning-domain admin, or admin). Any field left undefined is untouched, so
+ * the caller patches just what changed. Grants are normalised so a malformed/legacy
+ * payload can never widen the persisted shape.
+ */
+export async function patchAppDesign(
+  appId: string,
+  user: CurrentUser,
+  patch: { purpose?: string; epics?: AppEpic[]; grants?: ContextGrants },
+): Promise<App> {
+  const map = await getCache();
+  const a = map.get(appId);
+  if (!a) throw withStatus(new Error('App not found'), 404);
+  if (!isOwnerOrAdminApp(a, user)) throw withStatus(new Error('Not permitted to edit this app'), 403);
+  if (patch.purpose !== undefined) a.purpose = patch.purpose.slice(0, 2000);
+  if (patch.epics !== undefined) a.epics = patch.epics;
+  if (patch.grants !== undefined) a.grants = normalizeContextGrants(patch.grants);
   a.updatedAt = now();
   map.set(a.id, a);
   writeThrough(a);

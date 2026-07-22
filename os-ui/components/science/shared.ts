@@ -22,6 +22,7 @@ export type ModelBuildState =
   | 'draft'
   | 'training'
   | 'trained'
+  | 'deploying'
   | 'deploy_failed'
   | 'deployed'
   | 'monitored'
@@ -79,6 +80,8 @@ export type ModelSummary = {
   metrics?: ModelMetrics;
   mlflowRunId?: string;
   kserveService?: string;
+  lastTrainingError?: string;
+  lastDeployError?: string;
   createdAt?: string;
   updatedAt?: string;
   consumptionMode?: 'read-in-place' | 'fork-allowed';
@@ -137,6 +140,7 @@ export const BUILD_STATE: Record<ModelBuildState, { label: string; dot: string }
   draft: { label: 'Draft', dot: 'muted' },
   training: { label: 'Training', dot: 'warn' },
   trained: { label: 'Trained', dot: 'ok' },
+  deploying: { label: 'Deploying', dot: 'warn' },
   deploy_failed: { label: 'Deploy failed', dot: 'down' },
   deployed: { label: 'Deployed', dot: 'up' },
   monitored: { label: 'Monitored', dot: 'up' },
@@ -150,6 +154,23 @@ export const TASK_TYPES: TaskType[] = [
   'forecast',
   'clustering',
 ];
+
+/**
+ * The task types this first CPU-sklearn runtime can ACTUALLY train — mirrors the
+ * server's `SUPPORTED` set in lib/science/training.ts (classification + regression).
+ * Kept here as a client-safe contract mirror so the Define stage only OFFERS trainable
+ * tasks and honestly marks the rest "not yet trainable" (the audit found forecast /
+ * clustering were offered but rejected at train time). If the runtime grows a learner,
+ * update both this list and the server's SUPPORTED map together.
+ */
+export const TRAINABLE_TASKS: readonly TaskType[] = [
+  'binary_classification',
+  'multiclass_classification',
+  'regression',
+];
+
+/** True when this runtime can train the task now (false for forecast / clustering). */
+export const isTrainableTask = (t: TaskType): boolean => TRAINABLE_TASKS.includes(t);
 
 /** POST JSON and surface the route's `error` field as a thrown Error. */
 export async function postJson<T>(path: string, body: unknown): Promise<T> {

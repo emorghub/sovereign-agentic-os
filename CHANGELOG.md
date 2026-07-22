@@ -15,6 +15,78 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 _Nothing yet._
 
+## [os-ui 0.5.46] — 2026-07-19
+
+### Added
+- **Analytics backfill** (`POST /api/admin/analytics/backfill`, admin-gated) — writes every live
+  governed-dataset Cube model + dbt model into the `analytics` git repo and returns exactly what
+  landed. This is the prerequisite that makes the #146 "Cube-serves-from-git" cutover safe: git can
+  now be verified to hold *all* live cube models (including runtime ones) before the source is flipped.
+- **Metrics alert CronJob** (chart, gated `metrics.alerts.cron.enabled`, default off) — schedules the
+  builder+ alert-evaluator via a governed service-principal login (no auth bypass), so metric alerts
+  actually fire on a cadence.
+
+### Fixed
+- **Analytics repo seed reliability** — the seed hook was `post-install` only, so `--set`-only helm
+  upgrades never re-fired it, and its `put_file` calls swallowed non-2xx responses (`curl -o /dev/null`
+  without `-f`) — the repo silently stayed empty. Now `post-install,post-upgrade`, fail-loud on any
+  non-2xx, and idempotent (201/409-tolerant) repo-create.
+
+## [os-ui 0.5.45] — 2026-07-19
+
+### Changed
+- **Refactor (#171, behavior-preserving):** the five per-stage tab assistant routes now share a
+  `lib/assistant/stage-route.ts` helper (the cost-capped `assistantComplete` wrapper + honest
+  503/402 + defensive JSON parse), removing ~90 lines of duplication while keeping each tab's stage
+  set and prompts local. Response shapes, status codes, and errors are unchanged. Also swept two
+  grep-proven-dead components superseded by the staged-UX rebuild.
+
+## [os-ui 0.5.44] — 2026-07-19
+
+### Changed
+- **Every build tab now shares the staged UX** (the Agent-tab 5-stage pattern, via the
+  `lib/core/stages` + `StageShell` core primitive) — a consistent numbered-stage flow with
+  per-stage guidance, gated navigation, ✓ on genuine completion, and a **per-stage Sovereign-OS
+  AI assistant** focused on that stage:
+  - **Data** — Define · Ingest · Refine · Publish · Use (the 1114-line single scroll is gone;
+    4 dead files retired).
+  - **Metrics** — Define · Refine · Preview · Publish · Monitor (NL-first define, promote folded in).
+  - **Dashboards** — Define · Design · Build · View · Govern (shipped in 0.5.43).
+  - **Science** — Define · Train · Deploy · Predict · Monitor (gated on real `buildState`;
+    trainable-task guard; honest drift placeholder).
+  - **Software** — Describe · Build · Preview · Publish · Operate (delivery-team chat + build chat +
+    editor unified into Build; real scan/review at Publish; live tool surface at Operate).
+  Each tab's create→manage screens are now one continuous flow that opens at the stage matching an
+  artifact's real state. Existing behavior and the audited P0 fixes are preserved; this is a
+  consistent re-skin over correct engines, not a rewrite.
+
+## [os-ui 0.5.43] — 2026-07-19
+
+### Added
+- **Staged-builder core primitive.** The Agent tab's 5-stage pattern is now a reusable OS primitive
+  (`lib/core/stages.ts` + `components/core/StageShell.tsx`): numbered stepper, entry-gated navigation,
+  ✓ on genuine completion (never faked, clears if invalidated), and a per-stage AI-assist slot. The
+  Agent tab consumes it with byte-identical behavior; every other tab adopts it next.
+- **Dashboards staged UX** — Define · Design · Build · View · Govern, with a per-stage assistant
+  (NL→view/charts, embed-failure explainer). Create→view is now one continuous flow.
+- **GCP Admin SDK (Workspace directory) connector** — read-only users/groups/org-units/roles/domains
+  via domain-wide delegation (companion to the GCP identity connector).
+
+### Fixed (audit-driven P0 wave — verified against the code, not assumed)
+- **Software (security):** the deploy security scan now scans the **live repo tree** — editor commits
+  and direct git pushes were previously invisible to it, so a pasted secret could ship behind a clean
+  "scan passed" card. Also: app tool calls proxy the live app (or are honestly labeled demo data), the
+  promised per-app build chat is now mounted, and review cards survive a pod restart (one builder gate).
+- **Data:** phantom Bronze (dot lit with no physical table) now lands through the real verify pipeline;
+  warehouse import creates a real dataset (its CTAS never actually worked live before); MCP
+  `list_datasets` name collision fixed; transform liveness no longer mislabels a Cube outage.
+- **Metrics:** alerts are a real monitor (durable rules + live-value resolution + evaluator) instead of
+  a hand-typed demo; explore slices derive from the real dataset; honest sync copy + auto-poll; MCP
+  gains `preview_metric` + `promote_metric` and `define_metric` surfaces the sync-pending state.
+- **Dashboards:** Cube SQL host/port threaded into the bundle (was hardcoded → empty charts); embed
+  guest token now refreshes (embeds no longer blank after 5 min); build report is visible; delete
+  cleans up the Superset side.
+
 ## [os-ui 0.5.42] — 2026-07-18
 
 ### Added

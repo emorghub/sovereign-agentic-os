@@ -23,15 +23,32 @@ import {
   putOmEntity,
   patchOmEntity,
   putOmLineage,
+  softDeleteOmEntity,
+  restoreOmEntity,
+  getOmEntityByFqn,
+  createOmTestCaseResult,
 } from '@/lib/data';
+import {
+  type OmDqPlan,
+  type OmDqPreview,
+  type OmDqSyncResult,
+  buildDqSyncPlan,
+  previewDqSync,
+  applyDqSync,
+} from '@/lib/connections/openmetadata-dq';
+import type { CheckResult } from '@/lib/data/dq';
 import {
   type OmSyncPlan,
   type OmSyncPreview,
   type OmSyncResult,
+  type OmDatasetRef,
+  type OmArchiveResult,
   buildOmSyncPlan,
   previewOmSync,
   applyOmSync,
   provisionOmNamespace,
+  softDeleteOmDataset,
+  reactivateOmDataset,
 } from '@/lib/connections/openmetadata-sync';
 import type { Dataset } from '@/lib/data';
 import type { CatalogAsset, SourceSeverity } from '@/lib/data/catalog';
@@ -274,3 +291,142 @@ export async function applyOmSyncForConnection(
 }
 
 export type { OmSyncPlan, OmSyncPreview, OmSyncResult };
+
+// =============================================================================
+// Phase 2 (DQ) — TestSuite / TestCase provisioning + result append
+// =============================================================================
+//
+// The DQ leg of the write-back: provision OM TestSuites/TestCases for a governed
+// dataset's DQ rules (preview → apply, all 7 guards), then append each governed
+// run's verdict via the EXISTING createOmTestCaseResult(). Everything is GATED by
+// `config.openmetadataDqWritebackEnabled` (default OFF) AND the fail-closed version
+// guard; when OM is unreachable / out of range / the flag is off, the append is a
+// NO-OP that never blocks the OS-side DQ run.
+
+/** PREVIEW the DQ write-back plan for one dataset — READ-ONLY (Guard 6). */
+export function previewDqSyncForConnection(_c: Connection, dataset: Dataset, opts: { runId: string }): OmDqPreview {
+  return previewDqSync(buildDqSyncPlan(dataset, opts));
+}
+
+/** Recompute the DQ plan server-side and EXECUTE it through the writer connection AFTER
+ *  governance approval. Never trusts a client-supplied plan (rebuilt here from the
+ *  dataset). Refuses when the flag is off — the trigger holds the write behind approval,
+ *  but the flag is the operator's master switch. */
+export async function applyDqSyncForConnection(c: Connection, dataset: Dataset, opts: { runId: string }): Promise<OmDqSyncResult> {
+  if (!config.openmetadataDqWritebackEnabled) {
+    return { ok: false, applied: { suites: 0, testCases: 0 }, errors: [], refused: 'OpenMetadata DQ write-back is disabled (openmetadata.dqWriteback.enabled = false).' };
+  }
+  const write = omWriteConnFrom(c);
+  const plan = buildDqSyncPlan(dataset, { runId: opts.runId });
+  return applyDqSync({ putEntity: (path, body) => putOmEntity(write, path, body), omVersion: c.om?.version }, plan);
+}
+
+/**
+ * Build a BEST-EFFORT result-appender for one dataset+connection: appends each governed
+ * run's per-rule verdict to the matching OM TestCase time-series. HONEST + NON-BLOCKING:
+ *  • returns `null` (no appender) when the flag is off or no OM is connected — the DQ run
+ *    proceeds with zero OM coupling;
+ *  • when present, it NEVER throws and NEVER fakes success — an unreachable / out-of-range
+ *    OM simply appends nothing (the low-level verb refuses/degrades honestly).
+ * The appender maps each CheckResult (pass/fail/not_run) → OM Success/Failed/Aborted and
+ * PUTs to every TestCase FQN the plan provisioned for that rule.
+ */
+export async function omDqAppenderFor(
+  user: CurrentUser,
+  dataset: Dataset,
+): Promise<((results: CheckResult[], ranAt: string) => Promise<void>) | null> {
+  if (!config.openmetadataDqWritebackEnabled) return null;
+  const c = await firstOmCatalogFor(user);
+  if (!c) return null;
+  const write = omWriteConnFrom(c);
+  const { osDqTestCaseFqnsForRule } = await import('@/lib/connections/openmetadata-dq');
+
+  return async (results: CheckResult[], ranAt: string): Promise<void> => {
+    const ts = Date.parse(ranAt) || Date.now();
+    const byRuleFqns = new Map<string, string[]>();
+    for (const check of dataset.checks ?? []) byRuleFqns.set(check.id, osDqTestCaseFqnsForRule(dataset, check));
+    for (const r of results) {
+      const fqns = byRuleFqns.get(r.id);
+      if (!fqns || fqns.length === 0) continue; // monitors / free-text intentions have no OM TestCase.
+      // not_run ⇒ Aborted (honest — the check produced no verdict); fail ⇒ Failed; pass ⇒ Success.
+      const status: 'Success' | 'Failed' | 'Aborted' = r.status === 'fail' ? 'Failed' : r.status === 'not_run' ? 'Aborted' : 'Success';
+      const detail = r.violations != null ? `${r.violations} violation(s)` : (r.reason || r.status);
+      for (const fqn of fqns) {
+        try {
+          await createOmTestCaseResult(write, fqn, { status, result: detail, timestamp: ts });
+        } catch {
+          /* best-effort — a failed append NEVER blocks the OS-side DQ run */
+        }
+      }
+    }
+  };
+}
+
+export type { OmDqPlan, OmDqPreview, OmDqSyncResult };
+
+// =============================================================================
+// Archive / restore hooks — OM soft-delete / reactivation (best-effort)
+// =============================================================================
+//
+// Called AFTER the OS archive/unarchive has already succeeded. These are
+// fire-and-forget from the API routes' perspective: if OM is unreachable or
+// outside the tested version range, the error is silently swallowed — the
+// OS-side archive always wins. Errors are returned for logging/tracing but
+// NEVER re-thrown.
+
+/** Build the {@link OmArchiveClient} surface bound to the WRITER connection. */
+function archiveClientFrom(c: Connection): Parameters<typeof softDeleteOmDataset>[0] {
+  const write = omWriteConnFrom(c);
+  const read = omConnFrom(c);
+  return {
+    omVersion: c.om?.version,
+    readEntityByFqn: async (entityType, fqn, includeDeleted = false) => {
+      const r = await getOmEntityByFqn(read, entityType, fqn, includeDeleted);
+      if (!r.ok) return r;
+      const d = r.data;
+      return {
+        ok: true,
+        data: {
+          id: typeof d.id === 'string' ? d.id : undefined,
+          extension: d.extension as Record<string, unknown> | undefined,
+          deleted: d.deleted === true,
+        },
+      };
+    },
+    softDeleteEntity: (entityType, id) => softDeleteOmEntity(write, entityType, id),
+    restoreEntity: (entityType, id) => restoreOmEntity(write, entityType, id),
+  };
+}
+
+/**
+ * Soft-delete the OS-namespace OM entities for an archived dataset. Best-effort:
+ * never throws, never blocks the OS archive. Call AFTER the archive succeeds.
+ * Skips silently when OM is unreachable or outside the tested version range.
+ */
+export async function omSoftDeleteForConnection(
+  c: Connection,
+  ref: OmDatasetRef,
+): Promise<OmArchiveResult> {
+  try {
+    return await softDeleteOmDataset(archiveClientFrom(c), ref);
+  } catch {
+    return { ok: false, entities: {}, refused: 'unexpected error during OM soft-delete (best-effort, ignored)' };
+  }
+}
+
+/**
+ * Reactivate the OS-namespace OM entities for a restored (unarchived) dataset.
+ * Best-effort: never throws, never blocks the OS unarchive.
+ */
+export async function omReactivateForConnection(
+  c: Connection,
+  ref: OmDatasetRef,
+): Promise<OmArchiveResult> {
+  try {
+    return await reactivateOmDataset(archiveClientFrom(c), ref);
+  } catch {
+    return { ok: false, entities: {}, refused: 'unexpected error during OM reactivation (best-effort, ignored)' };
+  }
+}
+
+export type { OmDatasetRef, OmArchiveResult };

@@ -49,7 +49,9 @@ import {
   omSearch,
   omLineage,
   previewOmSyncForConnection,
+  previewDqSyncForConnection,
 } from '@/lib/connections/openmetadata';
+import { previewCatalogIngest } from '@/lib/connections/openmetadata-ingest';
 import { WAREHOUSE_PROVIDERS } from '@/lib/connections/warehouse/registry';
 import { WAREHOUSE_PLATFORMS, type WarehousePlatform } from '@/lib/connections/warehouse/types';
 import { promoteThroughSeam } from '@/lib/governance/ladder';
@@ -415,21 +417,71 @@ const readTools: McpTool[] = [
     tab: 'software',
     minRole: 'creator',
     description:
-      'List the apps you can see (My · Domain · Company). Path: DISCOVERY for the Software golden path (guide: sovereign-os://guide/path/software). Before: whoami. After: get_software, or create_software only if nothing fits. Governance: read-only, same visibility rule as the Software tab.',
+      'List the apps you can see (My · Domain · Company). Each app includes `purpose` (Define stage intent), `epics` (Design epics + stories), and `grants` (capability metadata — kind/level only, never raw credentials). Path: DISCOVERY for the Software golden path (guide: sovereign-os://guide/path/software). Before: whoami. After: get_software, or create_software only if nothing fits. Governance: read-only, same visibility rule as the Software tab.',
     inputSchema: NO_ARGS,
-    call: async (user) => listAppsForUser(user),
+    call: async (user) => {
+      const apps = await listAppsForUser(user);
+      return apps.map((a) => ({
+        id: a.id,
+        slug: a.slug,
+        name: a.name,
+        description: a.description,
+        purpose: a.purpose,
+        epics: a.epics,
+        grants: a.grants,
+        template: a.template,
+        surface: a.surface,
+        owner: a.owner,
+        domain: a.domain,
+        visibility: a.visibility,
+        status: a.status,
+        deploy: a.deploy,
+        updatedAt: a.updatedAt,
+        createdAt: a.createdAt,
+      }));
+    },
   },
   {
     name: 'get_software',
     tab: 'software',
     minRole: 'creator',
     description:
-      'Read one app you can see (template, consumed resources, lifecycle state). Path: DISCOVERY for the Software golden path. Before: list_software. After: commit / start_preview / request_deploy. Governance: read-only; unseeable id → not_found.',
+      'Read one app you can see (template, consumed resources, lifecycle state, plus `purpose` / `epics` / `grants`). `grants` is capability metadata (kind + access level) — never raw credentials. Path: DISCOVERY for the Software golden path. Before: list_software. After: commit / start_preview / request_deploy / set_app_design. Governance: read-only; unseeable id → not_found.',
     inputSchema: idArg('appId', 'App id from list_software.'),
     call: async (user, args) => {
       const id = str(args.appId).trim();
       if (!id) fail('get_software needs an `appId`', 400);
-      return getAppForUser(id, user);
+      const a = await getAppForUser(id, user);
+      return {
+        id: a.id,
+        slug: a.slug,
+        name: a.name,
+        description: a.description,
+        purpose: a.purpose,
+        epics: a.epics,
+        grants: a.grants,
+        template: a.template,
+        surface: a.surface,
+        declaredSurface: a.declaredSurface,
+        owner: a.owner,
+        domain: a.domain,
+        visibility: a.visibility,
+        mode: a.mode,
+        repo: a.repo,
+        subdomain: a.subdomain,
+        pipeline: a.pipeline,
+        designDecisions: a.designDecisions,
+        dataDescriptions: a.dataDescriptions,
+        docs: a.docs,
+        manifest: a.manifest,
+        mcpTools: a.mcpTools,
+        consumes: a.consumes,
+        status: a.status,
+        deploy: a.deploy,
+        usedAsData: a.usedAsData,
+        createdAt: a.createdAt,
+        updatedAt: a.updatedAt,
+      };
     },
   },
 ];
@@ -638,6 +690,9 @@ const waveBReadTools: McpTool[] = [
         history: v.history,
         text: body.text,
         textNote: body.note,
+        /** Present when the original bytes were stored (UI or MCP binary upload);
+         *  null for text-only (MCP `upload_file` without `base64Content`) records. */
+        object: v.object ? { key: v.object.key, contentType: v.object.contentType, bytes: v.object.bytes } : null,
       };
     },
   },
@@ -701,8 +756,8 @@ const waveBReadTools: McpTool[] = [
       const appId = str(args.appId).trim();
       if (!appId) fail('get_software_status needs an `appId` (from list_software)', 400);
       const app = await getAppForUser(appId, user); // visibility guard (404)
-      const openCard = app.deploy.reviewCardId ? getReviewCard(app.deploy.reviewCardId) : null;
-      const latest = openCard ?? listReviewCards({ domain: app.domain }).find((c) => c.appId === app.id) ?? null;
+      const openCard = app.deploy.reviewCardId ? await getReviewCard(app.deploy.reviewCardId) : null;
+      const latest = openCard ?? (await listReviewCards({ domain: app.domain })).find((c) => c.appId === app.id) ?? null;
       const isLive = app.deploy.state === 'live';
       // NEVER claim a working URL that is not actually served: live state alone is
       // not enough — the pipeline must be ok AND the app created against a live stack.
@@ -1211,6 +1266,114 @@ const omCatalogTools: McpTool[] = [
       };
     },
   },
+  {
+    name: 'sync_quality_to_catalog',
+    tab: 'connections',
+    minRole: 'creator',
+    description:
+      'PUSH the OS-authored DATA-QUALITY of one dataset into an external OpenMetadata (om-catalog connection) as first-class TestSuites / TestCases — the DQ leg of the additive, integrity-safe write-back. This is a real WRITE side effect: CapabilityMode Write-approval, so the call is HELD for human approval in the Governance tab and returns "requires_approval"; only once approved does the OS write. It first renders a dry-run PREVIEW (the exact Basic TestSuite + one TestCase per rule under the dedicated `sovereign_os` namespace, managedBy=SovereignOS, additive-only, idempotent) and rejects an unbuildable plan (no built Gold / not promoted / no executable rule) with the honest reason BEFORE queueing anything. Governed per-run results then trend into OM automatically. GATED by openmetadata.dqWriteback.enabled + the fail-closed OM version range; if OM is unreachable or out of range the write is refused honestly — the OS-side DQ always still runs. Before: preview via this same tool (it previews first). Governance: Write-approval; writer bot is least-privilege, scoped to the OS namespace; unseeable connId/datasetId → not_found.',
+    inputSchema: omArg({
+      datasetId: { type: 'string', description: 'The OS dataset id whose DQ rules to publish (from list_datasets; a promoted asset/product with Gold built and at least one executable rule).' },
+    }),
+    call: async (user, args) => {
+      const id = str(args.connId).trim();
+      if (!id) fail('sync_quality_to_catalog needs a `connId`', 400);
+      const datasetId = str(args.datasetId).trim();
+      if (!datasetId) fail('sync_quality_to_catalog needs a `datasetId`', 400);
+      const c = await resolveOmCatalog(id, user); // DLS 404 on an unseeable connection
+      const d = getDataset(datasetId, P(user)); // canView guard (403/404)
+      // Preview-first, ALWAYS: reject an unbuildable DQ plan with the honest reason before
+      // ever queueing a write (never enqueue a no-op or an unsafe request).
+      const preview = previewDqSyncForConnection(c, d, { runId: 'plan' });
+      if (!preview.ok) fail(preview.rejected ?? 'This dataset has no data-quality to sync to OpenMetadata.', 400);
+
+      // Guard 6 — HOLD for human approval (Write-approval), reusing the connection_write
+      // effect. The effect recomputes the plan server-side and writes via the writer bot.
+      const approval = enqueue({
+        kind: 'connection_write',
+        title: `Sync DQ "${d.name}" → OpenMetadata (${c.name})`,
+        detail: preview.summary,
+        agent: user.id,
+        domain: d.domain,
+        requestedBy: user.id,
+        tool: 'sync_quality_to_catalog',
+        approverRole: 'builder',
+        scope: 'domain',
+        source: 'Connections',
+        payload: { connId: c.id, datasetId: d.id },
+        preview: {
+          what: preview.summary,
+          who: `Sovereign OS writer bot (least-privilege, scoped to the ${'sovereign_os'} namespace)`,
+          why: `Additively publish the OS data-quality rules as OM TestSuites/TestCases so OM's DQ dashboard + Incident Manager reflect OS-governed DQ.`,
+          impact: `${preview.counts.suites} TestSuite, ${preview.counts.testCases} TestCase(s); ZERO human fields touched.`,
+          diff: preview.lines.join('\n'),
+        },
+      });
+      return {
+        decision: 'requires_approval',
+        approvalId: approval.id,
+        summary: preview.summary,
+        note: 'Held for human approval in the Governance tab (Write-approval). The DQ write runs only once approved; the plan is recomputed server-side on approval.',
+      };
+    },
+  },
+  {
+    name: 'refresh_catalog',
+    tab: 'connections',
+    minRole: 'domain_admin',
+    description:
+      'REFRESH the external OpenMetadata catalog (#147) so it reflects the LIVE governed lakehouse — a BULK, additive, integrity-safe write-back over EVERY governed gold/silver mart the caller may see (DLS-scoped), in one governed pass. It folds the SAME metadata (tables/columns/lineage) + DQ (TestSuites/TestCases, when enabled) write-back the per-dataset tools use, so all seven guards + the fail-closed OM version range apply UNCHANGED: it PUT-creates ONLY inside the dedicated `sovereign_os` Service / `Sovereign OS Products` Domain, stamps managedBy=SovereignOS, emits NO `remove` op ever, and touches ZERO human fields. GATED by OPENMETADATA_INGEST_ENABLED; requires a visible om-catalog connection. This is a real WRITE side effect: CapabilityMode Write-approval, so the call renders a dry-run PREVIEW across all marts and is HELD for human approval, returning "requires_approval"; the plan is recomputed server-side on approval. OM unreachable / off-range / a leg disabled → that mart is an honest no-op (never fabricated success, never blocks). Cross-namespace upstream lineage over the customer\'s own Trino tables is handled by OM\'s native crawl (the openmetadata-trino-ingestion CronJob).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        humanServiceFqn: { type: 'string', description: 'Optional: the customer OM Trino Service name whose catalogued copies of the marts are ADDITIVELY annotated (tag + managedBy props). Omit to annotate no human table.' },
+      },
+      required: [],
+      examples: [{}, { humanServiceFqn: 'trino' }],
+    },
+    call: async (user, args) => {
+      if (!config.openmetadataIngestEnabled) {
+        fail('Catalog ingestion is disabled (OPENMETADATA_INGEST_ENABLED is not true).', 400);
+      }
+      const humanServiceFqn = str(args.humanServiceFqn) || undefined;
+      // Preview-first, ALWAYS: a read-only dry-run across every governed mart. When no
+      // om-catalog connection is visible the preview is empty + ok → nothing to queue.
+      const preview = await previewCatalogIngest(user, { humanServiceFqn });
+      if (!preview.connectionName || preview.totals.syncable === 0) {
+        return { decision: 'noop', summary: preview.summary, note: 'Nothing to refresh — no syncable governed mart / no om-catalog connection.' };
+      }
+
+      // Guard 6 — HOLD for human approval (Write-approval), reusing the connection_write
+      // effect. The effect recomputes the whole refresh server-side and writes via the
+      // least-privilege writer bot. The refresh spans domains → tenant-scoped approval.
+      const approval = enqueue({
+        kind: 'connection_write',
+        title: `Refresh OpenMetadata catalog (${preview.connectionName})`,
+        detail: preview.summary,
+        agent: user.id,
+        domain: user.domains[0] ?? 'platform',
+        requestedBy: user.id,
+        tool: 'refresh_catalog',
+        approverRole: 'admin',
+        scope: 'tenant',
+        source: 'Connections',
+        payload: { humanServiceFqn: humanServiceFqn ?? null },
+        preview: {
+          what: preview.summary,
+          who: 'Sovereign OS writer bot (least-privilege, scoped to the sovereign_os namespace)',
+          why: 'Bulk-refresh the external catalog so it reflects the live governed lakehouse (tables + lineage + DQ).',
+          impact: `${preview.totals.creates} entity create/update, ${preview.totals.edges} lineage edge(s), ${preview.totals.suites} TestSuite + ${preview.totals.testCases} TestCase(s); ZERO human fields touched.`,
+          diff: preview.datasets.filter((x) => x.metadata.ok || (x.dq && x.dq.ok)).map((x) => `${x.name}: ${x.metadata.ok ? x.metadata.summary : x.metadata.rejected}`).join('\n'),
+        },
+      });
+      return {
+        decision: 'requires_approval',
+        approvalId: approval.id,
+        summary: preview.summary,
+        note: 'Held for human approval in the Governance tab (Write-approval, tenant-scoped). The refresh runs only once approved; the plan is recomputed server-side on approval.',
+      };
+    },
+  },
 ];
 
 // ================================= AIRFLOW =====================================
@@ -1403,7 +1566,11 @@ const airflowTools: McpTool[] = [
     },
   },
   {
-    name: 'list_datasets',
+    // NOTE the MCP-facing name is list_airflow_assets — the Data tab already owns
+    // `list_datasets`, and dispatch takes the first name match, so a same-named
+    // Airflow tool would be unreachable (and duplicated in tools/list). The
+    // CONNECTION-level tool key stays `list_datasets` (the adapter contract).
+    name: 'list_airflow_assets',
     tab: 'connections',
     minRole: 'creator',
     description:
@@ -1419,7 +1586,7 @@ const airflowTools: McpTool[] = [
     },
     call: async (user, args) => {
       const id = str(args.connId).trim();
-      if (!id) fail('list_datasets needs a `connId`', 400);
+      if (!id) fail('list_airflow_assets needs a `connId`', 400);
       const toolArgs: Record<string, unknown> = {};
       if (args.limit !== undefined) toolArgs.limit = Number(args.limit);
       return callConnectionTool(id, user, { tool: 'list_datasets', args: toolArgs });
@@ -1430,7 +1597,7 @@ const airflowTools: McpTool[] = [
     tab: 'connections',
     minRole: 'creator',
     description:
-      'List asset/dataset update events in a customer Apache Airflow (airflow connection) — which producing task updated which asset, and when. Read-only monitoring. Before: list_datasets. Governance: read-only, auto-allowed; unseeable connId → not_found; unreachable Airflow → { ok:false, reason }.',
+      'List asset/dataset update events in a customer Apache Airflow (airflow connection) — which producing task updated which asset, and when. Read-only monitoring. Before: list_airflow_assets. Governance: read-only, auto-allowed; unseeable connId → not_found; unreachable Airflow → { ok:false, reason }.',
     inputSchema: {
       type: 'object',
       properties: {

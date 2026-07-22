@@ -3,9 +3,11 @@
  */
 import { NextResponse } from 'next/server';
 import { requirePrincipal, errorResponse } from '@/lib/data/server';
+import { requireUser } from '@/lib/core/auth';
 import { getDataset, addCheck, removeCheck, builtLayerFqn } from '@/lib/data/store';
 import { queryRun } from '@/lib/infra/governed';
-import { runQualityChecks } from '@/lib/data/dq-run';
+import { runAndRecord } from '@/lib/data/dq-run-server';
+import { omDqAppenderFor } from '@/lib/connections/openmetadata';
 import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data';
 
 export const dynamic = 'force-dynamic';
@@ -52,18 +54,32 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       max?: number;
     };
 
-    // ── Run the checks: compile → governed SELECT AS the owner → pass/fail + badge ──
+    // ── Run the checks + monitors: compile → governed SELECT AS the owner → pass/fail ──
     if (body.action === 'run') {
       const dataset = getDataset(id, user); // canView gate (403/404)
       const resolved = builtLayerFqn(dataset, user); // { fqn, principal } | null
-      const report = await runQualityChecks(dataset.checks ?? [], {
+      // Runs the dataset's rules AND its heuristic monitors, then persists ONE run to the
+      // durable time-series. Run AS the owner for a personal dataset (personal_<uid>), else
+      // the caller's domain principal — NEVER trusted from the body; the same resolver
+      // preview/profile use, so OPA governs exactly what the owner may read.
+      // Best-effort OM DQ result-appender (null unless the flag is on AND an OM is
+      // connected). Non-blocking: it never throws and never fakes success, so the DQ run
+      // succeeds regardless of OM's state. `requireUser` gives the CurrentUser the OM
+      // connection lookup needs (same session as the `requirePrincipal` above).
+      const omAppend = await omDqAppenderFor(await requireUser(), dataset).catch(() => null);
+      const outcome = await runAndRecord(dataset, {
         fqn: resolved?.fqn ?? null,
-        // Run AS the owner for a personal dataset (personal_<uid> ownership), else the
-        // caller's domain principal — NEVER trusted from the body. Same resolver the
-        // preview/profile surfaces use, so OPA governs exactly what the owner may read.
         queryFn: (sql) => queryRun(sql, resolved?.principal),
+        ownerId: user.id,
+        omAppend: omAppend ?? undefined,
       });
-      return NextResponse.json(report);
+      return NextResponse.json({
+        fqn: outcome.fqn,
+        ranAt: outcome.ranAt,
+        badge: outcome.badge,
+        results: outcome.results,
+        health: outcome.health,
+      });
     }
 
     // ── Add a check (structured rule or legacy free-text) ──
