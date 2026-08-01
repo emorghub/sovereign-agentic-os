@@ -5,11 +5,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import dynamic from 'next/dynamic';
 import CodePanel from '@/components/CodePanel';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import ReviewCard, { type ReviewCardData } from '@/components/ReviewCard';
-import ProgressStepper, { type Step, type StepState } from '@/components/core/ProgressStepper';
+import ProgressStepper from '@/components/core/ProgressStepper';
 import DomainTag from '@/components/DomainTag';
 import { useToolWindow } from '@/components/ToolWindowProvider';
 import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
@@ -19,7 +18,6 @@ import StageShell from '@/components/core/StageShell';
 import BuilderModeToggle from '@/components/core/BuilderModeToggle';
 import StageAssistantChat from '@/components/core/StageAssistantChat';
 import SoftwareContextGrants from './SoftwareContextGrants';
-import DesignBoard from './DesignBoard';
 import BuildChat, { type FileChange } from './BuildChat';
 import type { ViewMode } from '@/lib/core/view-mode';
 import {
@@ -33,31 +31,53 @@ import {
   applyGrantsSuggestion,
   applyEpicsSuggestion,
   applyStoriesSuggestion,
+  applySpecSuggestion,
   type SuggestedGrant,
   type SuggestedEpic,
   type SuggestedStoriesForEpic,
+  type RawImprovementSuggestion,
 } from '@/lib/software/assistant-suggestions';
+import {
+  normalizeImprovement,
+  dropImprovement,
+  markDesignedById,
+  markBuiltById,
+  designAll,
+  buildAll,
+  refinementsToDesign,
+  refinementsToBuild,
+  type Improvement,
+} from '@/lib/software/improvements';
+import RefinementList, { type RefineHandlers } from './RefinementList';
+import { buildableBatch } from './refinement-view';
+import StageConversation from '@/components/core/StageConversation';
 import { initialStageState, canEnter, isSatisfied, markDone, type StageState } from '@/lib/core/stages';
-import TeamPanel from '@/app/software/TeamPanel';
-import StageAssistant from './StageAssistant';
+import { anchorAttr, ANCHORS } from '@/lib/tutorials';
+import { buildStatusRail } from '@/lib/software/build-activity';
+import { type BuildTarget } from '@/lib/software/build-target';
+import { everyStoryHasSpec, specHasContent, type StorySpec } from '@/lib/software/story-spec';
+import {
+  BUILD_BATCH_CAP,
+  pruneSelection,
+  selectedCount,
+  toggleFeature as toggleFeatureSel,
+  toggleGroup as toggleGroupSel,
+} from '@/lib/software/build-selection';
+import { defineContextNote } from '@/lib/software/define-context';
+import { modelRoleForMode, tierNote } from '@/lib/software/chat-modes';
+import TeamPanel from '@/app/(build)/software/TeamPanel';
+import DesignEpicDetail from './DesignEpicDetail';
+import SpecTree, { type SpecNode } from './SpecTree';
+import SpecDetailPanel from './SpecDetailPanel';
 import { SW_STAGES, type SwStageId, type SwCtx } from './stages';
-
-/**
- * The in-browser "Instant preview" (esbuild-wasm) is CLIENT-ONLY — it needs the DOM
- * and must never run at SSR/prerender. Load it lazily with ssr:false so the Software
- * pages still statically render.
- */
-const InstantPreview = dynamic(() => import('./InstantPreview'), {
-  ssr: false,
-  loading: () => <p className="hint" style={{ marginTop: 0 }}>Loading instant preview…</p>,
-});
+import { derivePipelineView, type PipelineView } from '@/lib/software/pipeline-view';
 
 type Visibility = 'Personal' | 'Shared' | 'Certified';
 type Tool = { name: string; description: string; write: boolean };
 type ChatMsg = { role: 'user' | 'assistant'; content: string; at: string };
 
 /** A Design user story (mirrors lib/software/apps.ts AppStory). */
-type Story = { id: string; title: string; asA: string; iWant: string; soThat: string; acceptance: string; status?: 'todo' | 'building' | 'done' };
+type Story = { id: string; title: string; asA: string; iWant: string; soThat: string; acceptance: string; status?: 'todo' | 'building' | 'done'; spec?: StorySpec };
 /** A Design epic (mirrors lib/software/apps.ts AppEpic). */
 type Epic = {
   id: string;
@@ -72,6 +92,8 @@ export type SoftwareApp = {
   slug: string;
   name: string;
   description: string;
+  /** The scaffold the app was created from — locked after creation. */
+  template: string;
   purpose: string;
   epics: Epic[];
   grants: ContextGrantsValue;
@@ -98,37 +120,24 @@ export type SoftwareApp = {
 };
 type Connection = { id: string; name: string; principal: string; visibility: Visibility; tools: Tool[] } | null;
 
-const STAGES = ['forgejo', 'actions', 'harbor', 'argocd', 'live'] as const;
-const STAGE_STEP_LABEL: Record<(typeof STAGES)[number], string> = {
-  forgejo: 'Scaffold repo',
-  actions: 'Build image (CI)',
-  harbor: 'Publish to registry',
-  argocd: 'Deploy',
-  live: 'Live / health',
-};
-
 const MODE_KEY = 'software.viewMode';
+/** A stable empty selection set (Design passes this — it has no build-select). */
+const EMPTY_SET: ReadonlySet<string> = new Set<string>();
 /** The context kinds the Software Define stage offers. */
 const SW_GRANT_KINDS: ContextKind[] = ['connections', 'data', 'knowledge', 'files', 'metrics'];
 
-function pipelineSteps(pipeline: Record<string, string>): { steps: Step[]; active: boolean; done: boolean; ok: boolean } {
-  let firstPendingSeen = false;
-  const steps: Step[] = STAGES.map((s) => {
-    const status = pipeline[s] ?? 'pending';
-    let state: StepState;
-    if (status === 'ok' || status === 'disabled') state = 'done';
-    else if (status === 'offline') state = 'fail';
-    else {
-      state = firstPendingSeen ? 'pending' : 'active';
-      firstPendingSeen = true;
-    }
-    return { key: s, label: STAGE_STEP_LABEL[s], state };
-  });
-  const anyFail = steps.some((st) => st.state === 'fail');
-  const anyPending = steps.some((st) => st.state === 'active' || st.state === 'pending');
-  const done = anyFail || !anyPending;
-  return { steps, active: !done, done, ok: !anyFail };
-}
+/** Display names for the app's scaffold template (locked after creation). */
+const TEMPLATE_LABEL: Record<string, string> = {
+  'sovereign-app': 'Application',
+  website: 'Website',
+  'api-service': 'APIs only',
+  empty: 'Empty App',
+  'vite-os': 'Vite OS app (legacy)',
+  'nextjs-supabase': 'Next.js + Supabase (legacy)',
+  service: 'Service (legacy)',
+  script: 'Script (legacy)',
+  dashboard: 'Dashboard (legacy)',
+};
 
 function visBadge(v: Visibility): string {
   return `badge vis-${v.toLowerCase()}`;
@@ -196,8 +205,95 @@ export default function SoftwareBuilder({
     if (typeof window !== 'undefined') window.localStorage.setItem(MODE_KEY, m);
   };
 
-  // The build target the Build stage points at (an epic/story from Design).
-  const [target, setTarget] = useState<{ epicId: string; storyId: string } | null>(null);
+  // The scope the Build stage acts on — General (whole app), an EPIC, or a story.
+  const [target, setTarget] = useState<BuildTarget | null>(null);
+  // The Test→Build improvement to-dos (session-scoped): concrete fixes the Test verifier
+  // (or free-text feedback) drafted, shown as pending items in the Build tree. Lifted here
+  // so Test authors them and Build consumes them.
+  const [improvements, setImprovements] = useState<Improvement[]>([]);
+  const addImprovements = (raws: RawImprovementSuggestion[]) => {
+    const findStory = (sid: string) => {
+      const e = (app.epics ?? []).find((ep) => ep.stories.some((s) => s.id === sid));
+      return e ? { epicId: e.id } : null;
+    };
+    const cleaned = raws.map((r) => normalizeImprovement(r, findStory)).filter((i): i is Improvement => i !== null);
+    if (cleaned.length) setImprovements((prev) => [...prev, ...cleaned]);
+  };
+
+  // Resolve a story-id → its human title (for refinement attribution + build targeting).
+  const storyById = (sid: string) => (app.epics ?? []).flatMap((e) => e.stories ?? []).find((s) => s.id === sid) ?? null;
+  const storyTitleOf = (sid: string) => storyById(sid)?.title?.trim() || 'story';
+
+  // Draft a concrete Design spec for ONE refinement on the REASONING model (the design
+  // conversation route), so the design output is REAL — shown inline, then fed to the build.
+  // Honest fallback: if the route can't answer, we draft from the note itself rather than fake.
+  async function draftSpecFor(imp: Improvement): Promise<string> {
+    const story = storyById(imp.storyId);
+    const prompt = `Draft a concrete Design spec addition for this refinement so it can be built. Refinement: "${imp.note}". Target story: "${story?.title?.trim() || imp.storyId}". Return the specific feature(s), non-functional requirement(s) and rule(s) to add — terse, buildable.`;
+    try {
+      const res = await fetch(`/api/apps/${app.id}/assistant`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ stage: 'design', messages: [{ role: 'user', content: prompt }] }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { message?: string };
+      const text = (data.message ?? '').trim();
+      if (text) return text;
+    } catch {
+      /* fall through to the honest local draft */
+    }
+    return `Spec for “${imp.note}” (story: ${story?.title?.trim() || imp.storyId}).`;
+  }
+
+  // Advance ONE refinement to 'designed' with a real drafted spec.
+  async function designRefinement(imp: Improvement): Promise<void> {
+    const spec = await draftSpecFor(imp);
+    setImprovements((prev) => markDesignedById(prev, imp.id, spec));
+  }
+  // Advance ONE refinement to 'built' (its rebuild/build ran).
+  function buildRefinement(imp: Improvement): void {
+    setImprovements((prev) => markBuiltById(prev, imp.id));
+  }
+  // Accelerator: design (if needed) THEN build one item — the design output still lands
+  // in state first (visible), then the build advances it to 'built'.
+  async function designAndBuildRefinement(imp: Improvement): Promise<void> {
+    if (refinementsToDesign([imp]).length > 0) {
+      const spec = await draftSpecFor(imp);
+      setImprovements((prev) => markBuiltById(markDesignedById(prev, imp.id, spec), imp.id));
+    } else {
+      setImprovements((prev) => markBuiltById(prev, imp.id));
+    }
+  }
+  // Batch: design every designable refinement (each gets a real drafted spec).
+  async function designAllRefinements(): Promise<void> {
+    const toDraft = refinementsToDesign(improvements);
+    const specs = new Map<string, string>();
+    for (const imp of toDraft) specs.set(imp.id, await draftSpecFor(imp));
+    setImprovements((prev) => designAll(prev, (i) => specs.get(i.id) ?? `Spec for “${i.note}”.`));
+  }
+  // Batch: build every currently-buildable refinement, capped for a reviewable batch.
+  function buildAllRefinements(): void {
+    const batch = new Set(buildableBatch(improvements).map((i) => i.id));
+    setImprovements((prev) => prev.map((i) => (batch.has(i.id) ? markBuiltById([i], i.id)[0] : i)));
+  }
+  // Batch accelerator: design all, then build all — both steps applied, designs retained.
+  async function designAndBuildAllRefinements(): Promise<void> {
+    const toDraft = refinementsToDesign(improvements);
+    const specs = new Map<string, string>();
+    for (const imp of toDraft) specs.set(imp.id, await draftSpecFor(imp));
+    setImprovements((prev) => buildAll(designAll(prev, (i) => specs.get(i.id) ?? `Spec for “${i.note}”.`)));
+  }
+
+  // The one handler bundle every stage's RefinementList consumes (same list, same lifecycle).
+  const refineHandlers: RefineHandlers = {
+    onDesign: designRefinement,
+    onBuild: buildRefinement,
+    onDesignAndBuild: designAndBuildRefinement,
+    onDesignAll: designAllRefinements,
+    onBuildAll: buildAllRefinements,
+    onDesignAndBuildAll: designAndBuildAllRefinements,
+    onDismiss: (id) => setImprovements((prev) => dropImprovement(prev, id)),
+  };
 
   const canEditCode = roleAtLeast(user.role, 'builder');
   const canEdit = app.owner === user.id || roleAtLeast(user.role, 'domain_admin');
@@ -225,6 +321,7 @@ export default function SoftwareBuilder({
     named: !!app.name.trim(),
     hasPurpose: !!(app.purpose ?? '').trim(),
     hasDesign: epics.some((e) => (e.stories?.length ?? 0) > 0),
+    designSpecComplete: everyStoryHasSpec(epics),
     committed,
     previewed: !!app.deploy.previewUrl || previewAck,
     deployed: app.deploy.releases > 0,
@@ -367,7 +464,13 @@ export default function SoftwareBuilder({
     }
   }
 
-  const pipe = useMemo(() => pipelineSteps(app.pipeline), [app.pipeline]);
+  // The ONE honest pipeline derivation — shared with Publish so Test and Publish
+  // can never disagree. A live/serving app shows all upstream stages complete;
+  // a real failure surfaces the same marked stage in both surfaces.
+  const pipe = useMemo(
+    () => derivePipelineView(app.pipeline, { state: app.deploy.state, releases: app.deploy.releases }),
+    [app.pipeline, app.deploy.state, app.deploy.releases],
+  );
 
   return (
     <>
@@ -424,18 +527,6 @@ export default function SoftwareBuilder({
           ctx={ctx}
           onState={setStage}
           ariaLabel="Software stages"
-          assistant={(st) =>
-            // Define + Design own their own StageAssistantChat inside the stage body (so
-            // Apply can wire straight into purpose/grants/epics/stories). The other stages
-            // keep the one-shot explainer here.
-            st.id === 'build' ? (
-              <StageAssistant appId={app.id} stage="build" label="Explain a file or what to ask the build chat next." cta="Explain" />
-            ) : st.id === 'preview' ? (
-              <StageAssistant appId={app.id} stage="preview" label="Read the runner conditions — why isn't the pod ready?" cta="Explain the wait" />
-            ) : st.id === 'operate' ? (
-              <StageAssistant appId={app.id} stage="operate" label="Explain scan findings, justify go-live, or triage the live app." cta="Help" />
-            ) : null
-          }
         >
           {stage.current === 'define' ? (
             <DefineStage
@@ -448,7 +539,10 @@ export default function SoftwareBuilder({
           ) : null}
 
           {stage.current === 'design' ? (
-            <DesignStage app={app} epics={epics} canEdit={canEdit} onSave={(next) => saveDesign({ epics: next })} onReload={onReload} />
+            <DesignStage
+              app={app} epics={epics} canEdit={canEdit} onSave={(next) => saveDesign({ epics: next })} onReload={onReload}
+              refinements={improvements} refineHandlers={refineHandlers} storyTitleOf={storyTitleOf}
+            />
           ) : null}
 
           {stage.current === 'build' ? (
@@ -456,22 +550,32 @@ export default function SoftwareBuilder({
               app={app} epics={epics} canEditCode={canEditCode} onBuilt={onReload}
               target={target} setTarget={setTarget}
               onSaveEpics={canEdit ? (next) => saveDesign({ epics: next }) : undefined}
+              onGoDesign={() => setStage((s) => ({ ...s, current: 'design' }))}
+              improvements={improvements}
+              refineHandlers={refineHandlers}
+              storyTitleOf={storyTitleOf}
             />
           ) : null}
 
-          {stage.current === 'preview' ? (
-            <PreviewStage
-              app={app} surface={surface} pipe={pipe}
+          {stage.current === 'test' ? (
+            <TestStage
+              app={app} epics={epics} surface={surface} pipe={pipe}
               busy={busy} onPreview={() => deployAction('preview')}
               deployMsg={deployMsg}
-              offlineAck={previewAck} onOfflineAck={() => { setPreviewAck(true); setStage((s) => markDone(s, 'preview')); }}
+              offlineAck={previewAck} onOfflineAck={() => { setPreviewAck(true); setStage((s) => markDone(s, 'test')); }}
               connTools={connection?.tools ?? app.mcpTools}
+              improvements={improvements}
+              onAddImprovements={addImprovements}
+              onGoBuild={() => setStage((s) => ({ ...s, current: 'build' }))}
+              onGoDesign={() => setStage((s) => ({ ...s, current: 'design' }))}
+              refineHandlers={refineHandlers}
+              storyTitleOf={storyTitleOf}
             />
           ) : null}
 
-          {stage.current === 'operate' ? (
-            <OperateStage
-              app={app} surface={surface} user={user}
+          {stage.current === 'publish' ? (
+            <PublishStage
+              app={app} surface={surface} user={user} pipe={pipe}
               connTools={connection?.tools ?? app.mcpTools}
               reviewCard={reviewCard}
               publishLabel={publishLabel} publishDisabled={publishDisabled} inReview={inReview}
@@ -509,21 +613,30 @@ function DeveloperSurface({
   msg: string;
 }) {
   const consoleLines = [msg, deployMsg, toolOut].filter(Boolean).join('\n\n');
+  // Developer layout: the BUILD / DEPLOY CONSOLE sits at the TOP, full screen width; the
+  // code (which needs the room) sits BELOW it at full width.
   return (
     <div style={{ marginTop: 4 }}>
       <p className="hint" style={{ marginTop: 0 }}>
-        The raw surface: the app’s committed files (edit + commit in-browser) and the live
-        build/deploy console. Everything here is real app state — nothing is simulated.
+        The raw surface: the live build/deploy console up top, then the app’s committed files
+        below (edit + commit in-browser). Everything here is real app state — nothing is simulated.
       </p>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))',
-          gap: 16,
-          alignItems: 'start',
-          marginTop: 12,
-        }}
-      >
+
+      {/* Build / deploy console — TOP, full width. */}
+      <div className="grant-block" style={{ marginTop: 12 }}>
+        <div className="comp-label">Build / deploy console</div>
+        {consoleLines ? (
+          <pre className="answer mono" style={{ marginTop: 8, fontSize: 12, whiteSpace: 'pre-wrap' }}>{consoleLines}</pre>
+        ) : (
+          <p className="hint" style={{ marginTop: 4 }}>
+            No console output yet — run a preview, publish, or call a tool from the Simple flow and the real output appears here.
+            Pipeline: <span className="mono">{Object.entries(app.pipeline).map(([k, v]) => `${k}=${v}`).join(', ')}</span>.
+          </p>
+        )}
+      </div>
+
+      {/* Code — BELOW, full width (code needs the space). */}
+      <div style={{ marginTop: 16 }}>
         {canEditCode ? (
           <CodePanel appId={app.id} repoFullName={app.repo.fullName} />
         ) : (
@@ -532,17 +645,6 @@ function DeveloperSurface({
             <p className="hint" style={{ marginTop: 4 }}>Editing the code is builder-only. Repo: <span className="mono">{app.repo.fullName || '(not scaffolded)'}</span>.</p>
           </div>
         )}
-        <div className="grant-block">
-          <div className="comp-label">Build / deploy console</div>
-          {consoleLines ? (
-            <pre className="answer mono" style={{ marginTop: 8, fontSize: 12, whiteSpace: 'pre-wrap' }}>{consoleLines}</pre>
-          ) : (
-            <p className="hint" style={{ marginTop: 4 }}>
-              No console output yet — run a preview, publish, or call a tool from the Simple flow and the real output appears here.
-              Pipeline: <span className="mono">{Object.entries(app.pipeline).map(([k, v]) => `${k}=${v}`).join(', ')}</span>.
-            </p>
-          )}
-        </div>
       </div>
     </div>
   );
@@ -568,8 +670,10 @@ function DefineStage({
   const surfaceLabel = [app.surface?.ui ? 'UI' : '', app.surface?.api ? 'API' : ''].filter(Boolean).join(' + ') || 'inferred on build';
 
   // The context-grant safety ceiling for an app: builders may grant direct writes,
-  // everyone else caps at read+propose (writes held for approval).
-  const cap = contextAccessCap(canEdit ? 'read-write' : 'read-propose');
+  // everyone else caps at read+propose (writes held for approval). New grants START
+  // at read-only (the safe default) — the user raises each item to Read+propose /
+  // Read+write up to the ceiling when they actually need write access.
+  const cap = { ...contextAccessCap(canEdit ? 'read-write' : 'read-propose'), default: 'read-only' as const };
 
   const dirty = purpose !== (app.purpose ?? '');
 
@@ -581,18 +685,17 @@ function DefineStage({
   // Apply assistant grant suggestions → fold into the current grants (clamped to cap) + persist.
   const applyGrants = (sg: SuggestedGrant[]) => onSaveGrants(applyGrantsSuggestion(grants, sg, cap));
 
-  return (
-    <div className="agent-editor" style={{ marginTop: 4 }}>
-      <label className="comp-label">App name</label>
-      <input type="text" value={app.name} readOnly title="Named on create — rename via the delivery team or build chat" />
-      <div className="hint" style={{ marginTop: 6 }}>
-        id: <code>{app.slug}</code> · surface: <code>{surfaceLabel}</code> ·{' '}
-        the build agent infers UI/API from what it actually builds — no upfront type to pick.
-      </div>
+  const grantCount = SW_GRANT_KINDS.reduce((n, k) => n + (grants[k]?.length ?? 0), 0);
+  const purposeSet = !!(app.purpose ?? '').trim();
 
-      <label className="comp-label" style={{ marginTop: 16 }}>Purpose</label>
+  // Structure — the app's spec being shaped: its purpose and the governed context it may
+  // use. This is the direct-manipulation twin of the conversation; the assistant's
+  // suggestions flow straight into these controls.
+  const structure = (
+    <>
+      <label className="comp-label">Purpose</label>
       <p className="hint" style={{ marginTop: 0 }}>
-        What is this app for? One or two sentences in your own words — the Define stage is complete once a purpose is set.
+        What is this app for? One or two sentences — Define is complete once a purpose is set.
       </p>
       <textarea
         value={purpose}
@@ -613,8 +716,7 @@ function DefineStage({
       <div className="section-title">Granted context (no raw credentials)</div>
       <p className="hint" style={{ marginTop: 0 }}>
         Apps consume governed resources — OPA-scoped and run AS you, never raw secrets. Grant the
-        Connections, Data, Knowledge, Files and Metrics this app may use. Expand a kind to grant at
-        folder or item level, at Read / Read+propose / Read+write.
+        Connections, Data, Knowledge, Files and Metrics this app may use, at folder or item level.
       </p>
       <SoftwareContextGrants
         value={grants}
@@ -623,15 +725,43 @@ function DefineStage({
         cap={cap}
         canEdit={canEdit}
       />
+    </>
+  );
 
-      {/* The real, governed Define assistant — chat + apply-able suggestions. */}
-      <StageAssistantChat
-        appId={app.id}
-        stage="define"
-        intro="Improve the purpose and suggest which governed context to grant."
-        starters={['Sharpen my purpose', 'What context should this app be granted?']}
-        onApplyPurpose={canEdit ? applyPurpose : undefined}
-        onApplyGrants={canEdit ? applyGrants : undefined}
+  return (
+    <div className="agent-editor" {...anchorAttr(ANCHORS.software.define)}>
+      <StageConversation
+        context={
+          <>
+            <span className="sc-scope">{app.name}</span>
+            <span className="sc-hint">
+              id <code>{app.slug}</code> · template{' '}
+              <span className="badge muted" title="Chosen at creation — locked afterwards">
+                {TEMPLATE_LABEL[app.template] ?? app.template}
+              </span>{' '}
+              · surface <code>{surfaceLabel}</code>
+            </span>
+            <span className="sc-hint sc-spacer">Describe the app — the conversation shapes its purpose &amp; the context it may use.</span>
+          </>
+        }
+        structure={structure}
+        conversation={
+          <StageAssistantChat
+            appId={app.id}
+            stage="define"
+            intro="Improve the purpose and suggest which governed context to grant."
+            starters={['Sharpen my purpose', 'What context should this app be granted?']}
+            onApplyPurpose={canEdit ? applyPurpose : undefined}
+            onApplyGrants={canEdit ? applyGrants : undefined}
+          />
+        }
+        outcome={
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="comp-label" style={{ margin: 0 }}>Defined</span>
+            <span className={`badge ${purposeSet ? 'ok' : 'muted'}`}>{purposeSet ? 'Purpose set' : 'Purpose pending'}</span>
+            <span className="badge muted">{grantCount} context grant{grantCount === 1 ? '' : 's'}</span>
+          </div>
+        }
       />
     </div>
   );
@@ -639,43 +769,106 @@ function DefineStage({
 
 /* ─────────────────────────── Design ─────────────────────────── */
 
+/** Set one story's spec inside the epics tree, returning a new array (immutable). */
+function withStorySpec(epics: Epic[], epicId: string, storyId: string, spec: StorySpec): Epic[] {
+  return epics.map((e) =>
+    e.id !== epicId ? e : { ...e, stories: e.stories.map((s) => (s.id === storyId ? { ...s, spec } : s)) },
+  );
+}
+
 /**
- * The Design stage — the JIRA-like-but-simpler EPIC + user-story board
- * (components/software/DesignBoard.tsx), plus the governed Design assistant chat whose
- * suggestions Apply straight into the epics: `suggestedEpics` CREATE epics,
- * `suggestedStories` ADD stories under existing epics — both persisted through the SAME
- * governed `onSave` (→ patchAppDesign). The board persists the whole array on Save.
- * The assistant only suggests; Apply is the user-confirmed, governed write.
+ * The Design stage — the SPECIFICATION, read-first, ONE EPIC AT A TIME. Layout is
+ * Assistant on the LEFT, the epic detail on the RIGHT (StageConversation `reverse`) —
+ * Design has no build-tree, so the assistant leads. The right panel
+ * (components/software/DesignEpicDetail.tsx) shows a single epic with a prev/next
+ * switcher, clean read mode by default and an explicit Edit toggle; each user story is
+ * an EXPANDING row revealing its Features · NFRs · Rules. Expanding a story makes it the
+ * assistant's target, so `suggestedSpec` folds into THAT story;
+ * `suggestedEpics`/`suggestedStories` still grow the backlog. Every write goes through
+ * the SAME governed `onSave` (→ patchAppDesign).
  */
 function DesignStage({
-  app, epics, canEdit, onSave, onReload,
+  app, epics, canEdit, onSave, onReload, refinements, refineHandlers, storyTitleOf,
 }: {
   app: SoftwareApp;
   epics: Epic[];
   canEdit: boolean;
   onSave: (epics: Epic[]) => void;
   onReload: () => void;
+  refinements: Improvement[];
+  refineHandlers: RefineHandlers;
+  storyTitleOf: (storyId: string) => string;
 }) {
-  // Apply suggested epics → create them + persist immediately (governed path).
   const applyEpics = (sug: SuggestedEpic[]) => onSave(applyEpicsSuggestion(epics, sug));
-  // Apply suggested stories → add under the referenced existing epics + persist.
   const applyStories = (groups: SuggestedStoriesForEpic[]) => onSave(applyStoriesSuggestion(epics, groups));
 
+  // The story the user is focused on (the expanded row) — the assistant's spec target.
+  const [activeStory, setActiveStory] = useState<{ epicId: string; storyId: string } | null>(null);
+  const targetStory = activeStory
+    ? epics.find((e) => e.id === activeStory.epicId)?.stories.find((s) => s.id === activeStory.storyId) ?? null
+    : null;
+
+  const applySpec = (partial: Partial<StorySpec>) => {
+    if (!activeStory || !targetStory) return;
+    onSave(withStorySpec(epics, activeStory.epicId, activeStory.storyId, applySpecSuggestion(targetStory.spec, partial)));
+  };
+
   const hasStories = epics.some((e) => (e.stories?.length ?? 0) > 0);
+  const stories = epics.flatMap((e) => e.stories ?? []);
+  const specced = stories.filter((s) => specHasContent(s.spec)).length;
+  const purpose = (app.purpose ?? '').trim();
 
   return (
-    <div style={{ marginTop: 4 }}>
-      <DesignBoard epics={epics} canEdit={canEdit} onSave={onSave} />
-
-      {canEdit ? <ShipDesignPanel app={app} hasStories={hasStories} onReload={onReload} /> : null}
-
-      <StageAssistantChat
-        appId={app.id}
-        stage="design"
-        intro="Propose EPICs and user stories from the purpose — Apply creates them."
-        starters={['Suggest EPICs for this app', 'Add user stories to my EPICs']}
-        onApplyEpics={canEdit ? applyEpics : undefined}
-        onApplyStories={canEdit ? applyStories : undefined}
+    <div {...anchorAttr(ANCHORS.software.design)}>
+      <StageConversation
+        reverse
+        context={
+          <>
+            <span className="sc-scope">Design</span>
+            <span className="badge muted" title="Design does all the planning on the reasoning model">Design · reasoning model</span>
+            <span className="sc-hint">{purpose ? `for “${purpose}”` : 'specify the app story by story'}</span>
+            <span className="sc-hint sc-spacer">Expand a story, discuss what it should do — watch its Features · NFRs · Rules fill.</span>
+          </>
+        }
+        structure={
+          <>
+            <DesignEpicDetail epics={epics} canEdit={canEdit} onSave={onSave} onActiveStory={setActiveStory} />
+            {canEdit && refinements.length > 0 ? (
+              <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+                <RefinementList
+                  refinements={refinements}
+                  storyTitle={storyTitleOf}
+                  variant="design"
+                  handlers={refineHandlers}
+                />
+              </div>
+            ) : null}
+          </>
+        }
+        conversation={
+          <StageAssistantChat
+            appId={app.id}
+            stage="design"
+            intro={targetStory ? `Specify “${targetStory.title.trim() || 'this story'}” — features, NFRs and rules.` : 'Propose EPICs and user stories, or expand a story to specify it.'}
+            starters={targetStory
+              ? ['List features for this story', 'What rules and NFRs should it have?']
+              : ['Suggest EPICs for this app', 'Add user stories to my EPICs']}
+            onApplyEpics={canEdit ? applyEpics : undefined}
+            onApplyStories={canEdit ? applyStories : undefined}
+            onApplySpec={canEdit && targetStory ? applySpec : undefined}
+            specTargetLabel={targetStory?.title.trim() || undefined}
+          />
+        }
+        outcome={
+          <>
+            <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: canEdit ? 12 : 0 }}>
+              <span className="comp-label" style={{ margin: 0 }}>Specification</span>
+              <span className={`badge ${stories.length > 0 ? 'ok' : 'muted'}`}>{stories.length} stor{stories.length === 1 ? 'y' : 'ies'}</span>
+              <span className={`badge ${specced === stories.length && stories.length > 0 ? 'ok' : 'muted'}`}>{specced} / {stories.length} specified</span>
+            </div>
+            {canEdit ? <ShipDesignPanel app={app} hasStories={hasStories} onReload={onReload} /> : null}
+          </>
+        }
       />
     </div>
   );
@@ -830,13 +1023,6 @@ function ShipDesignPanel({ app, hasStories, onReload }: { app: SoftwareApp; hasS
 
 /* ─────────────────────────── Build ─────────────────────────── */
 
-/** Small status pip for a targeted story (todo · building · done). */
-function storyStatusBadge(status?: 'todo' | 'building' | 'done') {
-  if (status === 'done') return <span className="badge ok">done ✓</span>;
-  if (status === 'building') return <span className="badge warn">building</span>;
-  return <span className="badge muted">to do</span>;
-}
-
 /** Set one story's status inside the epics tree, returning a new array (immutable). */
 function withStoryStatus(epics: Epic[], epicId: string, storyId: string, status: 'todo' | 'building' | 'done'): Epic[] {
   return epics.map((e) =>
@@ -844,185 +1030,423 @@ function withStoryStatus(epics: Epic[], epicId: string, storyId: string, status:
   );
 }
 
-function BuildStage({
-  app, epics, canEditCode, onBuilt, target, setTarget, onSaveEpics,
-}: {
-  app: SoftwareApp;
-  epics: Epic[];
-  canEditCode: boolean;
-  onBuilt: () => void;
-  target: { epicId: string; storyId: string } | null;
-  setTarget: (t: { epicId: string; storyId: string } | null) => void;
-  /** Persist an updated epics array (per-story status). Undefined when the viewer can't edit. */
-  onSaveEpics?: (epics: Epic[]) => void;
-}) {
-  // Plan ⇄ Build: Plan discusses/plans with ZERO code changes; Build executes end-to-end.
-  const [buildMode, setBuildMode] = useState<'plan' | 'build'>('build');
-  // Bumped after each Build commit so the instant preview re-fetches the new files.
-  const [previewKey, setPreviewKey] = useState(0);
-
-  const storyOptions = epics.flatMap((e) =>
-    e.stories.map((s) => ({
-      epicId: e.id,
-      storyId: s.id,
-      status: s.status,
-      label: `${e.title || 'Untitled EPIC'} › ${s.title || 'Untitled story'}`,
-    })),
-  );
-  const selected = target ? storyOptions.find((o) => o.epicId === target.epicId && o.storyId === target.storyId) : null;
-
-  // On a successful BUILD run against a targeted story, mark it done (backward-compatible
-  // status write through the same governed epics patch). No-op when nothing was targeted.
-  const handleBuilt = (changes: FileChange[]) => {
-    if (buildMode === 'build' && target && onSaveEpics && changes.length > 0) {
-      onSaveEpics(withStoryStatus(epics, target.epicId, target.storyId, 'done'));
-    }
-    // A commit changed the files — refresh the instant preview.
-    if (changes.length > 0) setPreviewKey((k) => k + 1);
-    onBuilt();
-  };
-
-  const buildStory = target ? { epicId: target.epicId, storyId: target.storyId, label: selected?.label } : null;
-
+/**
+ * Persistent Build ▸ Preview ▸ Deploy status rail. Read-only, wired to the SAME
+ * live state the stage already reads (`app.pipeline`, `app.deploy.*`) — it is the
+ * honest single-glance answer to "where is this app?". Never fabricates a state it
+ * can't see (Preview is live only when a URL is actually served).
+ */
+function BuildStatusRail({ app }: { app: SoftwareApp }) {
+  const segments = buildStatusRail(app);
+  const sha = app.repo.seeded.length > 0 || app.pipeline.forgejo === 'ok' ? app.repo.fullName.split('/').pop() : null;
   return (
-    <div style={{ marginTop: 4 }}>
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-        <p className="hint" style={{ marginTop: 0, flex: 1 }}>
-          {buildMode === 'plan'
-            ? 'Plan mode — the assistant discusses the change and drafts an implementation plan. It writes no code; switch to Build to execute.'
-            : <>Build mode — the assistant commits real code and shows you the diff. {canEditCode ? 'Edit the code directly beside it.' : 'A Builder can also edit code directly.'} Every commit lands in this app’s sovereign in-cluster repo.</>}
-        </p>
-        {/* Plan ⇄ Build segmented control — reuses the OS `.mode-toggle` language. */}
-        <div className="mode-toggle" role="group" aria-label="Build mode" style={{ flexShrink: 0 }}>
-          <button
-            type="button"
-            className={buildMode === 'plan' ? 'active' : ''}
-            aria-pressed={buildMode === 'plan'}
-            title="Discuss & plan — no code changes"
-            onClick={() => setBuildMode('plan')}
-          >
-            Plan
-          </button>
-          <button
-            type="button"
-            className={buildMode === 'build' ? 'active' : ''}
-            aria-pressed={buildMode === 'build'}
-            title="Execute end-to-end — commits real code"
-            onClick={() => setBuildMode('build')}
-          >
-            Build
-          </button>
+    <div className="row" style={{ gap: 14, flexWrap: 'wrap', alignItems: 'center', padding: '8px 12px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--panel)', marginBottom: 12 }}>
+      {segments.map((seg, i) => (
+        <div key={seg.label} className="row" style={{ gap: 8, alignItems: 'center' }}>
+          {i > 0 ? <span className="muted" aria-hidden="true" style={{ opacity: 0.4 }}>·</span> : null}
+          <span className={`sw-dot ${seg.tone === 'ok' ? 'on' : 'off'}`} aria-hidden="true" style={seg.tone === 'active' ? { background: 'var(--gold)' } : undefined} />
+          <span style={{ fontSize: 12 }}>
+            <strong>{seg.label}:</strong>{' '}
+            <span className="muted">{seg.value}</span>
+          </span>
         </div>
-      </div>
-
-      {/* EPIC/story selector — first-class: shows the targeted story + its per-story status. */}
-      <div className="grant-block" style={{ marginTop: 10 }}>
-        <div className="comp-label">Build target</div>
-        {storyOptions.length === 0 ? (
-          <p className="hint" style={{ marginTop: 4 }}>No stories yet — add EPICs and stories on the <strong>Design</strong> stage to target the build.</p>
-        ) : (
-          <>
-            <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 4 }}>
-              <select
-                value={target ? `${target.epicId}::${target.storyId}` : ''}
-                onChange={(e) => {
-                  if (!e.target.value) { setTarget(null); return; }
-                  const [epicId, storyId] = e.target.value.split('::');
-                  setTarget({ epicId, storyId });
-                }}
-                style={{ minWidth: 320 }}
-              >
-                <option value="">— whole app (no specific story) —</option>
-                {storyOptions.map((o) => (
-                  <option key={`${o.epicId}::${o.storyId}`} value={`${o.epicId}::${o.storyId}`}>
-                    {o.status === 'done' ? '✓ ' : ''}{o.label}
-                  </option>
-                ))}
-              </select>
-              {selected ? storyStatusBadge(selected.status) : null}
-            </div>
-            {selected ? (
-              <p className="hint" style={{ marginTop: 8, marginBottom: 0 }}>
-                {buildMode === 'build' ? 'Building' : 'Planning'} <strong>{selected.label}</strong>
-                {selected.status === 'done' ? ' — already marked done; a new run re-implements it.' : '. It is marked done automatically when a Build run commits changes.'}
-              </p>
-            ) : null}
-          </>
-        )}
-      </div>
-
-      <div style={{ marginTop: 10 }}>
-        <TeamPanel onBuilt={onBuilt} />
-      </div>
-
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: canEditCode ? 'repeat(auto-fit, minmax(360px, 1fr))' : '1fr',
-          gap: 16,
-          alignItems: 'start',
-          marginTop: 16,
-        }}
-      >
-        <BuildChat
-          appId={app.id}
-          appName={app.name}
-          mode={buildMode}
-          story={buildStory}
-          initialMessages={app.chat
-            .filter((m) => m.role === 'user' || m.role === 'assistant')
-            .map((m) => ({ role: m.role, content: m.content }))}
-          onBuilt={handleBuilt}
-        />
-        {canEditCode ? <CodePanel appId={app.id} repoFullName={app.repo.fullName} /> : null}
-      </div>
-
-      {/* ── Live-data preview — the real deployed build served by the runner, calling
-           the governed OS API as you; reloads after each Build commit + redeploy. ── */}
-      {app.surface?.ui ? (
-        <div className="grant-block" style={{ marginTop: 16 }}>
-          <div className="comp-label">Preview · live data</div>
-          <p className="hint" style={{ marginTop: 4, marginBottom: 10 }}>
-            The deployed build served by the runner, calling the governed OS API as you — real granted data or a real error.
-          </p>
-          <InstantPreview key={previewKey} appId={app.id} previewUrl={app.deploy.previewUrl} />
-        </div>
+      ))}
+      {app.deploy.previewUrl ? (
+        <a href={app.deploy.previewUrl} target="_blank" rel="noreferrer" className="sw-quiet-link" style={{ fontSize: 12, marginLeft: 'auto' }}>
+          Open preview ↗
+        </a>
       ) : null}
     </div>
   );
 }
 
-/* ─────────────────────────── Preview ─────────────────────────── */
+/** Which stories own the selected feature-ids (by parsing the `${storyId}#f${i}` ids). */
+function selectedStoryIds(selected: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>();
+  for (const id of selected) out.add(id.split('#')[0]);
+  return out;
+}
 
-function PreviewStage({
-  app, surface, pipe, busy, onPreview, deployMsg, offlineAck, onOfflineAck, connTools,
+/**
+ * Map the SELECTED feature-set to the tightest existing BuildTarget so the one Build
+ * press builds exactly that scope (its specs travel into the prompt):
+ *   • features from ONE story  → that story;
+ *   • features across stories of ONE epic → that epic (built story-by-story);
+ *   • features across MULTIPLE epics → the whole app (remaining stories).
+ * Honest: the target we build is always the smallest scope that covers the selection.
+ */
+function selectionToTarget(epics: Epic[], selected: ReadonlySet<string>): BuildTarget | null {
+  const storyIds = selectedStoryIds(selected);
+  if (storyIds.size === 0) return null;
+  const epicOf = (sid: string) => epics.find((e) => e.stories.some((s) => s.id === sid));
+  if (storyIds.size === 1) {
+    const sid = [...storyIds][0];
+    const epic = epicOf(sid);
+    if (!epic) return null;
+    return { kind: 'story', epicId: epic.id, storyId: sid };
+  }
+  const epicIds = new Set([...storyIds].map((sid) => epicOf(sid)?.id).filter(Boolean) as string[]);
+  if (epicIds.size === 1) return { kind: 'epic', epicId: [...epicIds][0] };
+  return { kind: 'app' };
+}
+
+function BuildStage({
+  app, epics, canEditCode, onBuilt, target, setTarget, onSaveEpics, onGoDesign, improvements, refineHandlers, storyTitleOf,
 }: {
   app: SoftwareApp;
+  epics: Epic[];
+  canEditCode: boolean;
+  onBuilt: () => void;
+  target: BuildTarget | null;
+  setTarget: (t: BuildTarget | null) => void;
+  /** Persist an updated epics array (per-story status). Undefined when the viewer can't edit. */
+  onSaveEpics?: (epics: Epic[]) => void;
+  /** Jump back to the Design stage (the tree's empty-state pointer). */
+  onGoDesign?: () => void;
+  /** Test→Build refinement to-dos to show as pending items in the tree. */
+  improvements: Improvement[];
+  /** The shared refinement lifecycle handlers (design/build/design&build + batches). */
+  refineHandlers: RefineHandlers;
+  /** Resolve a story-id → its title. */
+  storyTitleOf: (storyId: string) => string;
+}) {
+  // Plan ⇄ Build: Plan discusses/plans with ZERO code changes; Build executes end-to-end.
+  const [buildMode, setBuildMode] = useState<'plan' | 'build'>('build');
+  // Bumped after each Build commit so the instant preview re-fetches the new files.
+  const [previewKey, setPreviewKey] = useState(0);
+  // Live run signals: is a run streaming, and which stories' LAST Build run failed.
+  const [running, setRunning] = useState(false);
+  const [failedStoryIds, setFailedStoryIds] = useState<ReadonlySet<string>>(new Set());
+
+  // The DETAIL node open on the right (nav) — always-visible spec + built-state.
+  const [node, setNode] = useState<SpecNode>({ kind: 'app' });
+  // The features QUEUED for the next build (capped batch-select).
+  const [selected, setSelected] = useState<ReadonlySet<string>>(EMPTY_SET);
+  // Bumped to fire a build of the current target from the one Build button.
+  const [buildTrigger, setBuildTrigger] = useState(0);
+  // The story-ids this build run targets (captured at press) — so on success we mark
+  // EVERY targeted story done + clear its selection, even for an epic/whole-app scope
+  // where `target` is not a single story. Honest: these are exactly the stories whose
+  // features the user queued and the run built.
+  const [buildingStoryIds, setBuildingStoryIds] = useState<string[]>([]);
+
+  // Prune selections that no longer exist when the spec changes upstream.
+  useEffect(() => { setSelected((sel) => pruneSelection(sel, epics)); }, [epics]);
+
+  const selCount = selectedCount(selected);
+  const buildTargetForSelection = useMemo(() => selectionToTarget(epics, selected), [epics, selected]);
+
+  // On a successful BUILD run, mark every story that was in the batch done, clear its
+  // selection, and clear any prior failure. Works for story, epic and whole-app scopes.
+  const handleBuilt = (changes: FileChange[]) => {
+    if (buildingStoryIds.length > 0 && changes.length > 0) {
+      if (onSaveEpics) {
+        let next = epics;
+        for (const sid of buildingStoryIds) {
+          const epic = next.find((e) => e.stories.some((s) => s.id === sid));
+          if (epic) next = withStoryStatus(next, epic.id, sid, 'done');
+        }
+        onSaveEpics(next);
+      }
+      const builtSet = new Set(buildingStoryIds);
+      setSelected((sel) => {
+        const nx = new Set<string>();
+        for (const id of sel) if (!builtSet.has(id.split('#')[0])) nx.add(id);
+        return nx;
+      });
+      setFailedStoryIds((prev) => {
+        const n = new Set(prev);
+        for (const sid of buildingStoryIds) n.delete(sid);
+        return n;
+      });
+    }
+    if (changes.length > 0) setPreviewKey((k) => k + 1);
+    onBuilt();
+  };
+
+  const handleRunEnd = (failed: boolean, runMode: string) => {
+    setRunning(false);
+    if (failed && runMode === 'build' && buildingStoryIds.length > 0) {
+      setFailedStoryIds((prev) => { const n = new Set(prev); for (const sid of buildingStoryIds) n.add(sid); return n; });
+    }
+  };
+
+  // The one "Build" press: map the selection to a target, remember the batch's stories,
+  // set the target, and fire the run.
+  const runBuild = () => {
+    const t = buildTargetForSelection;
+    if (!t || running) return;
+    setBuildingStoryIds([...selectedStoryIds(selected)]);
+    setTarget(t);
+    setBuildMode('build');
+    // The target prop flows to BuildChat; bump the trigger next tick so the chat sees it.
+    setBuildTrigger((n) => n + 1);
+  };
+
+  const toggleFeat = (fid: string) => setSelected((sel) => toggleFeatureSel(sel, fid));
+  const toggleGrp = (fids: string[]) => setSelected((sel) => toggleGroupSel(sel, fids));
+
+  // The effective target for the ONE assistant (BuildChat). A batch build sets `target`
+  // explicitly; a free-text build with nothing queued attributes to the STORY the user
+  // has selected in the detail (so a typed "add a login form" is still attributed +
+  // ticked). Falls back to null (whole-app) only when nothing is selected.
+  const nodeStoryTarget: BuildTarget | null = node.kind === 'story'
+    ? { kind: 'story', epicId: node.epicId, storyId: node.storyId }
+    : node.kind === 'feature'
+      ? { kind: 'story', epicId: node.epicId, storyId: node.storyId }
+      : null;
+  const chatTarget = target ?? nodeStoryTarget;
+
+  const capNote = `Build in focused batches of up to ${BUILD_BATCH_CAP} features so each result is reliable and reviewable.`;
+  const buildLabel = (() => {
+    if (buildTargetForSelection?.kind === 'story') {
+      const done = epics.find((e) => e.id === (buildTargetForSelection as { epicId: string }).epicId)
+        ?.stories.find((s) => s.id === (buildTargetForSelection as { storyId: string }).storyId)?.status === 'done';
+      return done ? 'Rebuild this user story' : 'Build this user story';
+    }
+    return `Build ${selCount} selected feature${selCount === 1 ? '' : 's'}`;
+  })();
+
+  // The structured LEFT surface: the capped-batch spec tree + the one Build button.
+  const structure = (
+    <div>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+        <div className="comp-label" style={{ margin: 0 }}>Epics · stories · features</div>
+        <span className={`badge ${selCount >= BUILD_BATCH_CAP ? 'warn' : 'muted'}`} title={capNote}>{selCount} / {BUILD_BATCH_CAP} selected</span>
+      </div>
+      <p className="hint" style={{ marginTop: 4 }}>
+        Tick the features to build next (selecting a story or EPIC cascades to its features). {capNote} A feature with no Design spec can&apos;t be built — specify it in Design first.
+      </p>
+      <div style={{ marginTop: 10 }}>
+        {epics.length === 0 ? (
+          <div className="db-empty" style={{ padding: 18, border: '1px dashed var(--border)', borderRadius: 10, textAlign: 'center' }}>
+            <p className="muted" style={{ margin: 0 }}>No stories yet — specify the app in Design first.</p>
+            {onGoDesign ? <button className="btn sm" style={{ marginTop: 10 }} onClick={onGoDesign}>Go to Design →</button> : null}
+          </div>
+        ) : (
+          <SpecTree
+            epics={epics}
+            selected={node}
+            onSelectNode={setNode}
+            selectable
+            selectedFeatures={selected}
+            onToggleFeature={toggleFeat}
+            onToggleGroup={toggleGrp}
+            onGoDesign={onGoDesign}
+          />
+        )}
+      </div>
+
+      {/* Test → Build refinements: the SAME lifecycle list, here in its Build lane. Only
+          buildable items (rebuild-proposed / designed) build; a proposed design-kind is
+          gated (design-before-build) and points to Design. Built items stay visible. */}
+      {improvements.length > 0 ? (
+        <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+          <RefinementList
+            refinements={improvements}
+            storyTitle={storyTitleOf}
+            variant="build"
+            handlers={refineHandlers}
+            onGoDesign={onGoDesign}
+          />
+        </div>
+      ) : null}
+
+      {/* The ONE primary Build button — builds the selected set (tightest scope). */}
+      <div className="row" style={{ gap: 10, marginTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button
+          className="btn lg"
+          disabled={!buildTargetForSelection || running}
+          onClick={runBuild}
+          title={buildTargetForSelection ? 'Build the selected features — commits real code' : 'Select at least one feature to build'}
+        >
+          {running ? <span className="spin" /> : buildLabel}
+        </button>
+        {selCount === 0 ? <span className="muted" style={{ fontSize: 12 }}>Select features on the left to build.</span> : null}
+      </div>
+
+      {/* Always-visible detail: the selected item's spec + honest built-state. */}
+      <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
+        <SpecDetailPanel node={node} epics={epics} />
+      </div>
+    </div>
+  );
+
+  return (
+    <div {...anchorAttr(ANCHORS.software.build)}>
+      <BuildStatusRail app={app} />
+      <div style={{ marginTop: 4, marginBottom: 12 }}>
+        <TeamPanel onBuilt={onBuilt} />
+      </div>
+      <StageConversation
+        context={
+          <>
+            <span className="sc-scope">Build</span>
+            <span className="badge muted" title="The build runs code generation on the standard model — no reasoning escalation">Build · {tierNote(modelRoleForMode('build'))}</span>
+            <span className="sc-hint">Context from Define: {defineContextNote({ template: app.template, purpose: app.purpose })}</span>
+            <span className="sc-hint sc-spacer">Tick features → Build the batch on the standard model, grounded in the Design spec. The assistant refines &amp; gives feedback.</span>
+          </>
+        }
+        structure={structure}
+        conversation={
+          <BuildChat
+            appId={app.id}
+            appName={app.name}
+            mode={buildMode}
+            target={chatTarget}
+            epics={epics}
+            actions={[]}
+            buildTrigger={buildTrigger}
+            initialMessages={app.chat
+              .filter((m) => m.role === 'user' || m.role === 'assistant')
+              .map((m) => ({ role: m.role, content: m.content }))}
+            onBuilt={handleBuilt}
+            onRunStart={() => { setRunning(true); if (buildingStoryIds.length === 0 && chatTarget?.kind === 'story') setBuildingStoryIds([chatTarget.storyId]); }}
+            onRunEnd={(failed, m) => { handleRunEnd(failed, m); setBuildingStoryIds([]); }}
+            onModeChange={setBuildMode}
+            showDetails={canEditCode}
+          />
+        }
+        outcome={
+          app.surface?.ui ? (
+            <div className="grant-block">
+              <div className="comp-label">Preview · live data</div>
+              {app.deploy.previewUrl ? (
+                <>
+                  <p className="hint" style={{ marginTop: 4, marginBottom: 10 }}>
+                    The deployed build served by the runner, calling the governed OS API as you — real granted data or a real error.
+                  </p>
+                  <iframe
+                    key={previewKey}
+                    src={app.deploy.previewUrl}
+                    title="Live app preview"
+                    style={{ width: '100%', height: 420, border: '1px solid var(--line)', borderRadius: 10, background: '#0b0b0d' }}
+                  />
+                  <a href={app.deploy.previewUrl} target="_blank" rel="noreferrer" className="sw-quiet-link" style={{ fontSize: 12, display: 'inline-block', marginTop: 8 }}>Open app UI ↗</a>
+                </>
+              ) : (
+                <p className="hint" style={{ marginTop: 4 }}>
+                  No live preview yet — provision one in the <strong>Test</strong> stage after your first build. This shows the real deployed app, never a mock.
+                </p>
+              )}
+            </div>
+          ) : undefined
+        }
+      />
+    </div>
+  );
+}
+
+/* ─────────────────────────── Test (replaces Preview) ─────────────────────────── */
+
+/**
+ * The Test stage — run the app and LLM-test each BUILT story against its Design spec.
+ * It keeps the LIVE-POD view (the real deployed/preview iframe + provision control — the
+ * honest "see it running" surface) and adds the test conversation: stage="test" reads
+ * the committed code + each story's spec and reports PASS/FAIL per item (grounded, never
+ * fabricated). Structured: the runner monitor + a "what will be tested" spec summary;
+ * conversation: the LLM tester; outcome: the live-pod iframe.
+ */
+function TestStage({
+  app, epics, surface, pipe, busy, onPreview, deployMsg, offlineAck, onOfflineAck, connTools,
+  improvements, onAddImprovements, onGoBuild, onGoDesign, refineHandlers, storyTitleOf,
+}: {
+  app: SoftwareApp;
+  epics: Epic[];
   surface: { ui: boolean; api: boolean };
-  pipe: { steps: Step[]; active: boolean; done: boolean; ok: boolean };
+  pipe: PipelineView;
   busy: boolean;
   onPreview: () => void;
   deployMsg: string;
   offlineAck: boolean;
   onOfflineAck: () => void;
   connTools: Tool[];
+  improvements: Improvement[];
+  onAddImprovements: (raws: RawImprovementSuggestion[]) => void;
+  onGoBuild: () => void;
+  onGoDesign: () => void;
+  refineHandlers: RefineHandlers;
+  storyTitleOf: (storyId: string) => string;
 }) {
   const [showApi, setShowApi] = useState(false);
-  return (
-    <div style={{ marginTop: 4 }}>
-      {/* ── Live-data preview: the real deployed build embedded over the governed OS API ── */}
-      {surface.ui ? (
-        <div className="grant-block" style={{ marginBottom: 16 }}>
-          <div className="comp-label">Preview · live data</div>
-          <p className="hint" style={{ marginTop: 4, marginBottom: 10 }}>
-            The deployed build served by the runner, calling the governed OS API as you —
-            real granted data, or a real error.
-          </p>
-          <InstantPreview appId={app.id} previewUrl={app.deploy.previewUrl} />
+  // "Verify & Improve" run state — fires the reasoning verifier + folds its improvements
+  // into the shared Build to-do list. Honest: it only proposes; nothing auto-builds.
+  const [verifying, setVerifying] = useState(false);
+  const [verifyMsg, setVerifyMsg] = useState('');
+  const stories = epics.flatMap((e) => e.stories ?? []);
+  const builtStories = stories.filter((s) => s.status === 'done');
+
+  async function verifyAndImprove() {
+    if (verifying) return;
+    setVerifying(true);
+    setVerifyMsg('');
+    try {
+      const res = await fetch(`/api/apps/${app.id}/assistant`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ stage: 'test', messages: [{ role: 'user', content: 'Verify every built story against its Design spec and draft concrete improvements for anything that falls short.' }] }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { message?: string; suggestions?: { suggestedImprovements?: RawImprovementSuggestion[] }; error?: string };
+      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+      const imps = data.suggestions?.suggestedImprovements ?? [];
+      if (imps.length) { onAddImprovements(imps); setVerifyMsg(`✓ ${imps.length} refinement${imps.length === 1 ? '' : 's'} found — shown below (Proposed).`); }
+      else setVerifyMsg(data.message ? '✓ Verified — no shortfalls flagged.' : '✓ Verified.');
+    } catch (e) {
+      setVerifyMsg(`✗ ${(e as Error).message}`);
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  // Structure — the deployed build the runner serves + provision controls + pipeline
+  // health, and a summary of which built stories the LLM tester will check against spec.
+  const structure = (
+    <>
+      <div className="grant-block" style={{ marginBottom: 12 }}>
+        <div className="comp-label" style={{ margin: 0 }}>Verify against spec</div>
+        <div className="row" style={{ gap: 8, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span className={`badge ${builtStories.length > 0 ? 'ok' : 'muted'}`}>{builtStories.length} built stor{builtStories.length === 1 ? 'y' : 'ies'}</span>
+          <span className="muted" style={{ fontSize: 12 }}>{stories.length - builtStories.length} not built yet</span>
+        </div>
+        <p className="hint" style={{ marginTop: 6 }}>
+          The reasoning verifier reads the committed code and each built story&apos;s spec (features · NFRs · rules), reports PASS/FAIL per item (grounded, never fabricated), and drafts a concrete improvement for anything that falls short.
+        </p>
+        <div className="row" style={{ gap: 10, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button className="btn" disabled={verifying || builtStories.length === 0} onClick={verifyAndImprove} title={builtStories.length === 0 ? 'Build a story first' : 'Verify each built story vs its spec and draft refinements'}>
+            {verifying ? <span className="spin" /> : 'Verify & Improve'}
+          </button>
+          {improvements.length > 0 ? (
+            <span className="badge muted" title="Findings render below as refinement cards">{improvements.length} refinement{improvements.length === 1 ? '' : 's'} below</span>
+          ) : null}
+        </div>
+        {verifyMsg ? <div className={verifyMsg.startsWith('✓') ? 'answer' : 'error'} style={{ marginTop: 10 }}>{verifyMsg}</div> : null}
+        <p className="hint" style={{ marginTop: 8 }}>
+          Refinements land as reviewable to-dos — nothing auto-runs. A missed spec item becomes a <strong>rebuild</strong> (standard model); feedback that changes the requirement is routed to <strong>Design</strong> first.
+        </p>
+      </div>
+
+      {/* The findings, right here as refinement cards (Proposed) — the SAME lifecycle list
+          shown in Design/Build, so a finding's dimension + target story + state is legible
+          the moment it's flagged. Read-only in Test: you act on them in Design / Build. */}
+      {improvements.length > 0 ? (
+        <div className="grant-block" style={{ marginBottom: 12 }}>
+          <RefinementList
+            refinements={improvements}
+            storyTitle={storyTitleOf}
+            variant="test"
+            handlers={{ onDismiss: refineHandlers.onDismiss }}
+          />
+          <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            {refinementsToBuild(improvements).length > 0 ? (
+              <button className="btn ghost sm" onClick={onGoBuild} title="Act on the buildable refinements in Build">{refinementsToBuild(improvements).length} → Build</button>
+            ) : null}
+            {refinementsToDesign(improvements).length > 0 ? (
+              <button className="btn ghost sm" onClick={onGoDesign} title="Design the scope-changing refinements first">{refinementsToDesign(improvements).length} → Design</button>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
-      {/* ── Deployed build: the exact image the runner serves (secondary, slower) ── */}
       {surface.ui ? <div className="comp-label" style={{ marginBottom: 6 }}>Deployed build · exactly what ships</div> : null}
       <div className="sw-monitor">
         <div className="sw-monitor-main">
@@ -1056,11 +1480,7 @@ function PreviewStage({
             active={pipe.active}
             done={pipe.done}
             ok={pipe.ok}
-            commentary={
-              pipe.done
-                ? pipe.ok ? 'Build & deploy complete.' : 'A build/deploy stage did not complete — see the marked stage.'
-                : 'Building & deploying…'
-            }
+            commentary={pipe.commentary}
           />
         </div>
 
@@ -1101,14 +1521,66 @@ function PreviewStage({
           </button>
         </div>
       ) : null}
+    </>
+  );
+
+  return (
+    <div {...anchorAttr(ANCHORS.software.test)}>
+      <StageConversation
+        context={
+          <>
+            <span className="sc-scope">Test</span>
+            <span className="badge muted" title="Verification runs on the reasoning model">Test · reasoning model</span>
+            <span className="sc-hint mono">{app.subdomain}</span>
+            <span className={`badge ${app.deploy.previewUrl ? 'ok' : 'muted'}`}>{app.deploy.previewUrl ? 'Preview running' : 'Runner pending'}</span>
+            <span className="sc-hint sc-spacer">Run the app, and LLM-test each built story against its Design spec.</span>
+          </>
+        }
+        structure={structure}
+        conversation={
+          <StageAssistantChat
+            appId={app.id}
+            stage="test"
+            intro="Verify the built stories against their spec, give feedback, or ask why the pod isn't ready. Improvements become Build to-dos."
+            starters={['Verify the built stories against their spec', 'Why is the pod not ready?']}
+            onApplyImprovements={onAddImprovements}
+          />
+        }
+        outcome={
+          surface.ui ? (
+            <div className="grant-block">
+              <div className="comp-label">Preview · live data</div>
+              {app.deploy.previewUrl ? (
+                <>
+                  <p className="hint" style={{ marginTop: 4, marginBottom: 10 }}>
+                    The deployed build served by the runner, calling the governed OS API as you —
+                    real granted data, or a real error.
+                  </p>
+                  <iframe
+                    title="App preview"
+                    src={app.deploy.previewUrl}
+                    style={{ width: '100%', height: 420, border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--bg)' }}
+                  />
+                  <a href={app.deploy.previewUrl} target="_blank" rel="noreferrer" className="sw-quiet-link" style={{ fontSize: 12, display: 'inline-block', marginTop: 8 }}>Open app UI ↗</a>
+                </>
+              ) : (
+                <p className="hint" style={{ marginTop: 4 }}>
+                  No live preview yet — provision a runner above. The URL appears once the pod is
+                  ready; this shows the real deployed app, never a mock.
+                </p>
+              )}
+            </div>
+          ) : undefined
+        }
+      />
     </div>
   );
 }
 
-/* ─────────────────────────── Operate (merged Publish + Operate) ─────────────────────────── */
+/* ─────────────────────────── Publish (replaces Operate) ─────────────────────────── */
 
-function OperateStage({
-  app, surface, user, connTools, reviewCard,
+function PublishStage({
+  app, surface, user, pipe, connTools, reviewCard,
   publishLabel, publishDisabled, inReview, onPublish, deployMsg,
   toolOut, toolNote, onCallTool, onOpenRepo,
   canPromoteUI, onPromote, canDemoteUI, demoteLabel, confirmDemoteLabel,
@@ -1117,6 +1589,7 @@ function OperateStage({
   app: SoftwareApp;
   surface: { ui: boolean; api: boolean };
   user: { id: string; role: SessionRole };
+  pipe: PipelineView;
   connTools: Tool[];
   reviewCard: ReviewCardData | null;
   publishLabel: string;
@@ -1142,8 +1615,12 @@ function OperateStage({
 }) {
   const version = app.deploy.releases > 0 ? `v${app.deploy.releases}` : 'Unpublished';
   const dep = deployBadge(app.deploy.state);
-  return (
-    <div style={{ marginTop: 4 }}>
+
+  // Structure — the governed control surface for the deployed app: publish a release, the
+  // in-review card, and the promotion + lifecycle rungs. These are the direct-manipulation
+  // controls the conversation reasons about (justify go-live, triage a finding).
+  const structure = (
+    <>
       {/* ── Publish a release (merged from the old Publish stage) ── */}
       <div className="sw-publish">
         <div className="sw-publish-row">
@@ -1184,51 +1661,6 @@ function OperateStage({
         </div>
       ) : null}
 
-      {/* ── Live pod state ── */}
-      <div className="sw-monitor" style={{ marginTop: 16 }}>
-        <div className="sw-monitor-main">
-          <div className="sw-monitor-status">
-            <span className={`sw-dot ${app.deploy.state === 'live' ? 'on' : 'off'}`} aria-hidden="true" />
-            <div>
-              <div className="sw-monitor-state">{dep.label} · {version}</div>
-              <div className="sw-monitor-sub mono">{app.subdomain}</div>
-            </div>
-          </div>
-          <div className="row" style={{ gap: 8, alignItems: 'center', flexShrink: 0 }}>
-            {surface.ui && app.deploy.previewUrl ? (
-              <a href={app.deploy.previewUrl} target="_blank" rel="noreferrer" className="btn">Open app UI ↗</a>
-            ) : null}
-            {app.repo.fullName ? <button type="button" className="btn ghost" onClick={onOpenRepo}>Repo →</button> : null}
-          </div>
-        </div>
-      </div>
-
-      {/* ── Governed tool-call surface ── */}
-      {surface.api ? (
-        <div className="sw-api" style={{ marginTop: 12 }}>
-          <div className="hint" style={{ marginTop: 0, marginBottom: 8 }}>
-            The app’s capabilities as governed MCP tools (principal <span className="mono">{app.mcpPrincipal}</span>). Every call runs AS you, OPA-checked and audit-traced.
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Tool</th><th>Kind</th><th>Description</th><th /></tr></thead>
-              <tbody>
-                {connTools.map((t) => (
-                  <tr key={t.name}>
-                    <td className="mono">{t.name}</td>
-                    <td><span className={`badge ${t.write ? 'warn' : 'ok'}`}>{t.write ? 'write' : 'read'}</span></td>
-                    <td className="muted">{t.description}</td>
-                    <td><button className="btn ghost sm" onClick={() => onCallTool(t.name)}>Call</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {toolNote ? <div className="hint" style={{ marginTop: 10 }}>⚠ {toolNote}</div> : null}
-          {toolOut ? <pre className="answer mono" style={{ marginTop: 10, fontSize: 12, whiteSpace: 'pre-wrap' }}>{toolOut}</pre> : null}
-        </div>
-      ) : null}
-
       {/* ── Promotion + lifecycle ── */}
       <div className="section-title">Promotion ladder</div>
       <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
@@ -1266,6 +1698,93 @@ function OperateStage({
         <span className={`badge ${app.status === 'active' ? 'ok' : 'muted'}`}>{app.status}</span>
       </div>
       {msg ? <div className={msg.startsWith('✓') ? 'answer' : 'error'} style={{ marginTop: 12 }}>{msg}</div> : null}
+    </>
+  );
+
+  return (
+    <div {...anchorAttr(ANCHORS.software.publish)}>
+      <StageConversation
+        context={
+          <>
+            <span className="sc-scope">Publish</span>
+            <span className={dep.cls}>{dep.label}</span>
+            <span className="badge muted">{version}</span>
+            <span className="sc-hint mono">{app.subdomain}</span>
+            <span className="sc-hint sc-spacer">Publish, promote and run the live app — the conversation helps justify go-live &amp; triage it.</span>
+          </>
+        }
+        structure={structure}
+        conversation={
+          <StageAssistantChat
+            appId={app.id}
+            stage="publish"
+            intro="Explain scan findings, justify go-live, or triage the live app."
+            starters={['Justify going live', 'Triage the live app']}
+          />
+        }
+        outcome={
+          <>
+            {/* ── Live pod state — the deployed app, with its direct links ── */}
+            <div className="sw-monitor">
+              <div className="sw-monitor-main">
+                <div className="sw-monitor-status">
+                  <span className={`sw-dot ${app.deploy.state === 'live' ? 'on' : 'off'}`} aria-hidden="true" />
+                  <div>
+                    <div className="sw-monitor-state">{dep.label} · {version}</div>
+                    <div className="sw-monitor-sub mono">{app.subdomain}</div>
+                  </div>
+                </div>
+                <div className="row" style={{ gap: 8, alignItems: 'center', flexShrink: 0 }}>
+                  {surface.ui && app.deploy.previewUrl ? (
+                    <a href={app.deploy.previewUrl} target="_blank" rel="noreferrer" className="btn">Open app UI ↗</a>
+                  ) : null}
+                  {app.repo.fullName ? <button type="button" className="btn ghost" onClick={onOpenRepo}>Repo →</button> : null}
+                </div>
+              </div>
+
+              {/* ── Live DEPLOY stepper — the SAME shared pipeline-view derivation Test reads,
+                   rendered on the core ProgressStepper so a deploy/go-live is VISIBLE as it
+                   runs (Scaffold → Build image → Registry → Deploy → Live), never a silent
+                   badge flip. A real failure surfaces the marked stage here too. ── */}
+              <div className="sw-health">
+                <ProgressStepper
+                  steps={pipe.steps}
+                  active={pipe.active}
+                  done={pipe.done}
+                  ok={pipe.ok}
+                  commentary={pipe.commentary}
+                />
+              </div>
+            </div>
+
+            {/* ── Governed tool-call surface — the app's MCP capabilities + real call output ── */}
+            {surface.api ? (
+              <div className="sw-api" style={{ marginTop: 12 }}>
+                <div className="hint" style={{ marginTop: 0, marginBottom: 8 }}>
+                  The app’s capabilities as governed MCP tools (principal <span className="mono">{app.mcpPrincipal}</span>). Every call runs AS you, OPA-checked and audit-traced.
+                </div>
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr><th>Tool</th><th>Kind</th><th>Description</th><th /></tr></thead>
+                    <tbody>
+                      {connTools.map((t) => (
+                        <tr key={t.name}>
+                          <td className="mono">{t.name}</td>
+                          <td><span className={`badge ${t.write ? 'warn' : 'ok'}`}>{t.write ? 'write' : 'read'}</span></td>
+                          <td className="muted">{t.description}</td>
+                          <td><button className="btn ghost sm" onClick={() => onCallTool(t.name)}>Call</button></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {toolNote ? <div className="hint" style={{ marginTop: 10 }}>⚠ {toolNote}</div> : null}
+                {toolOut ? <pre className="answer mono" style={{ marginTop: 10, fontSize: 12, whiteSpace: 'pre-wrap' }}>{toolOut}</pre> : null}
+              </div>
+            ) : null}
+          </>
+        }
+      />
     </div>
   );
 }

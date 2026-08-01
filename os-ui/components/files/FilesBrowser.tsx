@@ -8,7 +8,7 @@ import { useSearchParams } from 'next/navigation';
 import { useUser } from '@/lib/useUser';
 import { roleAtLeast } from '@/lib/core/session';
 import { anchorAttr, ANCHORS } from '@/lib/tutorials';
-import { SCOPE_GROUPS, groupByScope, scopeCounts, type ScopeKey } from '@/lib/core/scopes';
+import { SCOPE_GROUPS, groupByScope, scopeCounts, rootsForScope, type ScopeKey, type FolderRoot } from '@/lib/core/scopes';
 import {
   itemsUnderFolder,
   normaliseFolderPath,
@@ -16,9 +16,13 @@ import {
   type FolderPathNode,
 } from '@/lib/core/folders';
 import FolderTree, { FolderPickerModal, type FolderRef } from '@/components/core/FolderTree';
+import FolderLayout from '@/components/core/FolderLayout';
 import { ensureFolderId, renamedPath } from '@/lib/folders/client';
+import { useFolders } from '@/lib/folders/useFolders';
 import { ConfirmProvider, useConfirm } from '@/components/lifecycle/ConfirmDialog';
 import { archiveFolderCopy, deleteFolderCopy } from '@/lib/core/lifecycle';
+import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
+import { uploadRawFile } from '@/lib/files/upload-client';
 import FilePreview from './FilePreview';
 
 type Summary = {
@@ -26,6 +30,8 @@ type Summary = {
   tier: 'dataset' | 'asset' | 'product'; kind: 'doc' | 'image' | 'video' | 'audio' | 'table' | 'archive' | 'other';
   folder: string; tags: string[]; sensitivity: string; freshness: string | null;
   version: string; status: 'processing' | 'searchable' | 'stored'; bytes: number;
+  /** Original bytes render inline → the tile shows a thumbnail via /raw. */
+  hasPreview?: boolean;
   /** Soft-archived (retained, reversible). Absent/false = live. */
   archived?: boolean;
 };
@@ -33,7 +39,30 @@ type Facets = { folders: { path: string; count: number }[]; tags: { tag: string;
 type Groups = { mine: Summary[]; domain: Summary[]; marketplace: Summary[]; facets: Facets };
 type Hit = { id: string; name: string; folder: string; tags: string[]; kind: Summary['kind']; score: number; snippet: string };
 
-const KIND_LABEL: Record<Summary['kind'], string> = { doc: 'DOC', image: 'IMG', audio: 'AUD', video: 'VID', table: 'TAB', archive: 'ZIP', other: 'FILE' };
+/** Display kind: PDFs are stored as `kind: 'doc'`, but a PDF deserves its own badge so
+ *  it reads as distinct from a generic text doc. Detect by contentType if the summary
+ *  ever carries it, else by a `.pdf` name suffix (the only signal the list summary has
+ *  today). Everything else falls through to the stored kind. */
+type BadgeKind = Summary['kind'] | 'pdf';
+function badgeKind(f: Pick<Summary, 'kind' | 'name'> & { contentType?: string }): BadgeKind {
+  const isPdf = f.contentType === 'application/pdf' || /\.pdf$/i.test(f.name);
+  return isPdf ? 'pdf' : f.kind;
+}
+
+const KIND_LABEL: Record<BadgeKind, string> = { doc: 'DOC', pdf: 'PDF', image: 'IMG', audio: 'AUD', video: 'VID', table: 'TAB', archive: 'ZIP', other: 'FILE' };
+
+type ViewMode = 'grid' | 'list';
+type SortKey = 'name' | 'updated' | 'size' | 'type';
+const VIEW_KEY = 'soa.files.view';
+
+/** Per-file upload progress row shown while a batch is in flight / after it settles. */
+type UploadItem = {
+  name: string;
+  /** 0–100 while uploading; final rows carry done/error. */
+  pct: number;
+  state: 'uploading' | 'done' | 'error';
+  error?: string;
+};
 
 function bytesLabel(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -45,6 +74,26 @@ function StatusChip({ s }: { s: Summary['status'] }) {
   const cls = s === 'stored' ? 's-stored' : s === 'processing' ? 's-processing' : 's-searchable';
   const label = s === 'stored' ? 'Stored' : s === 'processing' ? 'Processing…' : 'Searchable ✓';
   return <span className={`status-chip ${cls}`}>{label}</span>;
+}
+
+/** The visual anchor of a tile: an inline thumbnail for renderable files (image via
+ *  /raw), else a big colored per-kind badge built from the existing kind-* tokens.
+ *  No icon library — the OS uses text + color only. */
+function FileThumb({ f }: { f: Summary }) {
+  if (f.hasPreview && f.kind === 'image') {
+    return (
+      <div className="file-thumb">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img className="file-thumb-img" src={`/api/files/${f.id}/raw`} alt="" loading="lazy" />
+      </div>
+    );
+  }
+  const bk = badgeKind(f);
+  return (
+    <div className={`file-thumb file-badge kind-${bk}`}>
+      <span className="file-badge-label">{KIND_LABEL[bk]}</span>
+    </div>
+  );
 }
 
 function FileCard({
@@ -66,9 +115,9 @@ function FileCard({
             onChange={(e) => onPick(e.target.checked)}
           />
         ) : null}
-        <span className={`kind-chip kind-${f.kind}`}>{KIND_LABEL[f.kind]}</span>
         <StatusChip s={f.status} />
       </div>
+      <FileThumb f={f} />
       <span className="file-name">{f.name}</span>
       <span className="file-sub">{f.owner} · {f.version} · {bytesLabel(f.bytes)}</span>
       {f.tags.length > 0 ? (
@@ -78,23 +127,50 @@ function FileCard({
   );
 }
 
+/** A dense, scannable list row — one line per file (name · type · size · status). The
+ *  list view is far easier to scan for a drive with many docs/CSVs than the tile grid. */
+function FileRow({
+  f, on, onOpen, picked, onPick,
+}: {
+  f: Summary; on: boolean; onOpen: () => void;
+  picked?: boolean; onPick?: (checked: boolean) => void;
+}) {
+  return (
+    <button type="button" className={`file-row${on ? ' on' : ''}${picked ? ' picked' : ''}`} onClick={onOpen}>
+      {onPick ? (
+        <input
+          type="checkbox" className="file-pick" aria-label={`Select ${f.name}`}
+          checked={!!picked}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => onPick(e.target.checked)}
+        />
+      ) : null}
+      <span className={`kind-chip kind-${badgeKind(f)}`}>{KIND_LABEL[badgeKind(f)]}</span>
+      <span className="file-row-name">{f.name}</span>
+      <span className="file-row-meta">{bytesLabel(f.bytes)}</span>
+      <StatusChip s={f.status} />
+    </button>
+  );
+}
+
 /** Which folder ROOT a file's folders live in — its private tree (dataset) or the
  *  domain tree (shared/certified). Mirrors how the store groups by tier. */
-type FolderRoot = 'personal' | 'domain';
 function rootOf(f: Summary): FolderRoot {
   return f.tier === 'dataset' ? 'personal' : 'domain';
 }
 
-/** Which folder roots to show in the rail + picker for each scope tab.
- *  - mine       → personal only (dataset-tier files)
- *  - shared     → domain only (asset/product-tier files)
- *  - marketplace → domain only (product-tier files)
- *  - all        → both (keep the current behaviour for the All view) */
-function rootsForScope(scope: ScopeKey): FolderRoot[] {
-  if (scope === 'mine') return ['personal'];
-  if (scope === 'shared' || scope === 'marketplace') return ['domain'];
-  return ['personal', 'domain'];
+/** The edit-scope tier of a file — mirrors FilePreview so bulk actions gate exactly
+ *  like the single-file detail view. */
+function scopeOf(f: Summary): ArtifactScope {
+  return f.tier === 'dataset' ? 'personal' : f.tier === 'product' ? 'certified' : 'shared';
 }
+type ManageUser = { id: string; role: Parameters<typeof canManageArtifact>[0]['role']; domains: string[] };
+/** Can this user manage (archive/move) the file? Same fail-closed rule the server + the
+ *  detail view use — never bulk-mutate something the user couldn't touch one-by-one. */
+function canManageFile(u: ManageUser | null, f: Summary): boolean {
+  return u ? canManageArtifact(u, { owner: f.owner, domain: f.domain, scope: scopeOf(f) }) : false;
+}
+
 
 function FilesBrowserInner() {
   const { user } = useUser();
@@ -107,15 +183,18 @@ function FilesBrowserInner() {
   const [sel, setSel] = useState<{ root: FolderRoot; path: string } | null>(null);
   const [tag, setTag] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  // Explicit folder rows from the governed registry (Wave 1), per root. Unioned
-  // with folders synthesised from the file facets so implicit folders keep showing.
-  const [personalNodes, setPersonalNodes] = useState<FolderPathNode[]>([]);
-  const [domainNodes, setDomainNodes] = useState<FolderPathNode[]>([]);
-  // Multi-select in the grid → bulk "Move to folder…".
+  // Multi-select in the grid → bulk "Move to folder…" / Promote / Archive.
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  // A bulk op is running (disable the bar + show a spinner); a concise result notice
+  // ("N requested / K failed / S skipped") shown until the next selection change.
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkNotice, setBulkNotice] = useState('');
   // ?archived=1 additionally returns soft-archived files (their own section), so an
   // archived file stays openable → its preview exposes Restore + Delete (OS-wide rule).
   const [showArchived, setShowArchived] = useState(false);
+  // Explicit folder rows from the governed registry (Wave 1), per root. Unioned
+  // with folders synthesised from the file facets so implicit folders keep showing.
+  const { personalNodes, domainNodes, loadFolders } = useFolders('files', showArchived);
   // Folder picker modal: which file ids are being moved; null = closed.
   const [pickerIds, setPickerIds] = useState<string[] | null>(null);
   // Folder lifecycle: folder being moved (opens a second picker); null = closed.
@@ -127,9 +206,26 @@ function FilesBrowserInner() {
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<Hit[] | null>(null);
 
+  // view mode (grid|list) + sort. The view choice is remembered across sessions.
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [sortKey, setSortKey] = useState<SortKey>('updated');
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(VIEW_KEY);
+      if (v === 'grid' || v === 'list') setViewMode(v);
+    } catch { /* private mode / no storage — grid default is fine */ }
+  }, []);
+  const chooseView = useCallback((v: ViewMode) => {
+    setViewMode(v);
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ }
+  }, []);
+
   // upload / drag-drop
   const [drag, setDrag] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Per-file upload progress rows + whether a batch is currently in flight.
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [uploading, setUploading] = useState(false);
 
   // ?focus=<fileId> deep-link: once groups load, select and preview the target file.
   // We switch to 'all' scope so the item is visible regardless of which scope owns it.
@@ -147,18 +243,6 @@ function FilesBrowserInner() {
     setTag(null);
     setSelected(focusId);
   }, [focusId, groups]);
-
-  const loadFolders = useCallback(async () => {
-    const archivedParam = showArchived ? '&archived=1' : '';
-    try {
-      const [pRes, dRes] = await Promise.all([
-        fetch(`/api/folders?tab=files&scope=personal${archivedParam}`, { cache: 'no-store' }),
-        fetch(`/api/folders?tab=files&scope=domain${archivedParam}`, { cache: 'no-store' }),
-      ]);
-      if (pRes.ok) setPersonalNodes(((await pRes.json()).folders ?? []) as FolderPathNode[]);
-      if (dRes.ok) setDomainNodes(((await dRes.json()).folders ?? []) as FolderPathNode[]);
-    } catch { /* the facet-synthesised rail still renders without the registry */ }
-  }, [showArchived]);
 
   const refresh = useCallback(async () => {
     setErr('');
@@ -187,28 +271,42 @@ function FilesBrowserInner() {
   }, [query]);
 
   const upload = useCallback(async (files: FileList | File[]) => {
+    // Snapshot the selection immediately (the file input resets right after) and
+    // upload every file sequentially — no file is skipped.
+    const batch = Array.from(files);
+    if (batch.length === 0) return;
     setErr('');
-    for (const file of Array.from(files)) {
-      // Send the ORIGINAL bytes (multipart) so the file is stored and downloadable
-      // byte-for-byte — the server extracts text from text-like files for search.
-      const form = new FormData();
-      form.append('file', file);
-      form.append('name', file.name);
-      // Upload into the selected folder (personal-root selections only — a new
-      // upload starts private; a domain-folder selection falls back to the root).
-      form.append('folder', sel && sel.root === 'personal' ? sel.path : '/');
-      try {
-        const res = await fetch('/api/files', { method: 'POST', body: form });
-        if (!res.ok) { setErr((await res.json()).error ?? 'Upload failed'); }
-      } catch (e) { setErr((e as Error).message); }
+    setUploading(true);
+    // Seed one progress row per file up front so the whole batch is visible.
+    setUploads(batch.map((f) => ({ name: f.name, pct: 0, state: 'uploading' as const })));
+    const folder = sel && sel.root === 'personal' ? sel.path : '/';
+
+    let ok = 0;
+    const failures: string[] = [];
+    for (let i = 0; i < batch.length; i++) {
+      const err = await uploadRawFile(batch[i], folder, (pct) =>
+        setUploads((cur) => cur.map((u, idx) => (idx === i ? { ...u, pct } : u))));
+      setUploads((cur) => cur.map((u, idx) =>
+        idx === i ? { ...u, pct: err ? u.pct : 100, state: err ? 'error' : 'done', error: err ?? undefined } : u));
+      if (err) failures.push(err); else ok += 1;
     }
+
+    setUploading(false);
+    // One clear batch summary (kept in the error strip when anything failed).
+    if (failures.length > 0) {
+      setErr(`${ok} uploaded, ${failures.length} failed: ${failures.join('; ')}`);
+    }
+    // Clear the transient progress rows shortly after a fully-clean batch; keep them
+    // visible when something failed so the user can read what went wrong.
+    if (failures.length === 0) setTimeout(() => setUploads([]), 1500);
     refresh();
   }, [sel, refresh]);
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault(); setDrag(false);
+    if (uploading) return; // a batch is in flight — ignore the drop rather than clobber it
     if (e.dataTransfer.files?.length) upload(e.dataTransfer.files);
-  }, [upload]);
+  }, [upload, uploading]);
 
   // Create a folder row in the registry, then re-load the rail. New-folder + the
   // ••• "Move folder" both live on the FolderTree; move-folder reuses create-at-path.
@@ -247,6 +345,64 @@ function FilesBrowserInner() {
     if (ids.length === 0) return;
     setPickerIds(ids);
   }, []);
+
+  // Bulk PROMOTE — files the user selected. Reuses the SAME per-file promote endpoint
+  // the detail view uses (POST /api/files/{id}/promote), so governance is identical:
+  // the server files a promotion REQUEST for each (a domain admin still approves). Only
+  // personal-tier (dataset) files the user can manage are promotable; the rest are
+  // reported as skipped. Result summary: "N requested / K failed / S skipped".
+  const bulkPromote = useCallback(async (files: Summary[]) => {
+    const mu = user ? { id: user.id, role: user.role, domains: user.domains } : null;
+    const eligible = files.filter((f) => f.tier === 'dataset' && canManageFile(mu, f));
+    const skipped = files.length - eligible.length;
+    if (eligible.length === 0) {
+      setBulkNotice(`Nothing to promote — ${skipped} not promotable.`);
+      return;
+    }
+    setBulkBusy(true); setBulkNotice(''); setErr('');
+    let requested = 0; let failed = 0;
+    for (const f of eligible) {
+      try {
+        const res = await fetch(`/api/files/${f.id}/promote`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        });
+        if (res.ok) requested += 1; else failed += 1;
+      } catch { failed += 1; }
+    }
+    setBulkBusy(false);
+    setPicked(new Set());
+    setBulkNotice(`${requested} requested${failed ? ` · ${failed} failed` : ''}${skipped ? ` · ${skipped} skipped` : ''}. A domain admin approves each.`);
+    refresh();
+  }, [user, refresh]);
+
+  // Bulk ARCHIVE — reuses the SAME archive path the single-file LifecycleActions uses
+  // (POST /api/files/{id} {action:'archive'}), per id. Confirmed once via the shared
+  // ConfirmDialog (a multi-item lifecycle action). Only files the user can manage are
+  // attempted; the rest are reported as skipped.
+  const bulkArchive = useCallback(async (files: Summary[]) => {
+    const mu = user ? { id: user.id, role: user.role, domains: user.domains } : null;
+    const eligible = files.filter((f) => canManageFile(mu, f));
+    const skipped = files.length - eligible.length;
+    if (eligible.length === 0) {
+      setBulkNotice(`Nothing to archive — ${skipped} not yours to manage.`);
+      return;
+    }
+    if (!await confirm(archiveFolderCopy(`${eligible.length} file${eligible.length > 1 ? 's' : ''}`, eligible.length))) return;
+    setBulkBusy(true); setBulkNotice(''); setErr('');
+    let archived = 0; let failed = 0;
+    for (const f of eligible) {
+      try {
+        const res = await fetch(`/api/files/${f.id}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'archive' }),
+        });
+        if (res.ok) archived += 1; else failed += 1;
+      } catch { failed += 1; }
+    }
+    setBulkBusy(false);
+    setPicked(new Set());
+    setBulkNotice(`${archived} archived${failed ? ` · ${failed} failed` : ''}${skipped ? ` · ${skipped} skipped` : ''}.`);
+    refresh();
+  }, [user, confirm, refresh]);
 
   const uid = user?.id ?? '';
   const scoped = groups ? groupByScope(groups, uid) : null;
@@ -294,9 +450,77 @@ function FilesBrowserInner() {
     ? itemsUnderFolder(sel.path, list.filter((f) => rootOf(f) === sel.root))
     : list;
   const matched = inFolder.filter((f) => (!tag || f.tags.includes(tag)));
-  const filtered = matched.filter((f) => !f.archived);
-  const archivedFiles = matched.filter((f) => f.archived);
+  // Sort the visible files by the chosen key (name/updated/size/type). `updated`
+  // uses freshness (newest first); the rest are stable ascending.
+  const sortFiles = useCallback((rows: Summary[]): Summary[] => {
+    const by = [...rows];
+    by.sort((x, y) => {
+      switch (sortKey) {
+        case 'name': return x.name.localeCompare(y.name);
+        case 'size': return y.bytes - x.bytes;
+        case 'type': return x.kind.localeCompare(y.kind) || x.name.localeCompare(y.name);
+        case 'updated':
+        default: return (y.freshness ?? '').localeCompare(x.freshness ?? '');
+      }
+    });
+    return by;
+  }, [sortKey]);
+  const filtered = sortFiles(matched.filter((f) => !f.archived));
+  const archivedFiles = sortFiles(matched.filter((f) => f.archived));
   const searching = query.trim().length > 0;
+
+  // Bulk selection helpers: the ticked files (resolved to their Summary from the visible
+  // set) and whether the whole current view is already selected (drives the Select-all
+  // toggle label + its checkbox state).
+  const pickedFiles = filtered.filter((f) => picked.has(f.id));
+  const allInViewPicked = filtered.length > 0 && filtered.every((f) => picked.has(f.id));
+
+  // Resolve search hits to their full Summary (from any scope) so results render with
+  // the SAME tile/row as browse. Hit order (relevance) is preserved; a hit not in the
+  // loaded list falls back to a minimal Summary so it still renders + opens.
+  const hitFiles: Summary[] = useMemo(() => {
+    if (!hits) return [];
+    const all = groups ? [...groups.mine, ...groups.domain, ...groups.marketplace] : [];
+    const byId = new Map(all.map((f) => [f.id, f]));
+    return hits.map((h) => byId.get(h.id) ?? ({
+      id: h.id, name: h.name, owner: '', domain: '', tier: 'dataset',
+      kind: h.kind, folder: h.folder, tags: h.tags, sensitivity: 'internal',
+      freshness: null, version: 'v1', status: 'searchable', bytes: 0,
+    } as Summary));
+  }, [hits, groups]);
+
+  // One collection renderer for grid AND list, reused by the main list, the archived
+  // section, and search results — so the whole tab shares one visual language.
+  // `withPick` wires the multi-select checkbox (only the live main list needs it).
+  const renderCollection = (rows: Summary[], withPick: boolean) => {
+    const pickProps = (f: Summary) =>
+      withPick
+        ? {
+            picked: picked.has(f.id),
+            onPick: (checked: boolean) => setPicked((cur) => {
+              const next = new Set(cur);
+              if (checked) next.add(f.id); else next.delete(f.id);
+              return next;
+            }),
+          }
+        : {};
+    if (viewMode === 'list') {
+      return (
+        <div className="file-list">
+          {rows.map((f) => (
+            <FileRow key={f.id} f={f} on={selected === f.id} onOpen={() => setSelected(f.id)} {...pickProps(f)} />
+          ))}
+        </div>
+      );
+    }
+    return (
+      <div className="file-grid">
+        {rows.map((f) => (
+          <FileCard key={f.id} f={f} on={selected === f.id} onOpen={() => setSelected(f.id)} {...pickProps(f)} />
+        ))}
+      </div>
+    );
+  };
 
   return (
     <>
@@ -316,6 +540,21 @@ function FilesBrowserInner() {
             onChange={(e) => setQuery(e.target.value)} aria-label="Search files" />
           {searching ? <button className="preview-close" onClick={() => setQuery('')} aria-label="Clear">×</button> : null}
         </div>
+        {!searching ? (
+          <>
+            <select className="files-sort" value={sortKey} aria-label="Sort files"
+              onChange={(e) => setSortKey(e.target.value as SortKey)} title="Sort files">
+              <option value="updated">Updated</option>
+              <option value="name">Name</option>
+              <option value="size">Size</option>
+              <option value="type">Type</option>
+            </select>
+            <div className="files-viewtoggle" role="group" aria-label="View mode">
+              <button className={viewMode === 'grid' ? 'on' : ''} onClick={() => chooseView('grid')} title="Grid view" aria-pressed={viewMode === 'grid'}>Grid</button>
+              <button className={viewMode === 'list' ? 'on' : ''} onClick={() => chooseView('list')} title="List view" aria-pressed={viewMode === 'list'}>List</button>
+            </div>
+          </>
+        ) : null}
         <button
           className="btn ghost"
           style={{ opacity: 1 }}
@@ -324,12 +563,37 @@ function FilesBrowserInner() {
         >
           {showArchived ? 'Hide archived' : 'Show archived'}
         </button>
-        <button className="btn" onClick={() => fileRef.current?.click()} {...anchorAttr(ANCHORS.files.upload)}>Upload</button>
+        <button className="btn" onClick={() => fileRef.current?.click()} disabled={uploading}
+          aria-busy={uploading} {...anchorAttr(ANCHORS.files.upload)}>
+          {uploading ? <><span className="spin" /> Uploading…</> : 'Upload'}
+        </button>
         <input ref={fileRef} type="file" multiple hidden
-          onChange={(e) => { if (e.target.files?.length) upload(e.target.files); e.target.value = ''; }} />
+          onChange={(e) => { if (!uploading && e.target.files?.length) upload(e.target.files); e.target.value = ''; }} />
       </div>
 
       {err ? <div className="error" style={{ marginBottom: 14 }}>{err}</div> : null}
+
+      {/* Upload progress — one calm row per file (name · % · bar), plus a batch header.
+          Errors stay visible; a clean batch clears itself shortly after. */}
+      {uploads.length > 0 ? (
+        <div className="upload-tray">
+          <div className="upload-tray-head">
+            {uploading
+              ? `Uploading ${uploads.length} file${uploads.length > 1 ? 's' : ''}…`
+              : `${uploads.filter((u) => u.state === 'done').length} of ${uploads.length} uploaded`}
+          </div>
+          {uploads.map((u, i) => (
+            <div key={`${u.name}-${i}`} className={`upload-row upload-${u.state}`}>
+              <span className="upload-name" title={u.name}>{u.name}</span>
+              <span className="upload-pct">
+                {u.state === 'error' ? 'Failed' : u.state === 'done' ? 'Done ✓' : `${u.pct}%`}
+              </span>
+              <div className="upload-bar"><div className="upload-bar-fill" style={{ width: `${u.state === 'error' ? 100 : u.pct}%` }} /></div>
+              {u.error ? <span className="upload-err">{u.error}</span> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <FolderPickerModal
         open={pickerIds !== null}
@@ -389,13 +653,17 @@ function FilesBrowserInner() {
         }}
       />
 
-      <div className={`files-layout${selected ? ' with-preview' : ''}`}>
-        {/* ---- folder rail + tag cloud (the owner's drive) ---- */}
-        <nav className="files-rail files-rail-tree">
-          <div>
-            <button className={`rail-item${sel === null ? ' on' : ''}`} onClick={() => setSel(null)}>
-              <span>All files</span><span className="rail-count">{list.length}</span>
-            </button>
+      <FolderLayout
+        allLabel="All files"
+        allCount={list.length}
+        allSelected={sel === null}
+        onSelectAll={() => setSel(null)}
+        mainClassName={`file-drop${drag ? ' drag' : ''}`}
+        onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+        onDragLeave={() => setDrag(false)}
+        onDrop={onDrop}
+        rail={
+          <>
             {/* The reusable Wave-1 folder tree (rail variant): the governed folder
                 registry UNIONed with folders synthesised from the visible files'
                 paths, so implicit folders keep showing with zero migration. The two
@@ -486,40 +754,28 @@ function FilesBrowserInner() {
                 })();
               }}
             />
-          </div>
-          {facets.tags.length > 0 ? (
-            <div>
-              <p className="rail-group-title">Tags</p>
-              <div className="rail-tags">
-                {facets.tags.map((t) => (
-                  <button key={t.tag} className={`chip${tag === t.tag ? ' on' : ''}`} style={{ cursor: 'pointer' }}
-                    onClick={() => setTag(tag === t.tag ? null : t.tag)}>{t.tag} · {t.count}</button>
-                ))}
+            {facets.tags.length > 0 ? (
+              <div>
+                <p className="rail-group-title">Tags</p>
+                <div className="rail-tags">
+                  {facets.tags.map((t) => (
+                    <button key={t.tag} className={`chip${tag === t.tag ? ' on' : ''}`} style={{ cursor: 'pointer' }}
+                      onClick={() => setTag(tag === t.tag ? null : t.tag)}>{t.tag} · {t.count}</button>
+                  ))}
+                </div>
               </div>
-            </div>
-          ) : null}
-        </nav>
-
+            ) : null}
+          </>
+        }
+      >
         {/* ---- main: search results OR the file grid ---- */}
-        <section className={`files-main file-drop${drag ? ' drag' : ''}`}
-          onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
-          onDragLeave={() => setDrag(false)} onDrop={onDrop}>
-          {searching ? (
+        {searching ? (
             <>
               <div className="section-title">Results<span className="count-pill">{hits?.length ?? 0}</span></div>
               {hits && hits.length === 0 ? <div className="stub-page">No files match “{query}”.</div> : null}
-              <div style={{ display: 'grid', gap: 10 }}>
-                {(hits ?? []).map((h) => (
-                  <button key={h.id} className="result" style={{ textAlign: 'left', cursor: 'pointer', width: '100%' }}
-                    onClick={() => setSelected(h.id)}>
-                    <div className="result-head">
-                      <h4><span className={`kind-chip kind-${h.kind}`}>{KIND_LABEL[h.kind]}</span> {h.name}</h4>
-                      <span className="score">{h.folder}</span>
-                    </div>
-                    {h.snippet ? <p className="result-text">{h.snippet}</p> : null}
-                  </button>
-                ))}
-              </div>
+              {/* Search results reuse the SAME tile/row as browse (resolved from the
+                  loaded scope list by id) so the tab reads as one product. */}
+              {renderCollection(hitFiles, false)}
             </>
           ) : (
             <>
@@ -533,27 +789,51 @@ function FilesBrowserInner() {
                 </div>
               ) : (
                 <>
-                  {/* Bulk actions — appear once ≥1 card is ticked. */}
-                  {picked.size > 0 ? (
-                    <div className="files-bulk">
-                      <span>{picked.size} selected</span>
-                      <button className="btn ghost sm" onClick={() => promptMove([...picked])}>Move to folder…</button>
-                      <button className="btn ghost sm" onClick={() => setPicked(new Set())}>Clear</button>
-                    </div>
-                  ) : null}
-                  <div className="file-grid">
-                    {filtered.map((f) => (
-                      <FileCard
-                        key={f.id} f={f} on={selected === f.id} onOpen={() => setSelected(f.id)}
-                        picked={picked.has(f.id)}
-                        onPick={(checked) => setPicked((cur) => {
+                  {/* Select-all: one click ticks (or clears) every file in the current
+                      view — the active scope + folder + tag filter (the `filtered` set). */}
+                  <div className="files-selectall">
+                    <label>
+                      <input
+                        type="checkbox" className="file-pick"
+                        checked={allInViewPicked}
+                        ref={(el) => { if (el) el.indeterminate = picked.size > 0 && !allInViewPicked; }}
+                        onChange={(e) => setPicked((cur) => {
                           const next = new Set(cur);
-                          if (checked) next.add(f.id); else next.delete(f.id);
+                          if (e.target.checked) for (const f of filtered) next.add(f.id);
+                          else for (const f of filtered) next.delete(f.id);
                           return next;
                         })}
+                        aria-label={allInViewPicked ? 'Deselect all files' : 'Select all files'}
                       />
-                    ))}
+                      {allInViewPicked ? 'Deselect all' : 'Select all'}
+                    </label>
                   </div>
+                  {/* Bulk actions — appear once ≥1 card is ticked. Promote + Archive reuse
+                      the same per-file governed endpoints the detail view uses. */}
+                  {picked.size > 0 ? (
+                    <div className="files-bulk" aria-busy={bulkBusy}>
+                      <span>{picked.size} selected</span>
+                      <button className="btn ghost sm" disabled={bulkBusy}
+                        onClick={() => promptMove([...picked])}>Move to folder…</button>
+                      <button className="btn ghost sm" disabled={bulkBusy}
+                        onClick={() => void bulkPromote(pickedFiles)}
+                        title="Propose sharing the selected files with your domain — a domain admin approves each">
+                        Promote to Domain →
+                      </button>
+                      <button className="btn ghost sm" disabled={bulkBusy}
+                        onClick={() => void bulkArchive(pickedFiles)}
+                        title="Archive the selected files (reversible)">
+                        Archive
+                      </button>
+                      <button className="btn ghost sm" disabled={bulkBusy}
+                        onClick={() => { setPicked(new Set()); setBulkNotice(''); }}>Clear</button>
+                      {bulkBusy ? <span className="file-sub"><span className="spin" /> Working…</span> : null}
+                      {bulkNotice ? <span className="file-sub">{bulkNotice}</span> : null}
+                    </div>
+                  ) : bulkNotice ? (
+                    <div className="files-bulk"><span className="file-sub">{bulkNotice}</span></div>
+                  ) : null}
+                  {renderCollection(filtered, true)}
                 </>
               )}
 
@@ -563,22 +843,18 @@ function FilesBrowserInner() {
                   <div className="section-title" style={{ marginTop: 24 }}>
                     Archived<span className="count-pill">{archivedFiles.length}</span>
                   </div>
-                  <div className="file-grid">
-                    {archivedFiles.map((f) => (
-                      <FileCard key={f.id} f={f} on={selected === f.id} onOpen={() => setSelected(f.id)} />
-                    ))}
-                  </div>
+                  {renderCollection(archivedFiles, false)}
                 </>
               ) : null}
             </>
           )}
-        </section>
+      </FolderLayout>
 
-        {/* ---- preview pane ---- */}
-        {selected ? (
-          <FilePreview id={selected} onMutated={refresh} onClose={() => setSelected(null)} />
-        ) : null}
-      </div>
+      {/* ---- Quick Look: a full-screen overlay over the (dimmed) grid. The file content
+              is the hero; governance lives in a disclosure below. ---- */}
+      {selected ? (
+        <FilePreview id={selected} onMutated={refresh} onClose={() => setSelected(null)} />
+      ) : null}
     </>
   );
 }

@@ -392,10 +392,18 @@ test('DEPLOY GATE: the seeded team never grants decide_deploy, and a creator is 
   const creatorTools = new Set(listToolsForRole('creator', toolsForTab('software')).map((t) => t.name));
   assert.ok(!creatorTools.has('decide_deploy'), 'a creator is never offered decide_deploy');
   assert.ok(creatorTools.has('request_deploy'), 'a creator CAN request a deploy');
-  assert.ok(creatorTools.has('create_software') && creatorTools.has('commit'), 'a creator can build');
-  // (c) A builder, by contrast, CAN decide — proving the floor is role-scoped.
+  // A creator builds via the STAGED governed flow (Design→Build→Test), not the raw
+  // `commit` — which is now Developer mode (Builder+). This is the design-before-build
+  // governance: a creator cannot bypass the staged gate by writing files directly.
+  assert.ok(
+    creatorTools.has('create_software') && creatorTools.has('design_software') && creatorTools.has('build_software'),
+    'a creator can build via the staged Define→Design→Build tools',
+  );
+  assert.ok(!creatorTools.has('commit'), 'a creator is NOT offered the raw commit (Developer mode is Builder+)');
+  // (c) A builder, by contrast, CAN decide AND use Developer-mode commit — proving the floor is role-scoped.
   const builderTools = new Set(listToolsForRole('builder', toolsForTab('software')).map((t) => t.name));
   assert.ok(builderTools.has('decide_deploy'), 'a builder CAN approve a deploy');
+  assert.ok(builderTools.has('commit'), 'a builder CAN use Developer-mode commit');
 });
 
 // --- FIX B (error vs denial): classify a step + reflect the right node status ---
@@ -547,4 +555,31 @@ test('a node failure still emits a terminal node-completed (never a silent stall
   assert.equal(completed!.node, firstNode);
   assert.equal(completed!.status, 'failed');
   assert.equal(res.runs.length, 1, 'the run stopped at the failing node');
+});
+
+test('global run budget clamps each node and stops the walk once spent', async () => {
+  // ACT always returns a UNIQUE tool call, so every node runs to its per-node cap
+  // (unique args dodge the repeated-call loop-breaker). With per-node 3 and a global
+  // budget of 4, node 1 spends 3, node 2 is clamped to the remaining 1, then the
+  // budget is spent and the walk stops — well before all 6 nodes run.
+  let n = 0;
+  const llm: LlmCall = async (req) => {
+    if (!req.tools) return { content: 'plan', toolCalls: [] };
+    n += 1;
+    return { content: '', toolCalls: [{ id: `c${n}`, name: 'query_metric', args: { n } }] };
+  };
+  const res = await runAgenticGraph(IR, [{ role: 'user', content: 'go' }], baseDeps({ llm, maxIterations: 3, maxRunSteps: 4 }));
+
+  assert.ok(res.runs.length < nodeOrder(IR).length, `stopped before every node ran (ran ${res.runs.length})`);
+  const totalRounds = res.runs.reduce((s, r) => s + r.result.iterations, 0);
+  assert.ok(totalRounds <= 4, `total rounds stayed within the global budget (got ${totalRounds})`);
+  assert.match(res.finalText, /tool-step budget/i, 'the reply notes the run stopped at the budget');
+});
+
+test('a generous global run budget runs the whole team with no early stop', async () => {
+  // Default script: every ACT returns "done" immediately, so each node finishes well
+  // under its per-node cap and the generous global budget is never reached.
+  const res = await runAgenticGraph(IR, [{ role: 'user', content: 'go' }], baseDeps({ maxIterations: 3, maxRunSteps: 1000 }));
+  assert.equal(res.runs.length, nodeOrder(IR).length, 'every node ran');
+  assert.doesNotMatch(res.finalText, /tool-step budget/i, 'no run-budget note when the team finishes');
 });

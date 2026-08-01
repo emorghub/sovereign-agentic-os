@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import BuildRunPanel from './BuildRunPanel';
 import RecurrenceEditor from './RecurrenceEditor';
-import type { System, SafetyPreset, DataLayer } from '@/lib/agents/system-schema';
+import type { System, SafetyPreset, DataLayer, DeclaredOutput, OutputKind } from '@/lib/agents/system-schema';
 import { classifyModelNeed } from '@/lib/agents/routing';
 import { instructionsOf } from '@/lib/agents/agent-md';
 import {
@@ -14,6 +14,7 @@ import {
   setAgentInstructions, setAgentRole, setArtifactGrant, removeArtifactGrant,
   setDescription, addSystemTool, setDataGrantLayer,
   setFolderGrant, removeFolderGrant, setArtifactGrantLevel, setFolderGrantLevel,
+  addOutput, removeOutput,
 } from '@/lib/agents/simple-edit';
 import {
   accessCap, allowedAccessLevels, capabilityToAccess, clampAccess,
@@ -29,8 +30,11 @@ import {
   type CapabilityChip,
 } from '@/lib/agents/capability-tools';
 import { setEntrypoint } from '@/lib/agents/canvas-edit';
+import { canSaveFromResult, DATA_NON_TABULAR_NOTE } from '@/lib/agents/output-save';
 import { AGENT_TEMPLATES, agentTemplate, type AgentTemplateKey } from '@/lib/agents/agent-templates';
 import StageShell from '@/components/core/StageShell';
+import { anchorAttr, ANCHORS } from '@/lib/tutorials/anchors';
+import { usePublishPageContext } from '@/components/core/PageContext';
 import {
   advance, goTo, initialStageState, isSatisfied, markDone,
   type StageDef, type StageState,
@@ -125,6 +129,17 @@ export default function SimpleBuilder({
   // rules are guaranteed by the shared stage model (lib/core/stages.ts).
   const [stage, setStage] = useState<StageState<Phase>>(() => initialStageState(PHASES));
   const phase = stage.current;
+
+  // Tell "Ask the OS" exactly what's open: this agent system + the current phase, so
+  // the assistant acts on THIS agent without asking which one. Clears on unmount.
+  usePublishPageContext({
+    tab: 'agents',
+    stage: phase,
+    artifactType: 'agent',
+    artifactId: systemId,
+    artifactName: system.system.name,
+  });
+
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
 
@@ -212,6 +227,7 @@ export default function SimpleBuilder({
       ) : null}
 
       {phase === 'design' ? (
+        <div {...anchorAttr(ANCHORS.agents.tools)}>
         <DesignStep
           systemId={systemId}
           system={system}
@@ -222,6 +238,7 @@ export default function SimpleBuilder({
           onNext={next}
           ready={ready}
         />
+        </div>
       ) : null}
 
       {phase === 'build' ? (
@@ -251,7 +268,7 @@ export default function SimpleBuilder({
       ) : null}
 
       {phase === 'run' ? (
-        <div className="sb-run">
+        <div className="sb-run" {...anchorAttr(ANCHORS.agents.run)}>
           <h2 className="sb-section-title" style={{ marginTop: 0 }}>Run</h2>
           <p className="hint" style={{ marginTop: 0 }}>
             Run the team — it walks from the START agent and shows its progress and final result.
@@ -308,7 +325,7 @@ export default function SimpleBuilder({
 
 const PRESETS: { id: SafetyPreset; label: string; consequence: string }[] = [
   { id: 'read-only',      label: 'Read-only',             consequence: 'The team can look but never change anything.' },
-  { id: 'read-propose',   label: 'Read + propose',        consequence: 'The team suggests changes — a human approves each one before it runs.' },
+  { id: 'read-propose',   label: 'Read + propose',        consequence: 'Writes to the team’s own My scope run directly; a change to Domain or Company waits for a human to approve it.' },
   { id: 'read-bounded',   label: 'Read + bounded writes', consequence: 'The team can write inside its own workspace, nowhere else.' },
   { id: 'full-in-scope',  label: 'Full in-scope',         consequence: 'The team may write anywhere its grants allow — use with care.' },
 ];
@@ -479,6 +496,9 @@ function DefineStep({
 
       {/* What your team can use — grants/resource picker, at the bottom of Define */}
       <TeamResources systemId={systemId} system={system} canEdit={canEdit} onCommit={onCommit} />
+
+      {/* Where the results go — declared outputs (auto-provisioned Write targets) */}
+      <OutputsSection systemId={systemId} system={system} canEdit={canEdit} onCommit={onCommit} />
 
       {hasAgents ? (
         <div className="row" style={{ justifyContent: 'flex-end', marginTop: 14 }}>
@@ -1148,6 +1168,84 @@ function lastRunToDiag(lastRun: NonNullable<BuildRunProps['lastRun']>): DiagRun 
 }
 
 /**
+ * "Save result → <output>" — persists the last run's final text into each DECLARED
+ * output (Define → Outputs) through the governed create the tabs use (the outputs/save
+ * route). File and Knowledge are the natural cases; a Dataset save is offered ONLY when
+ * the result is CSV/tabular (`canSaveFromResult`) — otherwise the team's own write tools
+ * (enabled by the declared Write grant) are the path, and we say so. Nothing renders when
+ * no outputs are declared.
+ */
+function SaveResultBlock({
+  systemId, system, output, canEdit,
+}: {
+  systemId: string;
+  system: System;
+  /** The last run's final text. */
+  output: string;
+  canEdit: boolean;
+}) {
+  const toast = useToast();
+  const outputs = system.outputs ?? [];
+  const [busyIdx, setBusyIdx] = useState<number | null>(null);
+  const kindLabel = (k: OutputKind) => (k === 'files' ? 'File' : k === 'data' ? 'Dataset' : 'Knowledge');
+
+  if (outputs.length === 0) return null;
+
+  const save = async (index: number) => {
+    if (busyIdx !== null) return;
+    setBusyIdx(index);
+    try {
+      const res = await fetch(`/api/agents/systems/${systemId}/outputs/save`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ index, text: output }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? 'Could not save the result.');
+      toast.success(`Saved to ${kindLabel(outputs[index].kind)} “${outputs[index].name}”`);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusyIdx(null);
+    }
+  };
+
+  return (
+    <div className="sb-save-outputs" style={{ marginBottom: 14 }}>
+      <h2 className="sb-section-title" style={{ marginTop: 0 }}>Save the result</h2>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Store this run’s result in a destination you declared on Define.
+      </p>
+      <div className="sb-out-list">
+        {outputs.map((o, i) => {
+          const canSave = canSaveFromResult(o, output);
+          return (
+            <div key={`${o.kind}:${o.folder.scope}:${o.folder.path}:${o.name}:${i}`} className="sb-out-row">
+              <span className="badge muted">{kindLabel(o.kind)}</span>
+              <span className="sb-out-name">{o.name}</span>
+              <span className="sb-out-dest hint" style={{ marginTop: 0 }}>
+                → 📁 {o.folder.path === '/' ? 'root' : o.folder.path}
+              </span>
+              <span style={{ marginLeft: 'auto' }}>
+                {canSave ? (
+                  <button className="btn ghost sm" disabled={!canEdit || busyIdx !== null} onClick={() => save(i)}>
+                    {busyIdx === i ? <span className="spin" /> : `Save result → ${o.name}`}
+                  </button>
+                ) : (
+                  <span className="hint" style={{ marginTop: 0 }} title={DATA_NON_TABULAR_NOTE}>
+                    {o.kind === 'data' ? 'Written by the team during a run' : 'No result to save yet'}
+                  </span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Phase 5 — Evaluate. Deterministic checks (green/red) + a one-click LLM-judge that
  * scores Clarity · Grounding · Actionability against the system's task Description via
  * the governed assistant model (the evaluate route). Diagnostics/PDF/trace live below,
@@ -1230,6 +1328,9 @@ function EvaluateStep({
       </div>
       {pdfErr ? <div className="error" style={{ marginBottom: 8 }}>{pdfErr}</div> : null}
 
+      {/* Save the result into a declared output (Define → Outputs). */}
+      <SaveResultBlock systemId={systemId} system={system} output={output} canEdit={canEdit} />
+
       {/* Deterministic checks — green/red, zero-cost, no model. */}
       <div className="row" style={{ alignItems: 'center', gap: 8 }}>
         <h2 className="sb-section-title" style={{ margin: 0 }}>Checks</h2>
@@ -1247,15 +1348,19 @@ function EvaluateStep({
         ))}
       </div>
 
-      {/* LLM-judge — one click, scores against the system's task Description. */}
+      {/* LLM-judge — one click, scores against the system's task Description.
+          Marked EXPERIMENTAL: LLM-as-judge scoring is indicative, not authoritative. */}
       <div className="row" style={{ alignItems: 'center', gap: 8, marginTop: 18 }}>
         <h2 className="sb-section-title" style={{ margin: 0 }}>AI judge</h2>
+        <span className="badge warn" title="Experimental — LLM-as-judge scores are indicative, not a reliable measure of quality yet">Experimental</span>
         <button className="btn primary" onClick={runJudge} disabled={judging || !canEdit || !output.trim()} title={output.trim() ? 'Score this run with the AI judge' : 'No output to judge'}>
           {judging ? <span className="spin" /> : judge ? 'Re-judge' : 'Judge this run'}
         </button>
       </div>
       <p className="hint" style={{ marginTop: 4 }}>
         The standard model scores the final output against what this team is meant to do — Clarity, Grounding, Actionability (1–5).
+        <br />
+        <strong>Experimental:</strong> LLM-as-judge scoring is still being developed — treat scores as a rough signal, not a definitive measure. Use your own judgement alongside it.
       </p>
       {judgeErr ? <div className="error" style={{ marginTop: 6 }}>{judgeErr}</div> : null}
       {judge ? (
@@ -1334,8 +1439,9 @@ function applyFolderSelection(
     }
   }
 
-  // ── Item grants (data/knowledge only — files have no per-item list). ──
-  if (kind !== 'files') {
+  // ── Item grants (all foldered kinds, INCLUDING files — a single file can be
+  //    granted by its id, exactly like a dataset or a knowledge entry). ──
+  {
     const wantItems = new Set(sel.itemGrants.filter(inFamily));
     const haveItems = next.grants[kind].filter((g) => !g.folder && g.id && inFamily(g.id)).map((g) => g.id);
     for (const id of wantItems) {
@@ -1418,7 +1524,7 @@ function FolderResourcePicker({
   const managesFolders = idFamily !== 'workflow';
   const grantList = system.grants[kind];
   const itemGrantIds = new Set(grantList.filter((g) => !g.folder && g.id && inFamily(g.id)).map((g) => g.id));
-  const checked = new Set<string>(kind === 'files' ? [] : itemGrantIds);
+  const checked = new Set<string>(itemGrantIds);
   for (const g of grantList) {
     if (!g.folder) continue;
     for (const it of itemsUnderFolder(g.folder.path, treeItems)) checked.add(it.id);
@@ -1453,6 +1559,11 @@ function FolderResourcePicker({
           items={treeItems}
           checkedIds={[...checked]}
           onChange={onChange}
+          // Files are grantable at ANY granularity: a single file (leaf tick), a
+          // folder, or "All" (the `/` root row). Leaves are selectable for every
+          // kind; the extra "All …" root row is a Files convenience for granting a
+          // whole scope (incl. files that sit at the root with no named subfolder).
+          rootGrantable={kind === 'files'}
         />
       )}
 
@@ -1503,7 +1614,7 @@ function FolderResourcePicker({
 
       {kind === 'files' ? (
         <p className="hint" style={{ marginTop: 6, marginBottom: 0 }}>
-          Files are granted by <strong>folder</strong> — tick a folder to give the team every file under it (now and later).
+          Tick a <strong>single file</strong>, a whole <strong>folder</strong> (covers files added later), or <strong>All</strong>.
           Access follows the file store’s own permissions at run time.
         </p>
       ) : null}
@@ -1561,7 +1672,8 @@ function TeamResources({
       <h2 className="sb-section-title" style={{ marginTop: 0 }}>What your team can use</h2>
       <p className="hint" style={{ marginTop: 0 }}>
         Give the whole team the resources it needs — every agent shares these. For each item, choose{' '}
-        <strong>Read-only</strong>, <strong>Read + propose</strong> (writes wait for a human), or{' '}
+        <strong>Read-only</strong>, <strong>Read + propose</strong> (writes to the team’s own My scope run
+        directly; only a change to Domain or Company waits for a human), or{' '}
         <strong>Read + write</strong> (writes run directly). The matching tools are granted automatically.
       </p>
 
@@ -1571,7 +1683,7 @@ function TeamResources({
       {/* ① Plan Items ─ Strategy · Big Bets · Operating Manual · Workflows */}
       <ResourceSectionBlock
         title="① Plan Items"
-        subtitle="Your strategy, big bets, operating manual and workflows."
+        subtitle="Your strategy, big bets, operating manual and business processes."
         members={membersOf('plan')}
         systemId={systemId} system={system} canEdit={canEdit} onCommit={onCommit}
       />
@@ -1587,6 +1699,208 @@ function TeamResources({
   );
 }
 
+/* ─────────────────────────── Outputs (Define) ─────────────────────────── */
+
+/** The three destination kinds a declared output can target, with plain labels. */
+const OUTPUT_KIND_CARDS: { kind: OutputKind; label: string; feedKind: 'files' | 'data' | 'knowledge' }[] = [
+  { kind: 'files', label: 'File', feedKind: 'files' },
+  { kind: 'data', label: 'Dataset', feedKind: 'data' },
+  { kind: 'knowledge', label: 'Knowledge', feedKind: 'knowledge' },
+];
+
+/**
+ * A small reusable "pick an existing folder OR ＋ New folder" control. The folder list
+ * is the kind's DLS-scoped folders (from the grants-available feed); a new folder is
+ * just a typed path that materialises when the first artifact is written there (folders
+ * are path-derived — there is no standalone folder object). Emits the chosen `path`.
+ * Reusable beyond Outputs — the same affordance can back a grant picker's new-path input.
+ */
+export function NewFolderField({
+  folders, value, canEdit, onChange, scope,
+}: {
+  /** Existing folder paths available in the chosen scope. */
+  folders: string[];
+  value: string;
+  canEdit: boolean;
+  onChange: (path: string) => void;
+  scope: 'personal' | 'domain';
+}) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState('');
+  const commitNew = () => {
+    const p = normaliseFolderPath(draft);
+    if (p && p !== '/') { onChange(p); setAdding(false); setDraft(''); }
+  };
+  if (adding) {
+    return (
+      <span className="sb-out-newfolder" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+        <span className="hint" style={{ marginTop: 0 }}>{scope === 'domain' ? 'Domain' : 'My'} /</span>
+        <input
+          type="text"
+          autoFocus
+          value={draft}
+          placeholder="reports/weekly"
+          disabled={!canEdit}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitNew(); } if (e.key === 'Escape') setAdding(false); }}
+          style={{ width: 160 }}
+        />
+        <button type="button" className="btn ghost sm" disabled={!canEdit || !draft.trim()} onClick={commitNew}>Add</button>
+        <button type="button" className="btn ghost sm" onClick={() => { setAdding(false); setDraft(''); }}>Cancel</button>
+      </span>
+    );
+  }
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+      <select
+        className="sb-out-folder"
+        value={value}
+        disabled={!canEdit}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ minWidth: 140 }}
+      >
+        <option value="/">/ (root)</option>
+        {folders.filter((f) => f !== '/').map((f) => <option key={f} value={f}>{f}</option>)}
+        {value !== '/' && !folders.includes(value) ? <option value={value}>{value}</option> : null}
+      </select>
+      <button type="button" className="btn ghost sm" disabled={!canEdit} onClick={() => setAdding(true)}>＋ New folder</button>
+    </span>
+  );
+}
+
+/**
+ * "Where the results go" — DECLARED OUTPUTS. Each row picks a destination Type
+ * (File · Dataset · Knowledge), a Name, a Folder (existing or ＋ New folder) and a
+ * Scope (My / Domain). Declaring an output auto-grants the team **Write** to that
+ * folder (reusing the grant/write-tool machinery — see `addOutput`); the folder
+ * materialises when the first result is saved. Consistent with the grants picker above.
+ */
+function OutputsSection({
+  systemId, system, canEdit, onCommit,
+}: {
+  systemId: string;
+  system: System;
+  canEdit: boolean;
+  onCommit: (next: System) => void;
+}) {
+  // Folders per kind, from the DLS-scoped grants-available feed (one fetch per kind).
+  const [foldersByKind, setFoldersByKind] = useState<Record<string, FolderNode[]>>({});
+  useEffect(() => {
+    let alive = true;
+    Promise.all(OUTPUT_KIND_CARDS.map(async (c) => {
+      try {
+        const res = await fetch(`/api/agents/systems/${systemId}/grants/available?kind=${c.feedKind}`, { cache: 'no-store' });
+        const body = await res.json();
+        return [c.kind, res.ok ? ((body.folders as FolderNode[]) ?? []) : []] as const;
+      } catch { return [c.kind, [] as FolderNode[]] as const; }
+    })).then((pairs) => { if (alive) setFoldersByKind(Object.fromEntries(pairs)); });
+    return () => { alive = false; };
+  }, [systemId]);
+
+  const outputs = system.outputs ?? [];
+
+  // Draft row state (Type/Name/Folder/Scope) — persisted only on "Add output".
+  const [draftKind, setDraftKind] = useState<OutputKind>('files');
+  const [draftName, setDraftName] = useState('');
+  const [draftScope, setDraftScope] = useState<'personal' | 'domain'>('personal');
+  const [draftFolder, setDraftFolder] = useState('/');
+
+  const foldersFor = (kind: OutputKind, scope: 'personal' | 'domain'): string[] =>
+    (foldersByKind[kind] ?? []).filter((f) => f.scope === scope).map((f) => f.path);
+
+  const addRow = () => {
+    if (!canEdit || !draftName.trim()) return;
+    onCommit(addOutput(system, {
+      kind: draftKind,
+      name: draftName.trim(),
+      folder: { path: normaliseFolderPath(draftFolder), scope: draftScope },
+    }));
+    setDraftName(''); setDraftFolder('/');
+  };
+
+  const kindLabel = (k: OutputKind) => OUTPUT_KIND_CARDS.find((c) => c.kind === k)?.label ?? k;
+
+  return (
+    <div className="sb-resources sb-outputs" style={{ marginTop: 16 }}>
+      <h2 className="sb-section-title" style={{ marginTop: 0 }}>Where the results go</h2>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Declare where this team stores its results — a File, Dataset or Knowledge item, in an existing
+        or new folder. Declaring an output grants the team Write to this folder; the folder appears when
+        the first result is saved.
+      </p>
+
+      {outputs.length > 0 ? (
+        <div className="sb-out-list">
+          {outputs.map((o, i) => (
+            <div key={`${o.kind}:${o.folder.scope}:${o.folder.path}:${o.name}:${i}`} className="sb-out-row">
+              <span className="badge muted">{kindLabel(o.kind)}</span>
+              <span className="sb-out-name">{o.name}</span>
+              <span className="sb-out-dest hint" style={{ marginTop: 0 }}>
+                → 📁 {o.folder.path === '/' ? 'root' : o.folder.path}
+                <span className="badge muted" style={{ marginLeft: 6 }}>{scopeLabel(o.folder.scope === 'domain' ? 'shared' : 'mine')}</span>
+              </span>
+              {canEdit ? (
+                <button className="sb-chip-x" title="Remove output" style={{ marginLeft: 'auto' }} onClick={() => onCommit(removeOutput(system, i))}>✕</button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="hint" style={{ marginTop: 0, marginBottom: 0 }}>No outputs declared yet — add one below.</p>
+      )}
+
+      {canEdit ? (
+        <div className="sb-out-add">
+          <div className="sb-out-add-fields">
+            <label className="sb-field-label" style={{ margin: 0 }}>Type</label>
+            <select value={draftKind} onChange={(e) => setDraftKind(e.target.value as OutputKind)}>
+              {OUTPUT_KIND_CARDS.map((c) => <option key={c.kind} value={c.kind}>{c.label}</option>)}
+            </select>
+
+            <label className="sb-field-label" style={{ margin: 0 }}>Name</label>
+            <input
+              type="text"
+              value={draftName}
+              placeholder={draftKind === 'data' ? 'e.g. Scored campaigns' : 'e.g. Weekly report'}
+              onChange={(e) => setDraftName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addRow(); } }}
+              style={{ minWidth: 180 }}
+            />
+
+            <label className="sb-field-label" style={{ margin: 0 }}>Scope</label>
+            <span className="sb-out-scope" role="radiogroup" aria-label="Output scope" style={{ display: 'inline-flex', gap: 2 }}>
+              {(['personal', 'domain'] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  role="radio"
+                  aria-checked={draftScope === s}
+                  className={`sb-access-seg-btn${draftScope === s ? ' active' : ''}`}
+                  onClick={() => { if (draftScope !== s) { setDraftScope(s); setDraftFolder('/'); } }}
+                >
+                  {s === 'domain' ? 'Domain' : 'My'}
+                </button>
+              ))}
+            </span>
+
+            <label className="sb-field-label" style={{ margin: 0 }}>Folder</label>
+            <NewFolderField
+              folders={foldersFor(draftKind, draftScope)}
+              value={draftFolder}
+              scope={draftScope}
+              canEdit={canEdit}
+              onChange={setDraftFolder}
+            />
+          </div>
+          <button type="button" className="btn ghost sm sb-out-addbtn" disabled={!draftName.trim()} onClick={addRow}>
+            + Add output
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /**
  * The inline explanation of the agent-system-wide access cap. Reads the system's
  * safety preset and says, in one honest line, HOW the per-item selector is bounded:
@@ -1597,7 +1911,7 @@ function AccessCapNote({ cap, preset }: { cap: AccessCap; preset: SafetyPreset }
     ? cap.reason
     : preset === 'read-bounded'
       ? 'The system allows writes in-scope — each item defaults to Read + write; you may downgrade any item, never go above it.'
-      : 'The system default is Read + propose — each item defaults to that; you may downgrade any item to Read-only, never grant direct write above the system setting.';
+      : 'The system default is Read + propose — writes to the team’s own My scope still run directly; only a change to Domain or Company waits for a human. Each item defaults to Read + propose; you may downgrade to Read-only, never grant direct write above the system setting.';
   return (
     <div className={`badge ${cap.locked ? 'warn' : 'muted'}`} role="note" style={{ display: 'block', padding: '8px 10px', marginBottom: 10, lineHeight: 1.4, whiteSpace: 'normal' }}>
       {cap.locked ? '🔒 ' : 'ℹ '}{msg} Change it under <strong>What this team is allowed to do</strong> above.
@@ -1689,7 +2003,7 @@ function scopeKeyOf(scope: 'personal' | 'domain' | 'marketplace'): ScopeKey {
 /** Per-level tooltip — what each access level actually grants, in plain words. */
 const ACCESS_HINTS: Record<AccessLevel, string> = {
   'read-only': 'Can read only — never changes anything.',
-  'read-propose': 'Can suggest changes — a human approves each one before it runs.',
+  'read-propose': 'Writes to its own My scope run directly; a change to Domain or Company waits for a human to approve it.',
   'read-write': 'Can change directly — no approval step.',
 };
 

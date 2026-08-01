@@ -418,7 +418,10 @@ function srcOsTs(): ScaffoldFile {
       " * In production: the Dockerfile build arg OS_API_URL is baked in at build time.",
       ' */',
       'export function createOsClient() {',
-      "  const base = import.meta.env.VITE_OS_API ?? '';",
+      "  // OS base URL baked at build time (Dockerfile ARG OS_API_URL → VITE_OS_API).",
+      "  // '' = same-origin (the OS instant preview). The SDK fails HONESTLY (no raw",
+      "  // JSON.parse crash) if this points at the app's own origin by mistake.",
+      "  const base = (import.meta.env.VITE_OS_API as string | undefined ?? '').replace(/\\/+$/, '');",
       '  return _create({ baseUrl: base });',
       '}',
       '',
@@ -449,7 +452,11 @@ function dockerfile(): ScaffoldFile {
       'RUN npm run build',
       '',
       '# Stage 2: serve with nginx on 8080 (the OS runner probe port).',
-      'FROM nginx:1.27-alpine',
+      '# nginx-unprivileged runs as a NON-ROOT user (uid 101) and writes its temp/pid',
+      "# under /tmp — so the OS runner can enforce a hardened securityContext",
+      '# (runAsNonRoot, drop ALL caps, no privilege escalation) without the pod needing',
+      '# root to start. Listens on 8080 (>1024, no NET_BIND_SERVICE capability needed).',
+      'FROM nginxinc/nginx-unprivileged:1.27-alpine',
       'COPY --from=builder /app/dist /usr/share/nginx/html',
       'COPY nginx.conf /etc/nginx/conf.d/default.conf',
       'EXPOSE 8080',
@@ -526,6 +533,34 @@ function dotforgejoWorkflow(slug: string): ScaffoldFile {
       '          docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" ./src',
       '          docker push "${IMAGE}:${TAG}"',
       '          docker push "${IMAGE}:latest"',
+      // Final FAIL-OPEN step: keep only the newest 2 SHA tags (+ the protected
+      // `latest`) so the in-cluster Forgejo registry volume (/data/packages)
+      // never fills. Same policy as apps.ts containerVersionsToPrune; kept inline
+      // here (no import) so this scaffold module stays free of app-server deps.
+      '      - name: Prune old registry versions (keep newest 2 + latest)',
+      '        env: { REG_PASS: "${{ secrets.REGISTRY_PASS }}" }',
+      '        run: |',
+      '          set +e',
+      '          KEEP=2',
+      '          API="http://${OWNER}:${REG_PASS}@${REGISTRY}/api/v1"',
+      // JSON parsed with node — the ci-builder job image is node:20 (jq is NOT installed).
+      "          PRUNABLE=\"$(curl -fsS \"${API}/packages/${OWNER}?type=container&q=${REPO}&limit=1000\" \\",
+      "            | REPO=\"${REPO}\" node -e 'let d=\"\";process.stdin.on(\"data\",(c)=>d+=c).on(\"end\",()=>{try{" +
+        'const n=process.env.REPO;const vs=JSON.parse(d).filter((p)=>p.name===n&&p.version!==\"latest\")' +
+        '.sort((a,b)=>((Date.parse(b.created_at||\"\")||0)-(Date.parse(a.created_at||\"\")||0))||' +
+        '(a.version<b.version?1:a.version>b.version?-1:0));' +
+        "console.log(vs.map((v)=>v.version).join(\"\\n\"))}catch(e){}})' 2>/dev/null)\"",
+      '          if [ -z "${PRUNABLE}" ]; then echo "prune: nothing to prune"; exit 0; fi',
+      '          OLD="$(echo "${PRUNABLE}" | tail -n +$((KEEP+1)))"',
+      '          [ -z "${OLD}" ] && { echo "prune: <= ${KEEP} versions — nothing to prune"; exit 0; }',
+      '          echo "${OLD}" | while IFS= read -r V; do',
+      '            [ -z "${V}" ] && continue',
+      '            echo "prune: deleting ${REPO}:${V}"',
+      '            curl -fsS -X DELETE "${API}/packages/${OWNER}/container/${REPO}/${V}" \\',
+      '              || echo "prune: delete of ${V} failed (ignored)"',
+      '          done',
+      '          echo "prune: done (fail-open)"',
+      '          exit 0',
     ].join('\n') + '\n',
   };
 }
@@ -634,7 +669,7 @@ function readmeMd(name: string, slug: string): ScaffoldFile {
       'The CI workflow (`.forgejo/workflows/ci.yml`) builds a multi-stage Docker image:',
       '',
       '1. **Stage 1 (node:22-alpine):** `npm run build` compiles the SPA to `dist/`.',
-      '2. **Stage 2 (nginx:1.27-alpine):** serves `dist/` as static files on **port 8080**.',
+      '2. **Stage 2 (nginx-unprivileged:1.27-alpine):** serves `dist/` as static files on **port 8080**, non-root (uid 101).',
       '',
       `The image is published to the in-cluster registry as \`gitea_admin/${slug}:latest\``,
       'and Argo CD syncs it to `https://' + slug + '.<domain>`.',
@@ -669,6 +704,41 @@ export function viteOsIndexCss(): ScaffoldFile {
       '',
     ].join('\n'),
   };
+}
+
+/**
+ * The template-agnostic INFRA base every governed Vite SPA template shares —
+ * build config, styling entry, Docker/nginx serving, the sovereign CI workflow
+ * and the OpenAPI stub. The Sovereign standard app template (sovereign-app.ts)
+ * reuses THIS so the two scaffolds can never drift on how an app is built,
+ * containerised and served. Deliberately excludes src/App.tsx / src/main.tsx /
+ * app.yaml / README — those are each template's own voice.
+ */
+export function viteBaseFiles(name: string, slug: string): ScaffoldFile[] {
+  return [
+    packageJson(slug),
+    viteConfig(),
+    tsConfig(),
+    indexHtml(name),
+    tailwindConfig(),
+    postcssConfig(),
+    viteOsIndexCss(),
+    dockerfile(),
+    nginxConf(),
+    dotforgejoWorkflow(slug),
+    openApiYaml(slug),
+  ];
+}
+
+/** The OS-client factory (src/os.ts) — shared by every governed SPA template. */
+export function viteOsClientFile(): ScaffoldFile {
+  return srcOsTs();
+}
+
+/** The sovereign CI build→push workflow — shared by NON-Vite scaffolds too
+ *  (e.g. the api-service template), so every app ships through the same CI. */
+export function ciWorkflowFile(slug: string): ScaffoldFile {
+  return dotforgejoWorkflow(slug);
 }
 
 /**

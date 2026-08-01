@@ -130,6 +130,13 @@ spec:
               value: "3000"
             - name: HOSTNAME
               value: "0.0.0.0"
+            {{- /* Model pricing for Monitoring cost facts (EUR per 1M tokens per
+                 LiteLLM model_name). Nil-safe: absent under --reuse-values ⇒ env
+                 unset ⇒ cost shows an honest "—". */}}
+            {{- if .Values.osUI.modelPricesJson }}
+            - name: MODEL_PRICES_JSON
+              value: {{ .Values.osUI.modelPricesJson | quote }}
+            {{- end }}
             # Namespace the stack workloads live in — the native Components
             # surface reads their status + scales them 0<->1 here via the k8s API.
             - name: NAMESPACE
@@ -236,6 +243,10 @@ spec:
                   key: token
             - name: QUERY_TOOL_URL
               value: {{ $u.queryToolUrl | quote }}
+            # Shared service bearer the os-ui presents to query-tool + data-runner
+            # (defense-in-depth behind the NetworkPolicies). Rendered ONLY when
+            # serviceBearer.enabled — nil-safe: absent => no header, services skip check.
+            {{- include "soa.serviceBearerEnv" . | nindent 12 }}
             {{- if .Values.softwareRunner.enabled }}
             # ---- Software live-app runner (Software tab). The os-ui provisions a
             # real Deployment+Service+Ingress per built app into softwareRunner.namespace
@@ -420,6 +431,14 @@ spec:
             # (MLflow/KServe/Featureform/Trino/Cube) is deployed via ml.enabled.
             - name: ML_ENABLED
               value: "true"
+            {{- end }}
+            {{- if .Values.mlTrainer.image }}
+            # Science training runtime — the ml-trainer image the os-ui's training
+            # route injects into per-model batch Jobs (lib/science/training.ts).
+            # Nil-safe: absent ⇒ env unset ⇒ config.ts falls back to the hardcoded
+            # dev default `sovereign-os/ml-trainer:0.1.0`.
+            - name: ML_TRAINER_IMAGE
+              value: {{ printf "%s:%s" .Values.mlTrainer.image.repository .Values.mlTrainer.image.tag | quote }}
             {{- end }}
             {{- if .Values.terminal.enabled }}
             # In-UI Terminal. The UI mints a short-lived token (signed with the

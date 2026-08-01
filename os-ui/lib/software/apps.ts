@@ -32,7 +32,12 @@ import type {
   ScaffoldFile,
   SurfaceDeclaration,
 } from '@/lib/software/model';
+import { normalizeSpec, type StorySpec } from '@/lib/software/story-spec';
 import { viteOsFiles } from '@/lib/software/scaffolds/vite-os';
+import { sovereignAppFiles, sovereignAppGuide } from '@/lib/software/scaffolds/sovereign-app';
+import { websiteFiles, websiteGuide } from '@/lib/software/scaffolds/website';
+import { apiServiceFiles, apiServiceGuide } from '@/lib/software/scaffolds/api-service';
+import { emptyAppFiles, emptyAppGuide } from '@/lib/software/scaffolds/empty-app';
 import { vendorSdkForRepo, applySdkFileDep } from '@/lib/software/app-sdk-vendor';
 import { vendorUiForRepo, applyUiFileDep } from '@/lib/software/app-ui-vendor';
 import { snapshotFiles, getSnapshot } from '@/lib/software/snapshot';
@@ -68,7 +73,7 @@ import type { ForgejoClient, ForgejoCommit, ForgejoCommitFiles } from '@/lib/inf
  */
 
 export type PipelineStage = 'forgejo' | 'actions' | 'harbor' | 'argocd' | 'live';
-export type StageStatus = 'ok' | 'pending' | 'offline' | 'disabled';
+export type StageStatus = 'ok' | 'pending' | 'offline' | 'disabled' | 'stalled' | 'failing';
 
 export type AppFile = {
   name: string;
@@ -95,6 +100,14 @@ export type AppStory = {
    * apps load unchanged; set to 'done' when a Build run for this story completes.
    */
   status?: 'todo' | 'building' | 'done';
+  /**
+   * The Design-stage SPECIFICATION for this story — three editable lists
+   * (features / non-functional requirements / rules) the Design conversation
+   * shapes and the Build stage ticks against. Optional + defaults to undefined
+   * (no spec authored) so pre-spec apps load byte-identically; normalised on save
+   * so a malformed payload can never widen the shape. See lib/software/story-spec.ts.
+   */
+  spec?: StorySpec;
 };
 
 /**
@@ -196,16 +209,32 @@ export type App = {
 
 // ----------------------------------------------------------------- Templates --
 
-export type AppTemplateKey = 'nextjs-supabase' | 'service' | 'script' | 'dashboard' | 'vite-os';
+export type AppTemplateKey =
+  | 'nextjs-supabase'
+  | 'service'
+  | 'script'
+  | 'dashboard'
+  | 'vite-os'
+  | 'sovereign-app'
+  | 'website'
+  | 'api-service'
+  | 'empty';
 
 /** Runtime kind per template (drives the per-template/per-runtime adapter). */
 export const TEMPLATE_RUNTIME: Record<AppTemplateKey, 'web' | 'service' | 'script' | 'dashboard'> = {
   'nextjs-supabase': 'web',
   'vite-os': 'web',
+  'sovereign-app': 'web',
+  website: 'web',
+  'api-service': 'service',
+  empty: 'web',
   service: 'service',
   script: 'script',
   dashboard: 'dashboard',
 };
+
+/** Templates that are governed OS frontends (Vite SPA + vendored @sovereign-os/ui + app-sdk). */
+export const GOVERNED_FRONTEND_TEMPLATES: ReadonlySet<AppTemplateKey> = new Set(['vite-os', 'sovereign-app', 'website', 'empty']);
 
 type Template = {
   key: AppTemplateKey;
@@ -260,7 +289,100 @@ function ciWorkflow(slug: string): string {
     '          echo "${REG_PASS}" | docker login "${REGISTRY}" -u "${OWNER}" --password-stdin\n' +
     '          docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" ./src\n' +
     '          docker push "${IMAGE}:${TAG}"\n' +
-    '          docker push "${IMAGE}:latest"\n'
+    '          docker push "${IMAGE}:latest"\n' +
+    prunePackagesStep()
+  );
+}
+
+/**
+ * How many container image versions to RETAIN per app (the newest N by push
+ * time). The floating `:latest` tag is ALWAYS kept on top of these — it is what
+ * the runner pulls (lib/software/runner.ts appImageRef). Everything older than
+ * the newest N immutable SHA tags is pruned so Forgejo's in-cluster registry
+ * volume (/data/packages) stops growing without bound and filling the disk.
+ */
+export const REGISTRY_KEEP_VERSIONS = 2;
+
+/** One container package version as returned by Forgejo's packages REST API. */
+export type ForgejoPackageVersion = {
+  /** The image tag (a 12-char commit SHA for builds; `latest` for the float). */
+  version: string;
+  /** RFC3339 push time — the newest N are retained. */
+  created_at?: string;
+};
+
+/** Tags that must NEVER be pruned regardless of age (the runner pulls these). */
+const PROTECTED_TAGS = new Set(['latest']);
+
+/**
+ * PURE prune policy (unit-tested): given every container version of ONE app and
+ * how many to keep, return the tags to DELETE — the versions OLDER than the
+ * newest `keep` immutable tags, sorted by push time (newest first; ties broken
+ * by tag so the result is deterministic). Protected floating tags (`latest`)
+ * are never returned. When `keep` or fewer prunable versions exist, returns [].
+ * The CI prune step (prunePackagesStep) implements this exact policy in shell;
+ * this function is the executable spec the test pins.
+ */
+export function containerVersionsToPrune(
+  versions: ForgejoPackageVersion[],
+  keep: number = REGISTRY_KEEP_VERSIONS,
+): string[] {
+  const prunable = versions.filter((v) => v.version && !PROTECTED_TAGS.has(v.version));
+  const sorted = [...prunable].sort((a, b) => {
+    const ta = Date.parse(a.created_at ?? '') || 0;
+    const tb = Date.parse(b.created_at ?? '') || 0;
+    if (tb !== ta) return tb - ta; // newest first
+    return a.version < b.version ? 1 : a.version > b.version ? -1 : 0;
+  });
+  return sorted.slice(Math.max(0, keep)).map((v) => v.version);
+}
+
+/**
+ * The final, FAIL-OPEN CI step that prunes old container versions after a
+ * successful push. Runs the SAME policy as containerVersionsToPrune: list this
+ * app's container versions via Forgejo's packages REST API (same host + same
+ * REGISTRY_PASS basic-auth as the push), keep the newest N SHA tags plus the
+ * protected `latest`, and DELETE the rest. JSON is parsed with `node` — the
+ * ci-builder job image is node:20-based (jq is NOT installed there), so node is
+ * the one parser guaranteed present. Wrapped so ANY failure (API hiccup,
+ * permission) prints a warning and exits 0 — a prune failure must NEVER fail a
+ * green build.
+ */
+function prunePackagesStep(keep: number = REGISTRY_KEEP_VERSIONS): string {
+  // Newest-first sort matches containerVersionsToPrune exactly (created_at desc,
+  // tie-broken by tag desc). The node one-liner avoids single quotes so it can
+  // ride inside the shell's single-quoted -e argument.
+  const nodeSort =
+    'let d="";process.stdin.on("data",(c)=>d+=c).on("end",()=>{try{' +
+    'const n=process.env.REPO;const vs=JSON.parse(d)' +
+    '.filter((p)=>p.name===n&&p.version!=="latest")' +
+    '.sort((a,b)=>((Date.parse(b.created_at||"")||0)-(Date.parse(a.created_at||"")||0))||' +
+    '(a.version<b.version?1:a.version>b.version?-1:0));' +
+    'console.log(vs.map((v)=>v.version).join("\\n"))}catch(e){}})';
+  return (
+    '      - name: Prune old registry versions (keep newest ' + keep + ' + latest)\n' +
+    '        env: { REG_PASS: "${{ secrets.REGISTRY_PASS }}" }\n' +
+    '        run: |\n' +
+    '          set +e\n' +
+    '          KEEP=' + keep + '\n' +
+    '          API="http://${OWNER}:${REG_PASS}@${REGISTRY}/api/v1"\n' +
+    '          # List this app\'s container versions (newest first), drop the\n' +
+    '          # protected `latest` float, then delete everything past the newest KEEP.\n' +
+    '          # JSON parsed with node (the job image is node:20 — jq is not installed).\n' +
+    '          PRUNABLE="$(curl -fsS "${API}/packages/${OWNER}?type=container&q=${REPO}&limit=1000" \\\n' +
+    "            | REPO=\"${REPO}\" node -e '" + nodeSort + "' 2>/dev/null)\"\n" +
+    '          if [ -z "${PRUNABLE}" ]; then echo "prune: nothing to prune"; exit 0; fi\n' +
+    '          # Everything after the newest KEEP immutable tags is deleted.\n' +
+    '          OLD="$(echo "${PRUNABLE}" | tail -n +$((KEEP+1)))"\n' +
+    '          [ -z "${OLD}" ] && { echo "prune: <= ${KEEP} versions — nothing to prune"; exit 0; }\n' +
+    '          echo "${OLD}" | while IFS= read -r V; do\n' +
+    '            [ -z "${V}" ] && continue\n' +
+    '            echo "prune: deleting ${REPO}:${V}"\n' +
+    '            curl -fsS -X DELETE "${API}/packages/${OWNER}/container/${REPO}/${V}" \\\n' +
+    '              || echo "prune: delete of ${V} failed (ignored)"\n' +
+    '          done\n' +
+    '          echo "prune: done (fail-open)"\n' +
+    '          exit 0\n'
   );
 }
 
@@ -524,22 +646,161 @@ function viteOsTemplate(): Template {
   };
 }
 
+/**
+ * The SOVEREIGN STANDARD APP — the default template for every NEW app. A rich
+ * base app that already looks and behaves like a Sovereign OS app (AppShell nav,
+ * OS-delegated identity, domain-scoped data helpers, an admin section, the MCP
+ * top-bar link), so the Build stage only fills in business features epic-by-epic.
+ * File set: lib/software/scaffolds/sovereign-app.ts. The scaffold guide (README)
+ * doubles as the app's `docs`, so the Build assistant reads the same contract.
+ */
+function sovereignAppTemplate(): Template {
+  const base = viteOsTemplate();
+  return {
+    ...base,
+    key: 'sovereign-app',
+    label: 'Sovereign standard app (OS identity, governed)',
+    designDecisions: (name) =>
+      [
+        `# ${name} — design decisions`,
+        '',
+        '- **Stack:** Vite + React + TypeScript + Tailwind CSS + `@sovereign-os/ui` (AppShell + primitives).',
+        '- **Identity:** DELEGATED to the OS — `os.whoami()` is the only user source; no local accounts.',
+        '- **Tenancy:** owning domain derived from the app host; records scoped owner + domain (My / Domain).',
+        '- **Admin:** in-app admin area for OS domain admins — settings placeholder + read-only OS user list.',
+        '- **MCP:** capabilities exposed as governed tools; setup linked from the app top bar.',
+        '- **Served by:** nginx on port 8080 via a multi-stage Docker build.',
+      ].join('\n'),
+    // The skeleton guide IS the docs: injected into the Build assistant's context.
+    docs: (name, sub) =>
+      [
+        sovereignAppGuide(name, slugFromSubdomain(sub)),
+        '',
+        `Live at **https://${sub}** (once CI → registry → runner have synced).`,
+      ].join('\n'),
+    files: (name, slug) => sovereignAppFiles(name, slug),
+  };
+}
+
+/** The slug is the first label of the app's per-app host. */
+function slugFromSubdomain(sub: string): string {
+  return sub.split('.')[0] || sub;
+}
+
+/**
+ * The WEBSITE template — a public-facing site (landing/marketing style): the OS
+ * theme tokens for coherence, but NO sign-in/admin/identity chrome. Same Vite
+ * infra base as sovereign-app, so preview/CI/deploy are identical.
+ */
+function websiteTemplate(): Template {
+  const base = viteOsTemplate();
+  return {
+    ...base,
+    key: 'website',
+    label: 'Website (public site, no sign-in)',
+    tools: () => [
+      { name: 'list_pages', description: 'List the site sections/pages (read).', write: false },
+    ],
+    designDecisions: (name) =>
+      [
+        `# ${name} — design decisions`,
+        '',
+        '- **Kind:** public website — NO sign-in, NO admin, NO identity chrome.',
+        '- **Stack:** Vite + React + TypeScript; OS theme tokens (`@sovereign-os/ui/theme.css`) for coherence.',
+        '- **Structure:** one SECTIONS registry (src/sections.tsx) drives nav + page; epics add sections.',
+        '- **Served by:** nginx on port 8080 via the same sovereign CI as every app.',
+      ].join('\n'),
+    dataDescriptions: (name) =>
+      [`# ${name} — data descriptions`, '', 'A public site: content lives in the code; no operational data model yet.'].join('\n'),
+    docs: (name, sub) => [websiteGuide(name), '', `Live at **https://${sub}** (once CI → registry → runner have synced).`].join('\n'),
+    files: (name, slug) => websiteFiles(name, slug),
+  };
+}
+
+/**
+ * The APIs-ONLY template — a headless governed service: a zero-dependency Node
+ * HTTP server on the runner's port 8080, `surface: api` DECLARED so it is never
+ * mislabeled as a UI app. Epics add endpoints (ROUTES table + openapi.yaml).
+ */
+function apiServiceTemplate(): Template {
+  const base = viteOsTemplate();
+  return {
+    ...base,
+    key: 'api-service',
+    label: 'APIs only (headless service)',
+    tools: () => [
+      { name: 'healthz', description: 'Liveness/readiness of the service (read).', write: false },
+      { name: 'hello', description: 'Hello endpoint — the starter capability (read).', write: false },
+    ],
+    designDecisions: (name) =>
+      [
+        `# ${name} — design decisions`,
+        '',
+        '- **Kind:** APIs only — headless, `surface: api`; no UI is ever served.',
+        '- **Stack:** zero-dependency Node (node:http) on port 8080; ROUTES table in server.mjs.',
+        '- **Contract:** every endpoint is declared in openapi.yaml (feeds the governed MCP tools).',
+      ].join('\n'),
+    dataDescriptions: (name) =>
+      [`# ${name} — data descriptions`, '', 'A headless service: define its data model as endpoints take shape.'].join('\n'),
+    docs: (name, sub) => [apiServiceGuide(name), '', `Live at **https://${sub}** (once CI → registry → runner have synced).`].join('\n'),
+    files: (name, slug) => apiServiceFiles(name, slug),
+  };
+}
+
+/** The EMPTY APP template — the bare minimum that builds/previews/deploys. */
+function emptyAppTemplate(): Template {
+  const base = viteOsTemplate();
+  return {
+    ...base,
+    key: 'empty',
+    label: 'Empty app (blank canvas)',
+    tools: (slug) => [
+      { name: `${slug.replace(/-/g, '_')}_status`, description: 'Health/status of the app (read).', write: false },
+    ],
+    designDecisions: (name) =>
+      [`# ${name} — design decisions`, '', '- **Kind:** empty app — a blank canvas; decisions are made as epics land.'].join('\n'),
+    dataDescriptions: (name) => [`# ${name} — data descriptions`, '', 'Nothing yet — a blank canvas.'].join('\n'),
+    docs: (name, sub) => [emptyAppGuide(name), '', `Live at **https://${sub}** (once CI → registry → runner have synced).`].join('\n'),
+    files: (name, slug) => emptyAppFiles(name, slug),
+  };
+}
+
 const TEMPLATES: Record<AppTemplateKey, Template> = {
   'nextjs-supabase': nextjsSupabaseTemplate(),
   'vite-os': viteOsTemplate(),
+  'sovereign-app': sovereignAppTemplate(),
+  website: websiteTemplate(),
+  'api-service': apiServiceTemplate(),
+  empty: emptyAppTemplate(),
   service: genericTemplate('service', 'Service / API'),
   script: genericTemplate('script', 'Script / scheduled job'),
   dashboard: dashboardTemplate(),
 };
 
-// `vite-os` is listed first: it is the default for a new app (a governed
-// frontend over the OS API). The other templates stay selectable.
-export const APP_TEMPLATES: { key: AppTemplateKey; label: string }[] = [
-  { key: 'vite-os', label: 'Vite + React OS app (SPA, governed)' },
-  { key: 'nextjs-supabase', label: 'Web app (Next.js + Supabase)' },
-  { key: 'service', label: 'Service / API' },
-  { key: 'script', label: 'Script / scheduled job' },
-  { key: 'dashboard', label: 'Dashboard-as-app' },
+// The CREATE PICKER — exactly four choices; `sovereign-app` ("Application") is
+// the default. Legacy templates (vite-os, nextjs-supabase, service, script,
+// dashboard) keep working for existing apps but are NOT offered here.
+export const APP_TEMPLATES: { key: AppTemplateKey; label: string; blurb: string }[] = [
+  {
+    key: 'sovereign-app',
+    label: 'Application',
+    blurb: 'Full OS experience — sign in via your OS session, an Admin section with the user directory and settings, multi-tenant. Enables the whole flow: a UI to design, build and test.',
+  },
+  {
+    key: 'website',
+    label: 'Website',
+    blurb: 'A public-facing site — clean pages, no sign-in or admin chrome. Full design→build→test→publish flow, without the OS session/Admin skeleton.',
+  },
+  {
+    key: 'api-service',
+    label: 'APIs only',
+    blurb: 'A headless service — governed MCP endpoints, no user interface. Test checks the tool surface; there is no live-app iframe to preview.',
+  },
+  {
+    key: 'empty',
+    label: 'Empty App',
+    blurb: 'A blank canvas that still builds and deploys. Bring your own structure; every stage stays available.',
+  },
 ];
 
 // ----------------------------------------------------------------- Registry ---
@@ -599,29 +860,51 @@ function isOwnerOrAdminApp(a: App, user: CurrentUser): boolean {
   return canManageArtifact(user, { owner: a.owner, domain: a.domain, scope });
 }
 
+/** Apply the back-compat normalisation + in-process connection re-hydration a
+ *  persisted app doc needs on load. Shared by the bulk hydrate AND the by-id mirror
+ *  fallback so both paths yield an identical, ready-to-use App. */
+function hydrateAppDoc(app: App): App {
+  // Back-compat: apps persisted before surface-detection get one inferred from
+  // their scaffold (a persisted declaration still wins over the heuristic).
+  if (!app.surface) {
+    app.surface = resolveSurface(
+      templateFiles(app.template, app.name, app.slug),
+      app.declaredSurface,
+    );
+  }
+  // Back-compat: apps persisted before Define/Design/grants must still load.
+  if (typeof app.purpose !== 'string') app.purpose = '';
+  if (!Array.isArray(app.epics)) app.epics = [];
+  app.grants = normalizeContextGrants(app.grants);
+  // Re-hydrate the in-process MCP grant so agents can call it after a restart.
+  // rehydrateConnection is status-aware — it never resurrects an archived app.
+  if (app.connectionId) rehydrateConnection(app);
+  return app;
+}
+
+/** Authoritative by-id read: on a cache MISS, consult the durable mirror — a
+ *  DIFFERENT server instance may have created the app after THIS instance
+ *  hydrated its cache (the "commit → App not found" bug), so a bare map.get is
+ *  not authoritative. Populates the cache on a mirror hit. Null ⇒ exists nowhere. */
+async function getAppByIdWithMirror(appId: string): Promise<App | null> {
+  const map = await getCache();
+  const hit = map.get(appId);
+  if (hit) return hit;
+  const doc = (await mirror.getDoc(appId)) as App | null;
+  if (!doc) return null;
+  const app = hydrateAppDoc(doc);
+  map.set(app.id, app);
+  return app;
+}
+
 async function getCache(): Promise<Map<string, App>> {
   const s = appCacheState();
   if (s.cache) return s.cache;
   const map = new Map<string, App>();
   const docs = (await mirror.hydrate(500)) ?? []; // null → mirror down → in-memory only
   for (const app of docs as App[]) {
-    // Back-compat: apps persisted before surface-detection get one inferred
-    // from their scaffold so the monitor drives off surface, never `template`.
-    // A persisted declaration (intent) still wins over the heuristic.
-    if (!app.surface) {
-      app.surface = resolveSurface(
-        templateFiles(app.template, app.name, app.slug),
-        app.declaredSurface,
-      );
-    }
-    // Back-compat: apps persisted before the Define/Design/grants fields existed
-    // must still load — default purpose/epics to empty and normalise grants.
-    if (typeof app.purpose !== 'string') app.purpose = '';
-    if (!Array.isArray(app.epics)) app.epics = [];
-    app.grants = normalizeContextGrants(app.grants);
+    hydrateAppDoc(app);
     map.set(app.id, app);
-    // Re-hydrate the in-process MCP grant so agents can call it after a restart.
-    if (app.connectionId) rehydrateConnection(app);
   }
   s.cache = map;
   return map;
@@ -630,6 +913,27 @@ async function getCache(): Promise<Map<string, App>> {
 /** Ensure the app registry and its version history are both hydrated. Used by the versions route. */
 export async function ensureHydrated(): Promise<void> {
   await Promise.all([getCache(), versions.ensureHydrated()]);
+}
+
+/**
+ * Cross-domain governance move (admin-only, gated in lib/platform-admin/domain-move.ts).
+ * Reassigns the app's `domain` (the visibility-scoping field) and writes through.
+ * NOTE: this reassigns visibility scope only; it does NOT move the app's Forgejo
+ * repository. `sel.id` moves one; `sel.onlyUnassigned` sweeps only empty-domain
+ * records. Returns the ids moved.
+ */
+export async function moveAppsDomain(sel: { id?: string; onlyUnassigned?: boolean }, target: string): Promise<string[]> {
+  const map = await getCache();
+  const moved: string[] = [];
+  for (const app of map.values()) {
+    if (sel.id !== undefined && app.id !== sel.id) continue;
+    if (sel.onlyUnassigned && app.domain) continue;
+    if (app.domain === target) continue;
+    app.domain = target;
+    writeThrough(app);
+    moved.push(app.id);
+  }
+  return moved;
 }
 
 // ------------------------------------------------------------------- Forgejo --
@@ -678,7 +982,7 @@ function b64(s: string): string {
  * set is returned unchanged. Keeps the deployed image buildable offline.
  */
 function withVendoredSdk(tpl: Template, files: ScaffoldFile[]): ScaffoldFile[] {
-  if (tpl.key !== 'vite-os') return files;
+  if (!GOVERNED_FRONTEND_TEMPLATES.has(tpl.key)) return files;
   const withDep = files.map((f) =>
     f.path === 'package.json' ? { ...f, content: applySdkFileDep(f.content) } : f,
   );
@@ -694,11 +998,64 @@ function withVendoredSdk(tpl: Template, files: ScaffoldFile[]): ScaffoldFile[] {
  * through unchanged.
  */
 function withVendoredUi(tpl: Template, files: ScaffoldFile[]): ScaffoldFile[] {
-  if (tpl.key !== 'vite-os') return files;
+  if (!GOVERNED_FRONTEND_TEMPLATES.has(tpl.key)) return files;
   const withDep = files.map((f) =>
     f.path === 'package.json' ? { ...f, content: applyUiFileDep(f.content) } : f,
   );
   return [...withDep, ...vendorUiForRepo()];
+}
+
+/**
+ * Bake the OS's public URL into a seeded CI workflow so the built app image
+ * carries the correct OS base URL (the Dockerfile declares `ARG OS_API_URL`,
+ * Vite reads it as `VITE_OS_API`). WITHOUT this the `docker build ... ./src`
+ * step passes no build arg, `VITE_OS_API=""`, and the deployed app's
+ * `os.whoami()` hits its OWN origin (nginx serves index.html → the app crashed
+ * with a JSON parse error on `'<'`).
+ *
+ * We rewrite the `docker build` line to add `--build-arg OS_API_URL=<osPublicUrl>`.
+ * Idempotent: skips if a build-arg is already present. When the OS public URL is
+ * unknown (`''`, e.g. local dev) the workflow is returned UNCHANGED — the app then
+ * derives the OS origin from its host at runtime (scaffold app-meta.ts) or runs
+ * same-origin, so nothing breaks locally.
+ *
+ * Exported for unit tests. Value is single-quoted for the shell; the OS public URL
+ * is an operator-set env var (not user input), and we defensively reject a value
+ * containing a single quote.
+ */
+export function bakeOsApiUrlIntoWorkflow(content: string, osPublicUrl: string): string {
+  const url = (osPublicUrl ?? '').trim().replace(/\/+$/, '');
+  if (!url || url.includes("'") || url.includes('\n')) return content;
+  // Match a `docker build` invocation and inject the build arg right after it,
+  // unless one is already there (idempotent on re-scaffold / self-heal).
+  return content.replace(/docker build\b(?![^\n]*--build-arg OS_API_URL=)/g, (m) =>
+    `${m} --build-arg OS_API_URL='${url}'`,
+  );
+}
+
+/** Apply {@link bakeOsApiUrlIntoWorkflow} to every seeded workflow file. */
+function withBakedOsApiUrl(files: ScaffoldFile[]): ScaffoldFile[] {
+  const url = config.osPublicUrl;
+  if (!url) return files;
+  return files.map((f) =>
+    f.path.startsWith('.forgejo/workflows/')
+      ? { ...f, content: bakeOsApiUrlIntoWorkflow(f.content, url) }
+      : f,
+  );
+}
+
+/**
+ * Idempotently (re)assert the repo-level Actions secrets the seeded CI workflow
+ * depends on — today exactly one: REGISTRY_PASS (checkout clone + registry login).
+ * Forgejo's PUT creates or overwrites, so calling this is always safe. Used at
+ * seed time AND as a self-heal when a run fails (refreshActionsStage), so a
+ * missing/rotated secret can never permanently brick an app's CI.
+ */
+async function ensureRepoActionsSecrets(owner: string, repo: string): Promise<boolean> {
+  const r = await forgejoApi('PUT', `/repos/${owner}/${repo}/actions/secrets/REGISTRY_PASS`, {
+    data: config.forgejoPassword,
+  });
+  return r.ok;
 }
 
 /**
@@ -729,9 +1086,7 @@ async function scaffoldRepo(
   // The CI workflow logs in to the registry with the REGISTRY_PASS Actions
   // secret; set it before seeding the workflow so the first push can build.
   // (Admin creds — the same local-dev convenience the demo-app seed uses.)
-  await forgejoApi('PUT', `/repos/${owner}/${slug}/actions/secrets/REGISTRY_PASS`, {
-    data: config.forgejoPassword,
-  });
+  await ensureRepoActionsSecrets(owner, slug);
   const seeded: string[] = [];
   // Seed the SOURCE first (Dockerfile + manifests + app.yaml …) and the Actions
   // workflow LAST, exactly like the proven demo-app seed: each contents-API PUT is
@@ -745,7 +1100,9 @@ async function scaffoldRepo(
   // package.json to local `file:` deps so the built Docker image resolves them with
   // no external registry — fully sovereign / offline. (Order: SDK first, then UI —
   // each rewrites the package.json dep it owns and appends its own vendor/ files.)
-  const baseFiles = withVendoredUi(tpl, withVendoredSdk(tpl, tpl.files(name, slug)));
+  // Bake the OS public URL into the CI workflow's `docker build` so the deployed
+  // image knows how to reach the OS across subdomains (the SSO/whoami base URL).
+  const baseFiles = withBakedOsApiUrl(withVendoredUi(tpl, withVendoredSdk(tpl, tpl.files(name, slug))));
   const ordered = [
     ...baseFiles.filter((f) => !isWorkflow(f.path)),
     ...baseFiles.filter((f) => isWorkflow(f.path)),
@@ -1016,9 +1373,128 @@ export async function deleteAppRepo(
   return { ok: false, live: true, action: 'noop', detail: `Forgejo rejected the repo delete (HTTP ${res.status}).` };
 }
 
+// ------------------------------------------------------------ Actions health --
+
+/** Throttle live Actions checks per app (the app page GET calls this on load). */
+const actionsCheckedAt = new Map<string, number>();
+const ACTIONS_CHECK_TTL_MS = 30_000;
+
+export type ActionsHealth = { status: StageStatus; note: string | null };
+
+/**
+ * Recompute the pipeline `actions` stage HONESTLY from live Forgejo — and
+ * SELF-HEAL the one repairable cause. 'ok' is earned, never assumed:
+ *
+ *   • Repo Actions unit disabled  → auto-enable it (`PATCH has_actions:true`,
+ *     admin token, server-side, traced) — the next push builds. No support
+ *     ticket, no Forgejo UI work.
+ *   • Latest main commit's run SUCCEEDED   → 'ok' (a push really built).
+ *   • Latest main commit's run FAILED      → 'failing' + re-assert the repo's
+ *     REGISTRY_PASS Actions secret (the workflow's one dependency, idempotent).
+ *   • Latest main commit's run in progress → 'pending', said as such.
+ *   • Latest main commit has NO task       → 'stalled' + a repair hint —
+ *     never the old unconditional "actions: ok".
+ *
+ * Mutates `app.pipeline.actions` (write-through) so the app card and
+ * `get_software_status` show the same truth. Fail-soft: an unreachable Forgejo
+ * leaves the stored stage untouched and SAYS so.
+ */
+export async function refreshActionsStage(app: App, opts?: { force?: boolean }): Promise<ActionsHealth> {
+  if (app.mode !== 'live') return { status: app.pipeline.actions, note: null };
+  const last = actionsCheckedAt.get(app.id) ?? 0;
+  if (!opts?.force && Date.now() - last < ACTIONS_CHECK_TTL_MS) {
+    return { status: app.pipeline.actions, note: null };
+  }
+  const { owner, repo } = repoCoords(app);
+  const repoRes = await forgejoApi('GET', `/repos/${owner}/${repo}`);
+  if (repoRes.status === 0) {
+    return { status: app.pipeline.actions, note: 'Forgejo unreachable — Actions status not refreshed.' };
+  }
+  actionsCheckedAt.set(app.id, Date.now());
+  const apply = (status: StageStatus, note: string | null): ActionsHealth => {
+    if (app.pipeline.actions !== status) {
+      app.pipeline.actions = status;
+      writeThrough(app);
+    }
+    return { status, note };
+  };
+  if (!repoRes.ok) return { status: app.pipeline.actions, note: `Forgejo error reading the repo (HTTP ${repoRes.status}).` };
+
+  const hasActions = (repoRes.data as { has_actions?: boolean } | null)?.has_actions;
+  if (hasActions === false) {
+    // ONE-SHOT HEAL: a repo without the Actions unit can never build on push.
+    const heal = await forgejoApi('PATCH', `/repos/${owner}/${repo}`, { has_actions: true });
+    void trace({
+      principal: app.mcpPrincipal,
+      tool: 'generate',
+      input: { action: 'heal_actions_unit', repo: `${owner}/${repo}` },
+      output: { healed: heal.ok, status: heal.status },
+      decision: 'allow',
+    });
+    if (!heal.ok) {
+      return apply(
+        'disabled',
+        `The Actions unit is DISABLED on ${owner}/${repo} and auto-enable failed (HTTP ${heal.status}) — enable it under the repo's Settings → Units in Forgejo.`,
+      );
+    }
+    return apply('pending', 'The Actions unit was disabled on the repo — auto-enabled it; the next push to main will build.');
+  }
+
+  const commits = await forgejoApi('GET', `/repos/${owner}/${repo}/commits?sha=main&limit=1`);
+  const head =
+    commits.ok && Array.isArray(commits.data) && commits.data[0]
+      ? String((commits.data[0] as { sha?: string }).sha ?? '')
+      : '';
+  if (!head) return apply('pending', 'No commits on main yet — nothing for CI to build.');
+
+  const tasks = await forgejoApi('GET', `/repos/${owner}/${repo}/actions/tasks`);
+  if (!tasks.ok) {
+    return apply('pending', `Could not read Actions tasks (HTTP ${tasks.status}) — not claiming a build that is unverified.`);
+  }
+  const runs = ((tasks.data as { workflow_runs?: { head_sha?: string; status?: string }[] } | null)?.workflow_runs ?? []).filter(
+    (r) => r && typeof r === 'object',
+  );
+  // Newest-first: the FIRST run for the head sha is the one that counts (re-runs).
+  const headRun = runs.find((r) => String(r.head_sha ?? '') === head);
+  if (headRun) {
+    // HONEST job-status read: 'ok' means the run SUCCEEDED, not merely existed.
+    const st = String(headRun.status ?? '');
+    if (st === 'failure' || st === 'cancelled') {
+      // ONE-SHOT HEAL for the workflow's single external dependency: re-assert
+      // the REGISTRY_PASS Actions secret (idempotent, admin creds, traced) so a
+      // missing/rotated secret is repaired before the next push.
+      const healed = await ensureRepoActionsSecrets(owner, repo);
+      void trace({
+        principal: app.mcpPrincipal,
+        tool: 'generate',
+        input: { action: 'heal_actions_secrets', repo: `${owner}/${repo}`, runStatus: st },
+        output: { healed },
+        decision: 'allow',
+      });
+      return apply(
+        'failing',
+        `The latest CI run for ${head.slice(0, 10)} FAILED (status: ${st}). Re-asserted the repo's REGISTRY_PASS Actions secret${healed ? '' : ' (re-assert also failed)'} — check the run log in Forgejo (${owner}/${repo} → Actions), fix the cause, then push again to rebuild.`,
+      );
+    }
+    if (st && st !== 'success') {
+      return apply('pending', `CI run for ${head.slice(0, 10)} is not finished yet (status: ${st}).`);
+    }
+    return apply('ok', null);
+  }
+  return apply(
+    'stalled',
+    `The latest push on main (${head.slice(0, 10)}) produced NO Actions run — CI is stalled. Check that .forgejo/workflows/ci.yml exists on main and that the last commit actually reached Forgejo, then re-commit to trigger a build.`,
+  );
+}
+
 // ----------------------------------------------------------------- MCP wiring --
 
-function rehydrateConnection(app: App): void {
+export function rehydrateConnection(app: App): void {
+  // NEVER resurrect an archived app: archiveApp() intentionally drops its grant +
+  // connection, so re-arming here (on a restart's hydrate, or any caller) would
+  // silently make a disabled app callable again + reappear in Connections. This is
+  // the single authoritative guard — unarchiveApp flips status to 'active' first.
+  if (app.status === 'archived') return;
   // Re-arm the auto-MCP capability profile in OPA (reads-on/writes-off) so the
   // governed gate works after a restart, not just the static app-registry grant.
   generateAndCompile(app.mcpPrincipal, { tools: app.mcpTools });
@@ -1049,12 +1525,21 @@ export async function listAppsForUser(user: CurrentUser): Promise<App[]> {
   const map = await getCache();
   return [...map.values()]
     .filter((a) => visibleToUser(a, user))
+    // STRICT DOMAIN ISOLATION: narrow EVERY tier — My (Personal), Domain (Shared) AND
+    // Company (Certified) — to the domain being acted in (auth.ts narrows user.domains to
+    // [active]; "All Domains" keeps every membership; a domainless app always shows). A
+    // certified app homed in domain A must NOT show while acting in domain B — cross-domain
+    // discovery is the dedicated Marketplace catalog's job, not this list's. Shared already
+    // filters on user.domains via visibleToUser; this adds the same gate for Personal +
+    // Certified. The single-app open (getAppForUser) intentionally stays un-narrowed.
+    .filter((a) => !a.domain || user.domains.includes(a.domain))
     .sort((x, y) => y.updatedAt.localeCompare(x.updatedAt));
 }
 
 export async function getAppForUser(appId: string, user: CurrentUser): Promise<App> {
-  const map = await getCache();
-  const a = map.get(appId);
+  // Cache miss falls back to the durable mirror — a cross-instance create must
+  // still be visible here (the same stale-cache split that 404'd `commit`).
+  const a = await getAppByIdWithMirror(appId);
   if (!a || !visibleToUser(a, user)) throw withStatus(new Error('App not found'), 404);
   return a;
 }
@@ -1077,10 +1562,11 @@ export async function createApp(
   input: { name: string; description?: string; template?: AppTemplateKey; domain?: string; surface?: SurfaceDeclaration; purpose?: string },
 ): Promise<App> {
   const map = await getCache();
-  // Default a fresh app to the governed frontend-over-the-OS-API scaffold
-  // (`vite-os`): it wires itself to the OS SDK and renders real granted data on
-  // boot. The other templates remain selectable via `input.template`.
-  const tpl = TEMPLATES[input.template ?? 'vite-os'] ?? TEMPLATES['vite-os'];
+  // Default a fresh app to the SOVEREIGN STANDARD APP (`sovereign-app`): the rich
+  // base app with OS-delegated identity, domain scoping, an admin section and the
+  // MCP link already in place. The other templates remain selectable via
+  // `input.template`; existing apps keep the template they were created with.
+  const tpl = TEMPLATES[input.template ?? 'sovereign-app'] ?? TEMPLATES['sovereign-app'];
   // An explicit surface declaration (intent) wins over the scaffold's heuristic.
   const declaredSurface: SurfaceDeclaration | undefined =
     input.surface === 'ui' || input.surface === 'api' || input.surface === 'both' ? input.surface : undefined;
@@ -1098,7 +1584,9 @@ export async function createApp(
   const live = repo.mode === 'live';
   const pipeline: Record<PipelineStage, StageStatus> = {
     forgejo: live ? 'ok' : 'offline',
-    actions: live ? 'ok' : 'pending',
+    // HONEST: 'ok' is EARNED, never assumed — `refreshActionsStage` flips it to
+    // 'ok' only once the latest push on main actually produced an Actions run.
+    actions: 'pending',
     // Harbor is a default-off heavy workload; CI uses Forgejo's registry locally.
     harbor: config.harborEnabled ? (live ? 'ok' : 'pending') : 'disabled',
     argocd: live ? 'ok' : 'pending',
@@ -1274,6 +1762,25 @@ export async function updateAppDocs(
 }
 
 /**
+ * Sanitise every story's Design SPEC before persist — normalises the three lists and
+ * DROPS an empty/garbage spec so the field stays absent (byte-stable) for stories the
+ * user never specified. Everything else on the epics/stories is passed through
+ * untouched; the caller still owns the epic/story CRUD.
+ */
+function normalizeEpicSpecs(epics: AppEpic[]): AppEpic[] {
+  return epics.map((e) => ({
+    ...e,
+    stories: (e.stories ?? []).map((s) => {
+      const spec = normalizeSpec(s.spec);
+      if (spec) return { ...s, spec };
+      // No usable spec → ensure the field is absent, not an empty object.
+      const { spec: _drop, ...rest } = s;
+      return rest;
+    }),
+  }));
+}
+
+/**
  * Persist the Define + Design surfaces — the app's PURPOSE, its DESIGN epics/stories,
  * and its governed CONTEXT GRANTS. Same fail-closed edit-scope as `updateAppDocs`
  * (owner, owning-domain admin, or admin). Any field left undefined is untouched, so
@@ -1290,7 +1797,7 @@ export async function patchAppDesign(
   if (!a) throw withStatus(new Error('App not found'), 404);
   if (!isOwnerOrAdminApp(a, user)) throw withStatus(new Error('Not permitted to edit this app'), 403);
   if (patch.purpose !== undefined) a.purpose = patch.purpose.slice(0, 2000);
-  if (patch.epics !== undefined) a.epics = patch.epics;
+  if (patch.epics !== undefined) a.epics = normalizeEpicSpecs(patch.epics);
   if (patch.grants !== undefined) a.grants = normalizeContextGrants(patch.grants);
   a.updatedAt = now();
   map.set(a.id, a);
@@ -1520,8 +2027,7 @@ export async function restoreAppGitVersion(
 
 /** Raw app fetch by id (no visibility filter) — for governed server orchestration. */
 export async function getAppByIdInternal(appId: string): Promise<App | null> {
-  const map = await getCache();
-  return map.get(appId) ?? null;
+  return getAppByIdWithMirror(appId);
 }
 
 /** Every app in the store (no visibility filter) — for the lineage check. */

@@ -34,6 +34,35 @@ function base(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
+/** USD per 1M tokens for one LiteLLM model_name. */
+export type ModelPrice = { inputPerM: number; outputPerM: number };
+
+/**
+ * Parse MODEL_PRICES_JSON — a JSON map of LiteLLM model_name →
+ * `{ inputPerM, outputPerM }` in the billing currency (EUR on STACKIT) per 1M
+ * tokens. Malformed JSON or entries with non-finite/negative numbers are dropped
+ * (default `{}`): an UNPRICED model yields no cost at all in Monitoring ("—"),
+ * never a fabricated 0.
+ */
+export function parseModelPrices(raw: string): Record<string, ModelPrice> {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, ModelPrice> = {};
+    for (const [name, v] of Object.entries(parsed as Record<string, unknown>)) {
+      const p = v as { inputPerM?: unknown; outputPerM?: unknown } | null;
+      const inputPerM = Number(p?.inputPerM);
+      const outputPerM = Number(p?.outputPerM);
+      if (Number.isFinite(inputPerM) && inputPerM >= 0 && Number.isFinite(outputPerM) && outputPerM >= 0) {
+        out[name] = { inputPerM, outputPerM };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 export const config = {
   // sample-agent (LangGraph RAG): GET {SAMPLE_AGENT_URL}/ask?q=...
   sampleAgentUrl: base(env('SAMPLE_AGENT_URL', 'http://sample-agent:8000')),
@@ -56,10 +85,23 @@ export const config = {
   scheduleCronImage: env('SCHEDULE_CRON_IMAGE', 'curlimages/curl:8.11.1'),
   agentRuntimeTokenSecret: env('AGENT_RUNTIME_TOKEN_SECRET', 'os-ui'),
   agentRuntimeTokenSecretKey: env('AGENT_RUNTIME_TOKEN_SECRET_KEY', 'agent-runtime-token'),
+  // Data-sync CronJobs (Data tab scheduled incremental sync). Saving an enabled sync
+  // schedule provisions a CronJob that curls `<dataSyncUrlBase>/<datasetId>/sync` with
+  // the SAME shared runtime bearer (Secret-mounted) the agent schedules use.
+  dataSyncUrlBase: base(env('DATA_SYNC_URL_BASE', 'http://os-ui:3000/api/data/datasets')),
 
   // ml-agent (LangGraph Science driver): GET {ML_AGENT_URL}/health, /models;
   // POST /run. Off by default (opt-in Science component); probed gracefully.
   mlAgentUrl: base(env('ML_AGENT_URL', 'http://ml-agent:8000')),
+
+  // Shared service bearer for the in-cluster data-plane services (query-tool +
+  // data-runner). Defense-in-depth BEHIND the NetworkPolicies: those services trust
+  // the principal/role/domains in the request body, and only os-ui is meant to call
+  // them, so os-ui presents this bearer to prove identity — network reach alone is not
+  // enough. Empty string = feature OFF (the chart sets this env only when the shared
+  // Secret exists; the services then also skip the check — fail-open by design, netpol
+  // is the primary boundary). Server-only, never reaches the browser.
+  serviceBearerToken: env('SERVICE_BEARER_TOKEN', ''),
 
   // query-tool (governed, Trino): POST {QUERY_TOOL_URL}/query  {"sql": "..."}
   queryToolUrl: base(env('QUERY_TOOL_URL', 'http://query-tool:8000')),
@@ -72,13 +114,22 @@ export const config = {
   // offline-mock so the teaching flow still runs.
   dataRunnerUrl: base(env('DATA_RUNNER_URL', 'http://data-runner:8000')),
 
+  // Scheduled-sync WRITE statement timeout (ms). Real incremental slices routinely
+  // outlive the interactive 15s default `executeRun` uses, so the sync executor
+  // passes this instead. Clamped to 45 min — it must stay WELL below the sync
+  // lease TTL (60 min, SYNC_LEASE_TTL_MS): a statement outliving its lease is how
+  // duplicate concurrent runs happen. Default 10 min.
+  syncStatementTimeoutMs: Math.min(
+    Number(env('SYNC_STATEMENT_TIMEOUT_MS', '')) || 600000,
+    45 * 60 * 1000,
+  ),
+
   // Object storage (MinIO / STACKIT Object Storage) — the Data-tab upload streams
   // a file to `s3://<uploadsBucket>/uploads/<uid>/<file>` (path-style SigV4 PUT,
   // lib/data/object-store.ts) before calling the runner. Server-only creds; the
   // SAME `object-storage-credentials` Secret + `soa.s3Endpoint` the lakehouse uses.
   s3Endpoint: base(env('S3_ENDPOINT', 'http://minio:9000')),
   s3Region: env('S3_REGION', 'us-east-1'),
-  s3PathStyle: env('S3_PATH_STYLE', 'true').toLowerCase() !== 'false',
   uploadsBucket: env('UPLOADS_BUCKET', 'lakehouse'),
   // The governed Files-tab object store. Uploaded originals live under the store's
   // prefix invariant `s3://files/<owner|domain>/…` (lib/files/asset-schema.ts →
@@ -86,9 +137,12 @@ export const config = {
   filesBucket: env('FILES_BUCKET', 'files'),
   awsAccessKeyId: env('AWS_ACCESS_KEY_ID', ''),
   awsSecretAccessKey: env('AWS_SECRET_ACCESS_KEY', ''),
-  // M1 upload cap (documented). Streams a single buffered PUT; ~100 MB keeps the
-  // os-ui pod memory bounded. Larger loads are an M2 connector (dlt source) job.
-  uploadMaxBytes: Number(env('UPLOAD_MAX_BYTES', String(100 * 1024 * 1024))) || 100 * 1024 * 1024,
+  // M1 upload cap (documented). The route buffers a single PUT in pod memory, so
+  // this MUST stay bounded to the os-ui memory limit (200 MB ⇒ ~2× buffered peak
+  // under the 1Gi limit). The ingress `proxy-body-size` (chart) must be ≥ this, or
+  // large files are rejected at the edge (413) before reaching the app. GB-scale
+  // uploads need a presigned browser→object-store path (bytes bypass the app).
+  uploadMaxBytes: Number(env('UPLOAD_MAX_BYTES', String(200 * 1024 * 1024))) || 200 * 1024 * 1024,
 
   // (Removed) sandbox-duckdb personal-query engine — the second engine. The personal
   // lane now reads through the SAME governed Trino path (owner-principal); there is
@@ -194,6 +248,11 @@ export const config = {
   // Software golden path: per-app live subdomain suffix + image registry. Harbor
   // is a default-off heavy workload (chart `harbor.enabled`); locally CI uses
   // Forgejo's built-in OCI registry, so HARBOR_REGISTRY defaults to it.
+  // The OS's own public base URL (e.g. https://agentic.datamasterclass.com). Baked
+  // into governed apps at build time as VITE_OS_API so a deployed app's os.whoami()
+  // reaches the OS across subdomains (not its own origin). '' locally → apps derive
+  // it from their host or run same-origin. Same var the emailed-links path reads.
+  osPublicUrl: base(env('OS_PUBLIC_URL', '')),
   appsBaseDomain: env('OS_APPS_DOMAIN', 'apps.local'),
   harborEnabled: env('HARBOR_ENABLED', '') === 'true',
   harborRegistry: env('HARBOR_REGISTRY', 'forgejo-http:3000/gitea_admin'),
@@ -263,22 +322,47 @@ export const config = {
   })() as 'reasoning' | 'standard' | 'tools',
   talkEscalateToReasoning: env('TALK_ESCALATE_TO_REASONING', 'true').toLowerCase() !== 'false',
 
-  // Ask-the-OS assistant: max PLAN→ACT tool-call rounds per turn. Raised from the
-  // original 8 so multi-step builds (ingest → silver → gold → metric → publish) can
-  // complete in one conversation. Tunable via env without a rebuild.
-  assistantMaxSteps: Number(env('ASSISTANT_MAX_STEPS', '')) || 30,
+  // Ask-the-OS assistant + single-agent runs: max PLAN→ACT tool-call rounds per
+  // turn. Raised over time (8 → 30 → 50) so multi-step builds (ingest → silver →
+  // gold → metric → publish) finish in one conversation. Tunable via env.
+  assistantMaxSteps: Number(env('ASSISTANT_MAX_STEPS', '')) || 50,
   // Multi-agent TEAM runs: max PLAN→ACT tool-call rounds PER NODE. Higher than the
   // single-agent cap because one analytical node (an evaluator scoring N campaigns,
   // a recommender reasoning over a full scorecard) legitimately needs more rounds
   // than a one-shot assistant turn. Single-agent runs keep `assistantMaxSteps`.
-  agentTeamNodeMaxSteps: Number(env('AGENT_TEAM_NODE_MAX_STEPS', '')) || 60,
+  agentTeamNodeMaxSteps: Number(env('AGENT_TEAM_NODE_MAX_STEPS', '')) || 100,
+  // Multi-agent TEAM runs: GLOBAL tool-call-round budget for the WHOLE run, summed
+  // across every node. Without this the per-node cap has no team-wide ceiling —
+  // nodes × per-node could explode on the shared LLM pool and time the run out.
+  // Each node is clamped to whatever is LEFT of this budget; the run stops early and
+  // degrades gracefully once it is spent. Env-overridable.
+  agentTeamRunMaxSteps: Number(env('AGENT_TEAM_RUN_MAX_STEPS', '')) || 400,
   // LLM Gateway tab — the read-only, tenant-total usage/spend panel
-  // (app/api/gateway/usage). The budget envelope is surfaced for the "budget
-  // used" bar; it mirrors the chart's litellmAgentKey.maxBudget / budgetDuration
-  // (USD cap + reset window). Read-only; no key or per-user datum reaches the
-  // browser — the master key stays server-side in the usage route.
-  litellmBudgetUsd: Number(env('LITELLM_BUDGET_USD', '5')) || 0,
+  // (app/api/gateway/usage). The budget envelope is DISPLAY-ONLY: set it to
+  // mirror the chart's litellmAgentKey.maxBudget / budgetDuration (the USD cap
+  // LiteLLM actually enforces on its key, on ITS OWN spend meter). Default 0 =
+  // no budget configured — the tab renders the honest "no weekly budget set"
+  // state instead of implying a $5 cap nobody set. Read-only; no key or
+  // per-user datum reaches the browser — the master key stays server-side.
+  litellmBudgetUsd: Number(env('LITELLM_BUDGET_USD', '0')) || 0,
   litellmBudgetWindow: env('LITELLM_BUDGET_WINDOW', 'weekly'),
+  // Explicit model pricing for Monitoring cost attribution (USD per 1M tokens per
+  // LiteLLM model_name, e.g. {"sovereign-default":{"inputPerM":0.1,"outputPerM":0.4}}).
+  // Default {} = nothing priced ⇒ run cost stays undefined and the tile shows "—"
+  // (unpriced ≠ free — we never invent a price).
+  modelPrices: parseModelPrices(env('MODEL_PRICES_JSON', '{}')),
+
+  // Monitoring DEMO fixtures. The Monitor lenses (pipelines/artifacts/cost/runs)
+  // fall back to offline-mock "worked example" signals (e.g. the mart_sales dbt
+  // freshness failure) when the live backend returns nothing — great on a laptop,
+  // but on a real deploy it shows fake red alerts no one can act on. Default: ON
+  // in dev/test, OFF in production (so a live tab shows real telemetry or an honest
+  // "no signals yet", never demo data). Override with MONITORING_DEMO_FIXTURES.
+  monitoringDemoFixtures: (() => {
+    const v = env('MONITORING_DEMO_FIXTURES', '');
+    if (v) return v.toLowerCase() !== 'false';
+    return process.env.NODE_ENV !== 'production';
+  })(),
 
   // OPA (Policy): POST {OPA_URL}/v1/data/agentic/authz/allow and
   // GET {OPA_URL}/v1/data/grants for the principal -> tools grant map.
@@ -317,19 +401,14 @@ export const config = {
   // back to a dead ws://localhost the browser can never reach on a real deploy.
   terminalBrokerWsUrl: consoleEnv('TERMINAL_BROKER_WS', 'ws://localhost:8090/terminal'),
 
-  // ---- Domain-Builder Workbench. The OS UI mints a short-lived single-use HMAC
-  // token (signed with workbenchBrokerSecret — the SAME value the workbench-broker
-  // verifies with) for an authenticated `builder` whose role is in
-  // workbenchAllowedRoles, scoped to ONE of their domains. The browser then opens
-  // their PERSISTENT code-server through the broker at workbenchBrokerUrl (which
-  // reconciles + reverse-proxies it). Default OFF; the secret is server-only and
-  // never reaches the browser. ----------------------------------------------
-  workbenchEnabled: env('WORKBENCH_ENABLED', '') === 'true',
+  // ---- Domain-Builder Workbench. An authenticated `builder` whose role is in
+  // workbenchAllowedRoles, scoped to ONE of their domains, opens their PERSISTENT
+  // code-server through the broker at workbenchBrokerUrl (which reconciles +
+  // reverse-proxies it). ----------------------------------------------------
   workbenchAllowedRoles: env('WORKBENCH_ALLOWED_ROLES', 'builder,admin')
     .split(',')
     .map((r) => r.trim())
     .filter(Boolean),
-  workbenchBrokerSecret: env('WORKBENCH_BROKER_SECRET', 'dev-only-insecure-workbench-secret-change-me'),
   // consoleEnv for the same reason as terminalBrokerWsUrl above (chart renders
   // "" when ingress.hosts.workbench is unset — honour it, don't dial localhost).
   workbenchBrokerUrl: base(consoleEnv('WORKBENCH_BROKER_URL', 'http://localhost:8091')),
@@ -413,7 +492,12 @@ export const config = {
   // The trainer reads Gold via the governed query engine (least-privilege read
   // principal — the SAME Trino/OPA path the `query` tool uses, never a write role).
   trinoHost: env('TRINO_HOST', 'trino'),
-  trinoPort: Number(env('TRINO_PORT', '8080')),
+  // Kubernetes injects docker-link vars for every Service: a Service named `trino`
+  // gives EVERY pod TRINO_PORT="tcp://<ip>:8080", which Number() turns into NaN and
+  // silently breaks every direct-Trino URL (the metric reachability probe fell back
+  // to offline-mock this way). Strip everything up to the last colon so both a plain
+  // port and the k8s link form parse.
+  trinoPort: Number(env('TRINO_PORT', '8080').replace(/^.*:/, '')) || 8080,
   trinoReadUser: env('TRINO_SCIENCE_USER', 'science-reader'),
   trinoCatalog: env('TRINO_CATALOG', 'iceberg'),
 

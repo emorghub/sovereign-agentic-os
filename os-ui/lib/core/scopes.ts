@@ -11,8 +11,8 @@
  * SAME four groups and labels them with the SAME nouns and verbs.
  *
  *   All      — everything the caller can see (union of the three groups)
- *   My …     — the caller's OWN items (owner), regardless of tier — a
- *              promoted asset they authored still shows under "My"
+ *   My …     — the caller's OWN, un-promoted (Personal-tier) items. Once an
+ *              item is promoted it moves to Domain/Company and leaves "My".
  *   Domain   — shared to the caller's domain (tier `asset` / visibility Shared)
  *   Company  — certified, cross-domain (tier `product` / visibility Marketplace)
  *
@@ -31,9 +31,10 @@
  *   • the store already returns a canView-scoped `{ mine, domain, marketplace }`
  *     payload (grouped server-side by tier/visibility);
  *   • "All"    = the union of all three groups;
- *   • "My"     = OWNERSHIP — everything in the union whose `owner` is the caller,
- *                so a Domain/Company item the caller authored appears under BOTH
- *                All and My (and also under Domain/Company);
+ *   • "My"     = the caller's OWN Personal-tier items only (the store's `mine`
+ *                group). A Domain/Company item the caller authored does NOT
+ *                appear under My — once promoted it lives under Domain/Company
+ *                (and All) only, so "My" stays the private, un-promoted drawer;
  *   • "Domain" = the `domain` group as returned by the store;
  *   • "Company" = the `marketplace` group as returned by the store.
  *
@@ -55,6 +56,22 @@ export const SCOPE_GROUPS: { key: ScopeKey; label: (kind?: string) => string }[]
 export function scopeLabel(key: ScopeKey, kind?: string): string {
   return SCOPE_GROUPS.find((g) => g.key === key)!.label(kind);
 }
+
+/**
+ * The three visibility TIERS every tab normalises to, and the CSS badge class each
+ * renders (defined in globals.css). Tabs name their tiers differently
+ * (personal/dataset/Personal, domain/asset/shared, marketplace/product/certified),
+ * but the badge CLASS for a given tier is identical everywhere — this is that one
+ * map. Callers translate their own tier vocabulary to a `NormalTier` and read the
+ * class here, keeping their own display NOUNS (which intentionally differ).
+ */
+export type NormalTier = 'personal' | 'shared' | 'certified';
+
+export const TIER_BADGE_CLASS: Record<NormalTier, string> = {
+  personal: 'vis-personal',
+  shared: 'vis-shared',
+  certified: 'vis-certified',
+};
 
 /** A stored visibility/tier value — internal, unchanged. Mapped to a scope for DISPLAY. */
 export type Visibility = 'Personal' | 'Shared' | 'Certified' | 'Marketplace' | string;
@@ -139,7 +156,11 @@ export function groupByScope<T extends Owned>(
   const all = [...groups.mine, ...groups.domain, ...groups.marketplace];
   return {
     all,
-    mine: all.filter((t) => t.owner === currentUserId),
+    // "My" = the caller's OWN, un-promoted items only — the store's Personal-tier
+    // `mine` group. A promoted item the caller authored lives under Domain/Company
+    // (and All), NOT under My, so promoting genuinely moves it out of the private
+    // drawer instead of showing it in two places.
+    mine: groups.mine.filter((t) => t.owner === currentUserId),
     shared: groups.domain,
     marketplace: groups.marketplace,
   };
@@ -195,4 +216,38 @@ export function activeScopeCounts<T extends Owned & { archived?: boolean }>(
     shared: tilesForScope(groups, 'shared', currentUserId).active.length,
     marketplace: tilesForScope(groups, 'marketplace', currentUserId).active.length,
   };
+}
+
+/**
+ * The two folder trees a tab navigates: the caller's PERSONAL tree and the shared
+ * DOMAIN tree. Every artifact list buckets its items into one of these roots.
+ */
+export type FolderRoot = 'personal' | 'domain';
+
+/**
+ * The folder root(s) a scope segment addresses — one place for the mapping that
+ * trims the folder rail + picker to the roots that can hold in-scope items:
+ *   • My         → personal only
+ *   • Domain     → domain only
+ *   • Company    → domain only
+ *   • All        → both trees
+ * (Each tab keeps its own `rootOf(item)` — that reads the tab's tier vocabulary.)
+ */
+export function rootsForScope(scope: ScopeKey): FolderRoot[] {
+  if (scope === 'mine') return ['personal'];
+  if (scope === 'shared' || scope === 'marketplace') return ['domain'];
+  return ['personal', 'domain']; // 'all'
+}
+
+/**
+ * Whether an artifact card should render its origin DomainTag in the given scope.
+ * True whenever the list mixes domains — the Domain, Company and All views — where
+ * the tag disambiguates same-named items across domains. (The My view is a single
+ * caller's own drawer, so the tag is redundant there.)
+ *
+ * NOTE: the Data tab's DatasetTiles intentionally omits 'all' from its own
+ * showDomain and is NOT migrated to this helper — do not "fix" that.
+ */
+export function showDomainForScope(scope: ScopeKey): boolean {
+  return scope === 'shared' || scope === 'marketplace' || scope === 'all';
 }

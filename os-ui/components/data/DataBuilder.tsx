@@ -3,7 +3,7 @@
  */
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useUser } from '@/lib/useUser';
 import { canManageArtifact } from '@/lib/governance/edit-scope';
 import { anchorAttr, ANCHORS } from '@/lib/tutorials';
@@ -12,8 +12,9 @@ import RefinePanel from './RefinePanel';
 import GoldJoinPanel from './GoldJoinPanel';
 import ExplorePanel from './ExplorePanel';
 import BronzePanel from './BronzePanel';
-import MetricsPanel from './MetricsPanel';
-import StageAssistant, { type DefineDraft } from './StageAssistant';
+import SyncPanel from './SyncPanel';
+import QualityFixPanel from './QualityFixPanel';
+import AiAction, { type CleanDraft, type DefineDraft } from './StageAssistant';
 import TalkTo from '@/components/talk/TalkTo';
 import { TALK_PRESENTATION } from '@/lib/talk/schema';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
@@ -23,10 +24,13 @@ import type { FiledApproval } from '@/lib/governance/approval-notice';
 import DomainTag from '@/components/DomainTag';
 import type { Visibility } from '@/lib/core/lifecycle';
 import StageShell from '@/components/core/StageShell';
-import { initialStageState, markDone, type StageState } from '@/lib/core/stages';
+import { usePublishPageContext } from '@/components/core/PageContext';
+import { initialStageState, markDone, advance, type StageState } from '@/lib/core/stages';
 import { DATA_STAGES, type DataStageId, type DataCtx } from '@/lib/data/stages';
 import BuilderModeToggle from '@/components/core/BuilderModeToggle';
 import type { ViewMode } from '@/lib/core/view-mode';
+import { TIER_BADGE_CLASS } from '@/lib/core/scopes';
+import type { GoldSpec } from '@/lib/data/dataset-schema';
 
 const DATA_MODE_KEY = 'data.viewMode';
 
@@ -132,6 +136,8 @@ function ruleText(c: DataCheck): string {
 type Dataset = {
   id: string;
   name: string;
+  /** The FROZEN physical slug (present once a rename decoupled it from the name). */
+  slug?: string;
   owner: string;
   domain: string;
   tier: 'dataset' | 'asset' | 'product';
@@ -140,6 +146,12 @@ type Dataset = {
   versions: { bronze: VersionState; silver: VersionState; gold: VersionState };
   columns: ColumnDoc[];
   measures: { name: string }[];
+  /** The stored raw Gold build spec — re-hydrates the Gold panel so its joins/columns/
+   *  measures stay visible + editable + rebuildable after a build. */
+  goldSpec?: GoldSpec;
+  /** Scheduled incremental sync (absent when none is set up). Presence gates the
+   *  SyncPanel host — the panel fetches its own full state. */
+  sync?: { schedule: { cron: string }; enabled: boolean };
   certification?: Certification;
   /** Soft-archived (retained, reversible). Absent/false = live. */
   archived?: boolean;
@@ -154,6 +166,20 @@ function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'dataset';
 }
 
+function fmtDate(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/** Bronze refreshed AFTER this layer was built ⇒ the layer is stale. A scheduled
+ *  sync only rewrites Bronze (v1 surfaces staleness, never auto-rebuilds). */
+function staleVsBronze(versions: Dataset['versions'], layer: 'silver' | 'gold'): boolean {
+  const b = versions.bronze;
+  const l = versions[layer];
+  return Boolean(b.built && l.built && b.updatedAt && l.updatedAt && b.updatedAt > l.updatedAt);
+}
+
 function furthestBuilt(versions: Dataset['versions']): Layer | null {
   if (versions.gold.built) return 'gold';
   if (versions.silver.built) return 'silver';
@@ -164,9 +190,14 @@ function furthestBuilt(versions: Dataset['versions']): Layer | null {
 /** Tier-aware physical FQN — mirrors the server's builtLayerFqn: a personal dataset
  *  lives in the OWNER's `personal_<uid>` schema, a governed one in its (sanitized)
  *  domain schema. Never shows a table name that can't exist. */
+/** The FROZEN physical slug — the pinned `slug` if a rename decoupled it, else
+ *  `slug(name)`. Mirrors store-fqn.physicalSlug so the displayed FQN matches the real table. */
+function physicalSlug(d: Dataset): string {
+  return d.slug ?? slug(d.name);
+}
 function physicalFqn(d: Dataset, layer: Layer): string {
   const schema = d.tier === 'dataset' ? `personal_${slug(d.owner)}` : slug(d.domain);
-  return `iceberg.${schema}.${layer}_${slug(d.name)}`;
+  return `iceberg.${schema}.${layer}_${physicalSlug(d)}`;
 }
 
 /** Whether a dataset would be delivered to the Cube semantic layer (mirrors cubeDeliverable). */
@@ -182,7 +213,7 @@ function formatDate(iso: string): string {
   }
 }
 
-const TIER_BADGE: Record<Dataset['tier'], string> = { dataset: 'vis-personal', asset: 'vis-shared', product: 'vis-certified' };
+const TIER_BADGE: Record<Dataset['tier'], string> = { dataset: TIER_BADGE_CLASS.personal, asset: TIER_BADGE_CLASS.shared, product: TIER_BADGE_CLASS.certified };
 const TIER_WORD: Record<Dataset['tier'], string> = { dataset: 'Personal dataset', asset: 'Data asset', product: 'Data product' };
 // Display words for a dataset's stored visibility. Core (lib/core/scopes.ts) is the
 // source of truth for scope vocabulary; these lowercase keys are this tab's own field
@@ -251,6 +282,118 @@ function CodeDrawer({ datasetId }: { datasetId: string }) {
   );
 }
 
+/* ───────────────────── Publish · connected-lists (build on this data) ─────────────────────
+ * Three governed reverse-lists for the Publish stage: the metrics, dashboards and agent
+ * systems that already build on THIS dataset. Each is fetched AS the current user through a
+ * per-dataset GET route (RLS-filtered server-side), links out to the owning tab focused on
+ * the item, and offers an inline "＋ New …" that opens that tab's creator pre-scoped to this
+ * dataset. Fail-soft: a failed fetch shows a calm hint, never a crash or a fabricated row. */
+
+type MetricRow = { id: string; name: string; type: string; tier: string; error?: string };
+type DashboardRow = { id: string; name: string; charts: number };
+type SystemRow = { id: string; name: string; agentCount: number };
+
+/** Fetch a per-dataset list once (keyed on datasetId), fail-soft. Mirrors the file's other
+ *  panels: a small useState + useEffect, no external data lib. `pick` reads the array off the
+ *  JSON body so one hook serves all three lists. */
+function useConnected<T>(datasetId: string, path: string, pick: (body: unknown) => T[]) {
+  const [rows, setRows] = useState<T[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setLoaded(false);
+    (async () => {
+      try {
+        const res = await fetch(`/api/data/datasets/${datasetId}/${path}`, { cache: 'no-store' });
+        if (!res.ok) throw new Error();
+        const body = await res.json();
+        if (live) setRows(pick(body));
+      } catch {
+        if (live) setRows([]); // fail-soft — a calm empty list, never a crash
+      } finally {
+        if (live) setLoaded(true);
+      }
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasetId, path]);
+  return { rows, loaded };
+}
+
+/** The "build on this data" doorways for Publish — Metrics, Dashboards and Agent systems
+ *  connected to this dataset, each with an inline create pre-scoped to it. */
+function ConnectedBuild({ datasetId }: { datasetId: string }) {
+  const metrics = useConnected<MetricRow>(datasetId, 'metrics', (b) => (b as { metrics?: MetricRow[] }).metrics ?? []);
+  const dashboards = useConnected<DashboardRow>(datasetId, 'dashboards', (b) => (b as { dashboards?: DashboardRow[] }).dashboards ?? []);
+  const systems = useConnected<SystemRow>(datasetId, 'agents', (b) => (b as { systems?: SystemRow[] }).systems ?? []);
+
+  return (
+    <>
+      {/* Metrics defined on this dataset. */}
+      <div className="section-title" style={{ marginTop: 24 }}>
+        Metrics
+        {metrics.rows.length > 0 ? <span className="count-pill">{metrics.rows.length}</span> : null}
+      </div>
+      {metrics.rows.length > 0 ? (
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          {metrics.rows.map((m) => (m.error ? (
+            <span className="chip" key={m.id} title={m.error} style={{ opacity: 0.6 }}>{m.name} · {m.error}</span>
+          ) : (
+            <a className="chip" key={m.id} href={`/metrics?focus=${encodeURIComponent(m.id)}`} style={{ textDecoration: 'none' }}>{m.name} · {m.type}</a>
+          )))}
+        </div>
+      ) : metrics.loaded ? (
+        <p className="hint" style={{ marginTop: 0, marginBottom: 8 }}>No metrics defined on this dataset yet.</p>
+      ) : null}
+      <div className="row" style={{ marginBottom: 4 }}>
+        <a className="btn ghost sm" href={`/metrics?new=1&dataset=${encodeURIComponent(datasetId)}`} title="Define a new metric on this dataset in the Metrics tab">
+          ＋ New metric →
+        </a>
+      </div>
+
+      {/* Dashboards bound to this dataset's Cube view. */}
+      <div className="section-title" style={{ marginTop: 20 }}>
+        Dashboards
+        {dashboards.rows.length > 0 ? <span className="count-pill">{dashboards.rows.length}</span> : null}
+      </div>
+      {dashboards.rows.length > 0 ? (
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          {dashboards.rows.map((d) => (
+            <a className="chip" key={d.id} href={`/dashboards?focus=${encodeURIComponent(d.id)}`} style={{ textDecoration: 'none' }}>{d.name} · {d.charts} chart{d.charts === 1 ? '' : 's'}</a>
+          ))}
+        </div>
+      ) : dashboards.loaded ? (
+        <p className="hint" style={{ marginTop: 0, marginBottom: 8 }}>No dashboards built on this dataset yet.</p>
+      ) : null}
+      <div className="row" style={{ marginBottom: 4 }}>
+        <a className="btn ghost sm" href={`/dashboards?new=1&dataset=${encodeURIComponent(datasetId)}`} title="Build a new dashboard on this dataset in the Dashboards tab">
+          ＋ New dashboard →
+        </a>
+      </div>
+
+      {/* Agent systems that consume this dataset. */}
+      <div className="section-title" style={{ marginTop: 20 }}>
+        Use in an agent system
+        {systems.rows.length > 0 ? <span className="count-pill">{systems.rows.length}</span> : null}
+      </div>
+      {systems.rows.length > 0 ? (
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          {systems.rows.map((s) => (
+            <a className="chip" key={s.id} href={`/agents?system=${encodeURIComponent(s.id)}`} style={{ textDecoration: 'none' }}>{s.name} · {s.agentCount} agent{s.agentCount === 1 ? '' : 's'}</a>
+          ))}
+        </div>
+      ) : systems.loaded ? (
+        <p className="hint" style={{ marginTop: 0, marginBottom: 8 }}>No agent systems use this dataset yet.</p>
+      ) : null}
+      <div className="row" style={{ marginBottom: 4 }}>
+        <a className="btn ghost sm" href="/agents?system=new" title="Build a new agent system that uses this dataset in the Agents tab">
+          Use in an agent system →
+        </a>
+      </div>
+    </>
+  );
+}
+
 /**
  * The Data guided builder — Ingest · Define · Harmonize · Validate · Publish (5 stages) on
  * the OS-wide staged primitive (lib/core/stages.ts + components/core/StageShell.tsx; the
@@ -285,6 +428,11 @@ export default function DataBuilder({
     if (typeof window !== 'undefined') window.localStorage.setItem(DATA_MODE_KEY, m);
   };
 
+  /* ── Published landing: a published dataset (shared to Domain or certified to Company)
+     opens in a calm PREVIEW + TALK-TO-DATA view — most people want to USE it, not rebuild
+     it. A prominent "Edit data stages" button drops into the full 5-stage builder. */
+  const [builderOpen, setBuilderOpen] = useState(false);
+
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [checks, setChecks] = useState<DataCheck[]>([]);
   const [loadErr, setLoadErr] = useState('');
@@ -297,6 +445,8 @@ export default function DataBuilder({
   const [docsBusy, setDocsBusy] = useState(false);
   const [docsErr, setDocsErr] = useState('');
   const [docsOk, setDocsOk] = useState('');
+  // ---- AI "Clean it up" proposal — filled into the Silver RefinePanel when it arrives ----
+  const [cleanProposal, setCleanProposal] = useState<CleanDraft | null>(null);
 
   // ---- data-quality rules editor ----
   const [ruleKind, setRuleKind] = useState<DataCheckRule>('not_null');
@@ -312,6 +462,8 @@ export default function DataBuilder({
   const [ranAt, setRanAt] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [runErr, setRunErr] = useState('');
+  // ---- AI-proposed remediations: which failing rule's fix panel is open ----
+  const [fixOpen, setFixOpen] = useState<string | null>(null);
   // ---- health score + persisted trend + profile-driven suggestions (Validate) ----
   const [health, setHealth] = useState<HealthScore | null>(null);
   const [trend, setTrend] = useState<TrendPoint[]>([]);
@@ -329,6 +481,12 @@ export default function DataBuilder({
 
   // ---- configuration drawer (dbt SQL / dataset.yaml) ----
   const [showCode, setShowCode] = useState(false);
+
+  // ---- inline rename of the display name (edit-gated; the physical slug is frozen
+  //      server-side so no Iceberg/Cube/dbt table ever moves) ----
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [renameErr, setRenameErr] = useState('');
 
   // ---- sharing / promotion (mirrors Files: gate hint + button + request status) ----
   const [promote, setPromote] = useState<PromoteStatus | null>(null);
@@ -597,6 +755,40 @@ export default function DataBuilder({
   }, [datasetId]);
   useEffect(() => { void loadPreview(); }, [loadPreview]);
 
+  // The governed 50-row data preview, as a reusable block so EVERY stage can show
+  // "what's in the table right now" — Bronze/Silver had it; Gold, Validate and Publish
+  // now get the same view. It always reads the highest built layer through the governed
+  // Trino path (OPA-checked); nothing is shown until a layer is built.
+  const rowPreviewBlock = (heading: string, subtitle: string) => (
+    <>
+      <div className="section-title" style={{ marginTop: 22 }}>
+        {heading}
+        <button className="btn ghost sm" style={{ marginLeft: 10 }} onClick={loadPreview} disabled={previewing}>
+          {previewing ? <span className="spin" /> : 'Refresh preview'}
+        </button>
+      </div>
+      <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>{subtitle}</p>
+      {previewErr ? <div className="error" style={{ marginBottom: 10 }}>{previewErr}</div> : null}
+      {preview ? (
+        preview.available ? (
+          <>
+            <p className="muted" style={{ fontSize: 12.5, margin: '0 0 8px' }}>
+              First {preview.rowCount} row{preview.rowCount === 1 ? '' : 's'} · {preview.layer}{' · '}<span className="mono" style={{ fontSize: 10 }}>{preview.fqn}</span>
+            </p>
+            {preview.columns.length > 0 ? (
+              <div className="table-wrap" style={{ marginBottom: 16 }}>
+                <table>
+                  <thead><tr>{preview.columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+                  <tbody>{preview.rows.map((r, i) => <tr key={i}>{r.map((cell, j) => <td key={j}>{cell}</td>)}</tr>)}</tbody>
+                </table>
+              </div>
+            ) : <p className="muted" style={{ fontSize: 13, margin: '0 0 16px' }}>No rows to show.</p>}
+          </>
+        ) : <p className="muted" style={{ fontSize: 13, margin: '0 0 16px' }}>{preview.reason}</p>
+      ) : null}
+    </>
+  );
+
   // Apply an assistant Define draft into the docs + quality-rule editors (never auto-saves).
   const applyDraft = useCallback((draft: DefineDraft) => {
     if (typeof draft.description === 'string' && draft.description.trim()) setDesc(draft.description.trim());
@@ -635,6 +827,16 @@ export default function DataBuilder({
   // opens at Ingest; a Bronze-only one at Define; a Silver-only one at Harmonize; a
   // materialized one at Validate (the natural "check quality then query" entry).
   const [stage, setStage] = useState<StageState<DataStageId>>(() => initialStageState(DATA_STAGES));
+
+  // Ground "Ask the OS" on the dataset + stage currently open here, so a request like
+  // "document the columns" acts on THIS dataset at THIS stage without asking for an id.
+  usePublishPageContext({
+    tab: 'data',
+    stage: stage.current,
+    artifactType: 'dataset',
+    artifactId: datasetId,
+    artifactName: dataset?.name,
+  });
   const [landed, setLanded] = useState(false);
   useEffect(() => {
     if (landed || !dataset) return;
@@ -646,6 +848,19 @@ export default function DataBuilder({
     setStage((s) => ({ ...s, current: start }));
     setLanded(true);
   }, [dataset, ctx, landed]);
+
+  // When a guided panel COMMITS its layer (onCommitted), it requests an advance to
+  // the next stage. The build is async (reload → fresh ctx), so we advance in an
+  // EFFECT once the committed stage's condition is met — this is what makes the
+  // panel's "Continue" actually move the stepper forward (markDone only sets the ✓).
+  const [pendingAdvance, setPendingAdvance] = useState<DataStageId | null>(null);
+  useEffect(() => {
+    if (!pendingAdvance) return;
+    const def = DATA_STAGES.find((d) => d.id === pendingAdvance);
+    if (!def?.completed || !def.completed(ctx)) return; // wait for the reload to reflect the build
+    setStage((s) => (s.current === pendingAdvance ? advance(DATA_STAGES, s, ctx) : s));
+    setPendingAdvance(null);
+  }, [ctx, pendingAdvance]);
 
   if (loadErr) {
     return (
@@ -661,6 +876,11 @@ export default function DataBuilder({
   const fqn = layer ? physicalFqn(dataset, layer) : null;
   const cubeReady = isCubeReady(dataset);
   const published = !!dataset.certification;
+  // "Published" for the landing view = shared beyond the owner's private space (promoted
+  // to Domain = asset, or certified to Company = product). Such a dataset opens in the
+  // preview+talk landing until the user clicks "Edit data stages".
+  const isPublished = dataset.tier === 'asset' || dataset.tier === 'product';
+  const showLanding = isPublished && !builderOpen;
   const canEdit = !!user && canManageArtifact(user, { owner: dataset.owner, domain: dataset.domain });
   const isAdmin = user?.role === 'admin';
 
@@ -674,25 +894,99 @@ export default function DataBuilder({
   const onBuilt = () => { void load(); };
   // Record a stage's ✓ when its work settles in-stage (gated on the live condition).
   const settle = (id: DataStageId) => setStage((s) => markDone(s, id));
+  // A panel committed its layer: reload the real state, record the ✓, and REQUEST
+  // an advance to the next stage (the effect moves the stepper once the build lands).
+  const commitStage = (id: DataStageId) => { onBuilt(); settle(id); setPendingAdvance(id); };
+  // Like commitStage but STAYS on the current step (no auto-advance): reload + record the
+  // ✓ so the built state shows, and let the user explore the result and choose to move on.
+  // The Gold step uses this so building Gold no longer throws the user into Data Quality.
+  const commitStageStay = (id: DataStageId) => { onBuilt(); settle(id); };
+  // The user explicitly chose to move on from a settled step → advance the stepper.
+  const continueFrom = (id: DataStageId) => setPendingAdvance(id);
+
+  // Rename the dataset (display name only). The store freezes the physical slug before
+  // the name changes, so every FQN/Cube/dbt identity stays pinned to the real table.
+  const rename = async () => {
+    const name = nameDraft.trim();
+    setRenameErr('');
+    if (!name) { setRenaming(false); return; }
+    const res = await fetch(`/api/data/datasets/${datasetId}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'rename', name }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { setRenameErr(d.error ?? 'Rename failed'); return; }
+    setRenaming(false);
+    await load();
+  };
 
   return (
     <ConfirmProvider>
       <div className="row" style={{ alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
         <button className="btn ghost" onClick={onBack}>← Datasets</button>
-        <BuilderModeToggle
-          mode={viewMode}
-          onChange={setModePersisted}
-          developerHint="The raw technical surface — dbt/Cube artifacts, FQNs, RLS summary"
-        />
+        {showLanding ? (
+          // The published landing: one prominent doorway into the full pipeline.
+          <button className="btn primary" onClick={() => setBuilderOpen(true)} title="Open the 5-stage builder to edit this dataset's pipeline">
+            ✎ Edit data stages
+          </button>
+        ) : isPublished ? (
+          // Editing a published dataset — offer the way back to its calm landing, plus the mode toggle.
+          <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+            <button className="btn ghost sm" onClick={() => setBuilderOpen(false)}>← Done editing</button>
+            <BuilderModeToggle
+              mode={viewMode}
+              onChange={setModePersisted}
+              developerHint="The raw technical surface — dbt/Cube artifacts, FQNs, RLS summary"
+            />
+          </div>
+        ) : (
+          <BuilderModeToggle
+            mode={viewMode}
+            onChange={setModePersisted}
+            developerHint="The raw technical surface — dbt/Cube artifacts, FQNs, RLS summary"
+          />
+        )}
       </div>
 
       {/* ── Header + status chips (always visible, above the stepper) ── */}
       <div className="stepper-head">
-        <h2 className="stepper-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>
-          {dataset.name}
-        </h2>
+        {renaming ? (
+          <span className="rename-inline">
+            <input
+              className="rename-input"
+              autoFocus
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') void rename(); if (e.key === 'Escape') setRenaming(false); }}
+              aria-label="Dataset name"
+            />
+            <button className="btn primary sm" onClick={() => void rename()}>Save</button>
+            <button className="btn ghost sm" onClick={() => setRenaming(false)}>Cancel</button>
+          </span>
+        ) : (
+          <h2 className="stepper-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%', display: 'flex', alignItems: 'center', gap: 10 }}>
+            {dataset.name}
+            {/* Rename must be DISCOVERABLE — a labelled button, not a bare glyph
+                (user feedback 2026-07-31: the pencil-only affordance read as missing). */}
+            {canEdit ? (
+              <button
+                className="btn ghost sm"
+                style={{ flex: 'none' }}
+                onClick={() => { setNameDraft(dataset.name); setRenameErr(''); setRenaming(true); }}
+                title="Rename this dataset (the physical table slug stays stable)"
+                aria-label="Rename this dataset"
+              >✎ Rename</button>
+            ) : null}
+          </h2>
+        )}
         <span className={`badge ${TIER_BADGE[dataset.tier]}`}>{TIER_WORD[dataset.tier]}</span>
         <span className="muted" style={{ fontSize: 13 }}>{dataset.owner} · {dataset.domain}</span>
+        {/* Stable ID + physical (frozen) table slug — the display-name vs physical-name
+            distinction, so two same-named datasets are distinguishable and the physical
+            table is transparent even after a rename. */}
+        <span className="mono muted" style={{ fontSize: 11 }} title="Dataset ID">{dataset.id}</span>
+        <span className="mono muted" style={{ fontSize: 11 }} title="Physical table name (frozen — unaffected by rename)">table: {physicalSlug(dataset)}</span>
+        {renameErr && <span className="badge err" style={{ fontSize: 11 }}>{renameErr}</span>}
         {dataset.tier !== 'dataset' ? <DomainTag domain={dataset.domain} /> : null}
         {/* Lifecycle (Archive/Restore/Delete/Versions) lives in the persistent detail header so
             it is reachable from ANY stage — not buried in Publish. Governance unchanged (canEdit). */}
@@ -743,103 +1037,102 @@ export default function DataBuilder({
         )}
       </div>
 
-      {viewMode === 'simple' ? (
+      {showLanding ? (
+        // ── Published landing: preview + Talk to Data (use it, don't rebuild it) ──
+        <div>
+          <p className="hint" style={{ marginTop: 0, marginBottom: 14 }}>
+            This dataset is <strong>published</strong>. Preview it and ask it questions below — or use <strong>✎ Edit data stages</strong> (top-right) to open the full 5-stage pipeline.
+          </p>
+          {rowPreviewBlock('Data preview', 'The first 50 rows of the published table, read through the governed Trino path under your own row security.')}
+          <div style={{ marginTop: 24 }}>
+            <TalkTo tab="data" title={talk.title} blurb={talk.blurb} examples={talk.examples} />
+          </div>
+          {/* What's already built on this data — metrics, dashboards, agent systems. */}
+          <ConnectedBuild datasetId={dataset.id} />
+        </div>
+      ) : viewMode === 'simple' ? (
       <StageShell
         stages={DATA_STAGES}
         state={stage}
         ctx={ctx}
         onState={setStage}
         ariaLabel="Dataset stages"
-        assistant={(st) =>
-          st.id === 'ingest' ? (
-            <StageAssistant
-              datasetId={dataset.id} stage="ingest"
-              label="Explain an ingest error in plain language." cta="Explain the error"
-              payload={() => ({ name: dataset.name, reason: previewErr || (preview && !preview.available ? preview.reason : '') })}
-            />
-          ) : st.id === 'define' ? (
-            <StageAssistant
-              datasetId={dataset.id} stage="define"
-              label="Draft a description and column notes from the schema." cta="Draft docs"
-              disabled={!canEdit}
-              payload={() => ({ name: dataset.name, prompt: desc, columns: colNames.length ? colNames : cols.map((c) => c.name).filter(Boolean) })}
-              onDraft={applyDraft}
-            />
-          ) : st.id === 'harmonize' ? (
-            <StageAssistant
-              datasetId={dataset.id} stage="harmonize"
-              label={`"Clean/join for me" — a proposal, plus a CTAS-error explainer.`} cta="Propose a clean/join"
-              payload={() => ({ name: dataset.name, columns: colNames })}
-            />
-          ) : st.id === 'validate' ? (
-            <StageAssistant
-              datasetId={dataset.id} stage="validate"
-              label={suggestions.length ? 'Explain the checks suggested from the profile.' : 'Suggest quality rules for the documented columns.'}
-              cta={suggestions.length ? 'Explain suggestions' : 'Suggest rules'}
-              payload={() => ({
-                name: dataset.name,
-                columns: colNames,
-                // When we have deterministic profile→rule suggestions, hand them to the
-                // model as rendered lines so it explains WHY each matters (rationale layer).
-                ...(suggestions.length ? { suggestions: suggestions.map((s) => `${suggestionText(s)} — ${s.evidence}`) } : {}),
-              })}
-            />
-          ) : st.id === 'publish' ? (
-            <StageAssistant
-              datasetId={dataset.id} stage="publish"
-              label="Suggest governed measures to define before you promote." cta="Suggest measures"
-              payload={() => ({ name: dataset.name, columns: colNames, measures: dataset.measures.map((m) => m.name) })}
-            />
-          ) : null /* Talk to Data (in Publish) is its own governed NL→SQL surface, not the assistant slot */
-        }
+        // The three BUILD stages own their continue: Ingest auto-advances on a landed
+        // upload, Silver/Gold show a big "Continue →" only after a successful build.
+        // The shell's bare "next →" there reads as the primary action but builds
+        // nothing — hide it. Stages stay voluntarily skippable via the rail on top.
+        hideNextFor={['ingest', 'define', 'harmonize']}
       >
         {/* ─────────────── Ingest ─────────────── */}
         {stage.current === 'ingest' ? (
-          <div>
+          <div {...anchorAttr(ANCHORS.data.load)}>
             {canEdit ? (
               <BronzePanel
                 datasetId={dataset.id}
                 datasetName={dataset.name}
-                onCommitted={() => { onBuilt(); settle('ingest'); }}
+                onCommitted={() => commitStage('ingest')}
               />
             ) : (
               <p className="muted" style={{ fontSize: 13 }}>Only the owner and domain admins can bring in data.</p>
             )}
 
-            {/* Raw preview of what landed — the governed SELECT * LIMIT 50. */}
-            <div className="section-title" style={{ marginTop: 22 }}>
-              Raw preview
-              <button className="btn ghost sm" style={{ marginLeft: 10 }} onClick={loadPreview} disabled={previewing}>
-                {previewing ? <span className="spin" /> : 'Refresh preview'}
-              </button>
-            </div>
-            <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
-              A read-only scan of the first 50 rows through the governed query path (Trino, OPA-checked). Nothing is previewed until a layer is built.
-            </p>
-            {previewErr ? <div className="error" style={{ marginBottom: 10 }}>{previewErr}</div> : null}
-            {preview ? (
-              preview.available ? (
-                <>
-                  <p className="muted" style={{ fontSize: 12.5, margin: '0 0 8px' }}>
-                    First {preview.rowCount} row{preview.rowCount === 1 ? '' : 's'} · {preview.layer}{' · '}<span className="mono" style={{ fontSize: 10 }}>{preview.fqn}</span>
-                  </p>
-                  {preview.columns.length > 0 ? (
-                    <div className="table-wrap" style={{ marginBottom: 16 }}>
-                      <table>
-                        <thead><tr>{preview.columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
-                        <tbody>{preview.rows.map((r, i) => <tr key={i}>{r.map((cell, j) => <td key={j}>{cell}</td>)}</tr>)}</tbody>
-                      </table>
-                    </div>
-                  ) : <p className="muted" style={{ fontSize: 13, margin: '0 0 16px' }}>No rows to show.</p>}
-                </>
-              ) : <p className="muted" style={{ fontSize: 13, margin: '0 0 16px' }}>{preview.reason}</p>
+            {/* Keep this in sync — schedule + history for a warehouse-synced Bronze. */}
+            {dataset.sync ? (
+              <SyncPanel datasetId={dataset.id} canEdit={canEdit} columns={colNames} />
             ) : null}
+
+            {/* Raw shape — the SAME governed rows/columns statistics treatment the Silver
+                and Gold builders show (ExplorePanel: row/column counts, completeness,
+                distinct, range), honestly labeled Bronze. Stats only here — the governed
+                50-row preview below stays the raw-rows view. */}
+            {dataset.versions.bronze?.built ? (
+              <>
+                <div className="section-title" style={{ marginTop: 22 }}>Your Bronze table</div>
+                <ExplorePanel datasetId={dataset.id} builtLayers={['bronze']} showPreview={false} />
+              </>
+            ) : null}
+
+            {/* Something went wrong bringing data in → one big AI explainer, right where
+                the error shows (the old bottom "Assistant" box, built into the flow). */}
+            {previewErr || (preview && !preview.available) ? (
+              <div className="row" style={{ justifyContent: 'flex-end', marginTop: 18 }}>
+                <AiAction
+                  datasetId={dataset.id} stage="ingest" cta="Explain this error"
+                  title="AI explains this ingest error in plain language"
+                  payload={() => ({ name: dataset.name, reason: previewErr || (preview && !preview.available ? preview.reason : '') })}
+                />
+              </div>
+            ) : null}
+
+            {/* Raw preview of what landed — the governed SELECT * LIMIT 50. */}
+            {rowPreviewBlock('Raw preview', 'A read-only scan of the first 50 rows through the governed query path (Trino, OPA-checked). Nothing is previewed until a layer is built.')}
           </div>
         ) : null}
 
         {/* ─────────────── Define ─────────────── */}
         {stage.current === 'define' ? (
           <div {...anchorAttr(ANCHORS.data.document)}>
+            {/* AI, built into the flow: two big actions at the top of the stage — draft the
+                documentation, or fill the Silver cleaning plan below ("Clean it up"). */}
+            {canEdit ? (
+              <div className="row" style={{ justifyContent: 'flex-end', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
+                <AiAction<DefineDraft>
+                  datasetId={dataset.id} stage="define" cta="Draft documentation"
+                  title="AI drafts the description, column notes and quality rules from the schema"
+                  payload={() => ({ name: dataset.name, prompt: desc, columns: colNames.length ? colNames : cols.map((c) => c.name).filter(Boolean) })}
+                  onDraft={applyDraft}
+                  successText="Drafted the description, column notes and quality rules — review them below."
+                />
+                <AiAction<CleanDraft>
+                  datasetId={dataset.id} stage="clean" cta="Clean it up"
+                  title={canRefineSilver ? 'AI fills the Silver cleaning plan below — types, trims, key, dedupe' : 'Bring in a Bronze layer first (in Ingest)'}
+                  disabled={!canRefineSilver}
+                  payload={() => ({ name: dataset.name, prompt: desc, columns: colNames })}
+                  onDraft={setCleanProposal}
+                  successText="Cleaning plan filled in below — review it, then Build Silver."
+                />
+              </div>
+            ) : null}
             <p className="hint" style={{ marginTop: 0, marginBottom: 12 }}>
               Bronze is in — now the columns are real. Describe what each column means, then clean and conform the data into the Silver layer.
             </p>
@@ -889,17 +1182,25 @@ export default function DataBuilder({
             {/* Silver build — clean and conform Bronze into Silver. */}
             {canEdit ? (
               <>
-                <div className="section-title" style={{ marginTop: 4 }}>
+                <div className="section-title" style={{ marginTop: 4 }} {...anchorAttr(ANCHORS.data.clean)}>
                   Clean it up — Silver
                   <span className="hint" style={{ margin: '0 0 0 10px' }}>dbt transformations on your Bronze data</span>
                 </div>
+                {staleVsBronze(dataset.versions, 'silver') ? (
+                  <p className="hint" style={{ margin: '0 0 10px' }}>
+                    Bronze has newer data than Silver ({fmtDate(dataset.versions.bronze.updatedAt)} vs {fmtDate(dataset.versions.silver.updatedAt)}) — rebuild below to catch it up.
+                  </p>
+                ) : null}
                 {canRefineSilver ? (
                   <RefinePanel
                     datasetId={dataset.id} datasetName={dataset.name}
                     owner={dataset.owner} domain={dataset.domain} tier={dataset.tier}
                     columns={colNames}
+                    silverBuilt={canHarmonizeGold}
+                    proposal={cleanProposal}
                     stage={{ layer: 'silver', copy: { title: 'Clean it up', subtitle: '', tool: '' } }}
-                    onCommitted={() => { onBuilt(); settle('define'); }}
+                    onCommitted={() => commitStageStay('define')}
+                    onContinue={() => continueFrom('define')}
                   />
                 ) : <p className="muted" style={{ fontSize: 13 }}>Bring in a Bronze layer first (in Ingest).</p>}
               </>
@@ -915,18 +1216,33 @@ export default function DataBuilder({
             </p>
             {canEdit ? (
               <>
-                <div className="section-title" style={{ marginTop: 0 }}>
+                <div className="section-title" style={{ marginTop: 0, alignItems: 'flex-start', flexWrap: 'wrap' }} {...anchorAttr(ANCHORS.data.harmonize)}>
                   Harmonize — Gold
                   <span className="hint" style={{ margin: '0 0 0 10px' }}>join trusted datasets into one governed Gold table</span>
+                  {/* AI, built into the flow: propose the clean/join right where you build it. */}
+                  <span style={{ marginLeft: 'auto' }}>
+                    <AiAction
+                      datasetId={dataset.id} stage="harmonize" cta="Propose a clean/join"
+                      title="AI proposes how to clean and join this dataset into Gold"
+                      payload={() => ({ name: dataset.name, columns: colNames })}
+                    />
+                  </span>
                 </div>
-                {canHarmonizeGold ? (
-                  <GoldJoinPanel
-                    datasetId={dataset.id} datasetName={dataset.name}
-                    owner={dataset.owner} domain={dataset.domain} tier={dataset.tier}
-                    columns={colNames}
-                    onCommitted={() => { onBuilt(); settle('harmonize'); }}
-                  />
-                ) : <p className="muted" style={{ fontSize: 13 }}>Clean it to Silver first (in Define), then you can harmonize into Gold.</p>}
+                {staleVsBronze(dataset.versions, 'gold') ? (
+                  <p className="hint" style={{ margin: '0 0 10px' }}>
+                    Bronze has newer data than Gold ({fmtDate(dataset.versions.bronze.updatedAt)} vs {fmtDate(dataset.versions.gold.updatedAt)}) — rebuild below to catch it up.
+                  </p>
+                ) : null}
+                <GoldJoinPanel
+                  datasetId={dataset.id} datasetName={dataset.name}
+                  owner={dataset.owner} domain={dataset.domain} tier={dataset.tier}
+                  columns={colNames}
+                  silverBuilt={canHarmonizeGold}
+                  goldBuilt={dataset.versions.gold.built}
+                  initialSpec={dataset.goldSpec}
+                  onCommitted={() => commitStageStay('harmonize')}
+                  onContinue={() => continueFrom('harmonize')}
+                />
               </>
             ) : <p className="muted" style={{ fontSize: 13 }}>Only the owner and domain admins can harmonize this dataset.</p>}
 
@@ -936,12 +1252,31 @@ export default function DataBuilder({
                 <ExplorePanel datasetId={dataset.id} builtLayers={builtLayers} showPreview={false} />
               </>
             ) : null}
+
+            {/* See the result — the first 50 rows of the highest built layer (Gold if built). */}
+            {rowPreviewBlock('Data preview', 'The first 50 rows of your highest built layer — Gold if built, otherwise Silver or Bronze — read through the governed Trino path.')}
           </div>
         ) : null}
 
         {/* ─────────────── Validate ─────────────── */}
         {stage.current === 'validate' ? (
-          <div>
+          <div {...anchorAttr(ANCHORS.data.validate)}>
+            {/* AI, built into the flow: one big action at the top — explain the profile's
+                suggested checks, or (none yet) suggest which quality rules to author. */}
+            <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 14 }}>
+              <AiAction
+                datasetId={dataset.id} stage="validate"
+                cta={suggestions.length ? 'Explain suggested checks' : 'Suggest quality rules'}
+                title={suggestions.length ? 'AI explains what each suggested check guards against' : 'AI suggests quality rules for the documented columns'}
+                payload={() => ({
+                  name: dataset.name,
+                  columns: colNames,
+                  // When we have deterministic profile→rule suggestions, hand them to the
+                  // model as rendered lines so it explains WHY each matters (rationale layer).
+                  ...(suggestions.length ? { suggestions: suggestions.map((s) => `${suggestionText(s)} — ${s.evidence}`) } : {}),
+                })}
+              />
+            </div>
             {/* Health — one glanceable 0–100 + trend, computed from real runs (honest 'unknown'
                 when nothing ran, never a fake 100). The exception (failing) is what shouts. */}
             <div className="guided-panel" style={{ padding: '14px 18px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
@@ -1020,19 +1355,51 @@ export default function DataBuilder({
                   <tbody>
                     {checks.map((chk) => {
                       const r = results[chk.id];
+                      const failing = r?.status === 'fail';
                       return (
-                        <tr key={chk.id}>
-                          <td className="mono" style={{ whiteSpace: 'nowrap', fontWeight: 600 }}>{ruleText(chk)}</td>
-                          <td className="muted">{chk.createdBy}</td>
-                          <td>
-                            {r ? (
-                              r.status === 'pass' ? <span className="status-chip s-searchable" style={{ cursor: 'default' }}>✓ pass</span>
-                                : r.status === 'fail' ? <span className="status-chip s-stored" style={{ cursor: 'default' }} title={`${r.violations} violating row(s)`}>✗ fail · {r.violations}</span>
-                                  : <span className="muted" title={r.reason}>not run</span>
-                            ) : <span className="muted">—</span>}
-                          </td>
-                          {canEdit ? <td><button className="btn ghost sm" onClick={() => deleteRule(chk.id)} aria-label="Remove rule">×</button></td> : null}
-                        </tr>
+                        <Fragment key={chk.id}>
+                          <tr>
+                            <td className="mono" style={{ whiteSpace: 'nowrap', fontWeight: 600 }}>{ruleText(chk)}</td>
+                            <td className="muted">{chk.createdBy}</td>
+                            <td>
+                              {r ? (
+                                r.status === 'pass' ? <span className="status-chip s-searchable" style={{ cursor: 'default' }}>✓ pass</span>
+                                  : r.status === 'fail' ? <span className="status-chip s-stored" style={{ cursor: 'default' }} title={`${r.violations} violating row(s)`}>✗ fail · {r.violations}</span>
+                                    : <span className="muted" title={r.reason}>not run</span>
+                              ) : <span className="muted">—</span>}
+                              {failing ? (
+                                <button
+                                  className="btn ghost sm"
+                                  style={{ marginLeft: 8 }}
+                                  aria-expanded={fixOpen === chk.id}
+                                  onClick={() => setFixOpen((open) => (open === chk.id ? null : chk.id))}
+                                >
+                                  {fixOpen === chk.id ? 'Hide fixes' : 'Fix…'}
+                                </button>
+                              ) : null}
+                            </td>
+                            {canEdit ? <td><button className="btn ghost sm" onClick={() => deleteRule(chk.id)} aria-label="Remove rule">×</button></td> : null}
+                          </tr>
+                          {failing && fixOpen === chk.id ? (
+                            <tr>
+                              <td colSpan={canEdit ? 4 : 3} style={{ background: 'var(--panel)', paddingTop: 0 }}>
+                                {/* AI-proposed remediations — propose (read + advice) then an explicit,
+                                    edit-gated apply; the rule is RE-RUN after apply and the fresh verdict
+                                    replaces this row's chip (a fix that didn't fix stays red). */}
+                                <QualityFixPanel
+                                  datasetId={dataset.id}
+                                  checkId={chk.id}
+                                  column={chk.column ?? ''}
+                                  canEdit={canEdit}
+                                  onApplied={(recheck) => {
+                                    setResults((m) => ({ ...m, [chk.id]: recheck as CheckResult }));
+                                    void loadDq(); // refresh the persisted trend after a real change
+                                  }}
+                                />
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
                       );
                     })}
                   </tbody>
@@ -1106,76 +1473,27 @@ export default function DataBuilder({
             {/* Lineage — refinement + consumption chain, moved here from the old Use stage. */}
             <div className="section-title" style={{ marginTop: 24 }}>Lineage</div>
             <LineagePanel datasetId={dataset.id} />
+
+            {/* The rows the checks ran against — same governed preview as every other stage. */}
+            {rowPreviewBlock('Data preview', 'The first 50 rows the quality checks run against — read through the governed Trino path.')}
           </div>
         ) : null}
 
         {/* ─────────────── Publish (Metrics & Usage) ─────────────── */}
         {stage.current === 'publish' ? (
           <div>
-            {/* Talk to Data — governed NL→SQL over what the viewer can see (usage before promote). */}
-            <div {...anchorAttr(ANCHORS.data.query)}>
-              <TalkTo tab="data" title={talk.title} blurb={talk.blurb} examples={talk.examples} />
+            {/* AI, built into the flow: one big action at the top — suggest the governed
+                measures worth defining before promoting/certifying. */}
+            <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 14 }}>
+              <AiAction
+                datasetId={dataset.id} stage="publish" cta="Suggest measures"
+                title="AI suggests governed measures to define before you promote"
+                payload={() => ({ name: dataset.name, columns: colNames, measures: dataset.measures.map((m) => m.name) })}
+              />
             </div>
-
-            {/* Doorway — jump to Metrics or Dashboards pre-scoped to this dataset. */}
-            {/* TODO: pass ?dataset=<id> once Metrics/Dashboards pages read that param to pre-scope. */}
-            <div className="section-title" style={{ marginTop: 24 }}>Build on this data</div>
-            <p className="hint" style={{ marginTop: 0, marginBottom: 10 }}>
-              Take the next step — define a metric or build a dashboard on top of this dataset.
-            </p>
-            <div className="row" style={{ gap: 10 }}>
-              <a className="btn ghost" href="/metrics" title="Define a metric on this dataset in the Metrics tab">
-                Build a metric →
-              </a>
-              <a className="btn ghost" href="/dashboards" title="Build a dashboard using this dataset in the Dashboards tab">
-                Build a dashboard →
-              </a>
-            </div>
-
-            {/* Metrics — defined on the governed Gold asset (Cube handover). */}
-            {dataset.measures.length > 0 || (dataset.tier !== 'dataset' && dataset.versions.gold.built) ? (
-              <>
-                <div className="section-title" style={{ marginTop: 0 }}>
-                  Metrics
-                  {dataset.measures.length > 0 ? <span className="count-pill">{dataset.measures.length}</span> : null}
-                </div>
-                {dataset.measures.length > 0 ? (
-                  <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                    {dataset.measures.map((m) => <span className="chip" key={m.name}>{m.name}</span>)}
-                  </div>
-                ) : null}
-                {dataset.tier !== 'dataset' && dataset.versions.gold.built ? (
-                  <MetricsPanel datasetId={dataset.id} />
-                ) : dataset.tier === 'dataset' && dataset.versions.gold.built ? (
-                  <div className="guided-panel" style={{ marginBottom: 12 }}>
-                    <p className="muted" style={{ marginTop: 0 }}>
-                      Metrics are defined on the <strong>governed</strong> Gold table (Cube reads the Trino mart). Promote this dataset below first — then define metrics on the asset/product.
-                    </p>
-                  </div>
-                ) : null}
-              </>
-            ) : null}
-
-            {/* Configuration drawer (dbt SQL / dataset.yaml). */}
-            {canEdit ? (
-              <>
-                <div className="section-title" style={{ marginTop: 20 }}>
-                  Configuration
-                  <button className={`btn ghost sm${showCode ? ' on' : ''}`} style={{ marginLeft: 10 }} onClick={() => setShowCode((v) => !v)}>
-                    {showCode ? 'Hide the code' : '‹ › Show the code'}
-                  </button>
-                </div>
-                {showCode ? (
-                  <div style={{ marginBottom: 14 }}>
-                    <p className="hint" style={{ marginTop: 0 }}>dataset.yaml is the single source — the panels and the data agent all read and write these files.</p>
-                    <CodeDrawer datasetId={dataset.id} />
-                  </div>
-                ) : null}
-              </>
-            ) : null}
-
-            {/* Sharing / promotion — the governed promote/certify block. */}
-            <div className="section-title" style={{ marginTop: 20 }}>Sharing</div>
+            {/* Sharing / promotion — the governed promote/certify block (moved to the top:
+                deciding who sees this dataset comes before building on it). Logic unchanged. */}
+            <div className="section-title" style={{ marginTop: 0 }} {...anchorAttr(ANCHORS.data.publish)}>Sharing</div>
             {dataset.tier === 'dataset' ? (
               canHarmonizeGold ? (
                 <div className="gate-check" style={{ marginTop: 4 }}>
@@ -1233,6 +1551,36 @@ export default function DataBuilder({
               </div>
             ) : null}
             {shareErr ? <div className="error" style={{ marginTop: 8 }}>{shareErr}</div> : null}
+
+            {/* Preview what you're publishing — the same governed 50-row view as every stage. */}
+            {rowPreviewBlock('Data preview', 'The first 50 rows of what you are publishing — read through the governed Trino path, under your own row security.')}
+
+            {/* Talk to Data — governed NL→SQL over what the viewer can see (usage before promote). */}
+            <div {...anchorAttr(ANCHORS.data.query)} style={{ marginTop: 24 }}>
+              <TalkTo tab="data" title={talk.title} blurb={talk.blurb} examples={talk.examples} />
+            </div>
+
+            {/* Build on this data — the metrics, dashboards and agent systems already connected
+                to this dataset, each linking out + offering an inline create pre-scoped to it. */}
+            <ConnectedBuild datasetId={dataset.id} />
+
+            {/* Configuration drawer (dbt SQL / dataset.yaml) — the technical surface, kept last. */}
+            {canEdit ? (
+              <>
+                <div className="section-title" style={{ marginTop: 24 }}>
+                  Configuration
+                  <button className={`btn ghost sm${showCode ? ' on' : ''}`} style={{ marginLeft: 10 }} onClick={() => setShowCode((v) => !v)}>
+                    {showCode ? 'Hide the code' : '‹ › Show the code'}
+                  </button>
+                </div>
+                {showCode ? (
+                  <div style={{ marginBottom: 14 }}>
+                    <p className="hint" style={{ marginTop: 0 }}>dataset.yaml is the single source — the panels and the data agent all read and write these files.</p>
+                    <CodeDrawer datasetId={dataset.id} />
+                  </div>
+                ) : null}
+              </>
+            ) : null}
           </div>
         ) : null}
       </StageShell>

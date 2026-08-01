@@ -14,6 +14,8 @@ behind Trino's governance boundary (never a second door to governed marts).
 Exposed as an MCP server (streamable-http at /mcp) for the gateway, plus plain
 HTTP /query + /health for direct use and probes.
 """
+import asyncio
+import hmac
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -23,7 +25,7 @@ from starlette.responses import JSONResponse
 import trino
 import trino.exceptions
 
-from execute_guard import ExecuteError, connect_kwargs, guard
+from execute_guard import ExecuteError, connect_kwargs, guard, guard_read
 
 PORT = int(os.environ.get("PORT", "8000"))
 TRINO_HOST = os.environ.get("TRINO_HOST", "trino")
@@ -39,6 +41,24 @@ TRINO_SCHEMA = os.environ.get("TRINO_SCHEMA", "sales")
 # The Trino session user the OPA row/column plugin governs. The gateway authorizes
 # tool access per agent key; the query runs as this governed domain principal.
 TRINO_USER = os.environ.get("TRINO_USER", "query-agent")
+
+# Service-to-service bearer (defense-in-depth). This process trusts the
+# principal/role/domains in the request body and is only meant to be called by os-ui;
+# the NetworkPolicies are the primary boundary, but network reach alone must not equal
+# identity. When SERVICE_BEARER_TOKEN is set, every data endpoint requires a matching
+# `Authorization: Bearer <token>` (constant-time compared). When UNSET, the check is
+# skipped (fail-open by design — see startup warning). /health is always open.
+SERVICE_BEARER_TOKEN = os.environ.get("SERVICE_BEARER_TOKEN", "")
+
+
+def _bearer_ok(req: Request) -> bool:
+    """Constant-time check of the Authorization bearer against SERVICE_BEARER_TOKEN.
+    Returns True immediately when the token is unset (auth disabled)."""
+    if not SERVICE_BEARER_TOKEN:
+        return True
+    header = req.headers.get("authorization", "")
+    got = header[7:] if header[:7].lower() == "bearer " else ""
+    return bool(got) and hmac.compare_digest(got, SERVICE_BEARER_TOKEN)
 
 
 def _connect(principal: str | None = None, schema: str | None = None):
@@ -56,6 +76,10 @@ def _connect(principal: str | None = None, schema: str | None = None):
 
 
 def run_query(sql: str, principal: str | None = None, schema: str | None = None) -> dict:
+    # Defence-in-depth: enforce read-only single-statement BEFORE touching Trino, so
+    # the read tool can never mutate the lakehouse even if a caller sends write SQL.
+    # (Trino's OPA plugin remains the authoritative row/column governance layer.)
+    sql = guard_read(sql)
     eff_schema = schema or TRINO_SCHEMA
     conn = _connect(principal, eff_schema)
     cur = conn.cursor()
@@ -111,6 +135,8 @@ async def health(_req: Request):
 
 @mcp.custom_route("/query", methods=["POST"])
 async def http_query(req: Request):
+    if not _bearer_ok(req):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     body = await req.json()
     sql = body.get("sql", "")
     if not sql:
@@ -119,7 +145,16 @@ async def http_query(req: Request):
         # Optional per-call identity so Trino's OPA plugin governs the right user,
         # and an optional session schema so the caller targets their own domain
         # (os-ui's catalog passes the caller's domain) instead of a fixed literal.
-        return JSONResponse(run_query(sql, body.get("principal"), body.get("schema")))
+        # CONCURRENCY: the Trino DB-API call BLOCKS — run it on a worker thread so
+        # one slow statement never serializes the whole async server (effective
+        # concurrency of 1 was the scalability-audit finding).
+        result = await asyncio.to_thread(
+            run_query, sql, body.get("principal"), body.get("schema")
+        )
+        return JSONResponse(result)
+    except ExecuteError as e:
+        # Read-guard rejection (write/DDL/stacked/comment) — an honest 400, not a 500.
+        return JSONResponse({"error": str(e)}, status_code=e.status)
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -133,6 +168,8 @@ async def http_execute(req: Request):
     target-schema/role check (see execute_guard). The data-confidentiality boundary is
     the Trino session user (principal): even a spoofed identity field cannot read past
     what that principal is entitled to, because the CTAS reads run under Trino->OPA."""
+    if not _bearer_ok(req):
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
     body = await req.json()
     sql = body.get("sql", "")
     principal = body.get("principal")
@@ -146,7 +183,12 @@ async def http_execute(req: Request):
     except ExecuteError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=e.status)
     try:
-        return JSONResponse(run_execute(sql, principal, parsed.schema))
+        # CONCURRENCY: same worker-thread offload as /query — sync writes can run
+        # for minutes (SYNC_STATEMENT_TIMEOUT_MS in os-ui); executed inline they
+        # would block every other statement on the event loop. No server-side
+        # timeout is enforced here — the CLIENT owns the statement budget.
+        result = await asyncio.to_thread(run_execute, sql, principal, parsed.schema)
+        return JSONResponse(result)
     except trino.exceptions.TrinoUserError as e:
         # A genuine SQL/permission error from Trino (incl. an OPA-denied read) — the
         # caller's mistake, surfaced honestly with the real message.
@@ -156,7 +198,10 @@ async def http_execute(req: Request):
 
 
 if __name__ == "__main__":
+    if not SERVICE_BEARER_TOKEN:
+        print("[query] WARNING: SERVICE_BEARER_TOKEN unset — service-bearer auth "
+              "DISABLED (fail-open; NetworkPolicy is the only boundary).")
     print(f"[query] Trino MCP (/mcp) + HTTP (/health,/query) on :{PORT} "
           f"(trino={TRINO_HOST}:{TRINO_PORT}, catalog={TRINO_CATALOG}, "
-          f"schema={TRINO_SCHEMA})")
+          f"schema={TRINO_SCHEMA}, bearerAuth={'on' if SERVICE_BEARER_TOKEN else 'off'})")
     mcp.run(transport="streamable-http")

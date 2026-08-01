@@ -23,6 +23,8 @@ const {
   listAppVersions,
   restoreAppVersion,
   templateFiles,
+  containerVersionsToPrune,
+  REGISTRY_KEEP_VERSIONS,
 } = await import('./apps.ts');
 
 const APP_KEY = Symbol.for('soa.apps.cache');
@@ -198,4 +200,158 @@ test('createApp: an invalid surface arg is ignored → falls back to inference',
   __resetAppsCache();
   const app = await createApp(user, { name: 'Bad Surface', template: 'service', surface: 'nope' as never });
   assert.equal(app.declaredSurface, undefined, 'invalid declaration dropped');
+});
+
+// ------------------------------------------------- Sovereign standard template --
+
+test('createApp: the DEFAULT template is the Sovereign standard app', async () => {
+  __resetAppsCache();
+  const app = await createApp(user, { name: 'Default Std' });
+  assert.equal(app.template, 'sovereign-app', 'no template named → sovereign-app');
+  assert.deepEqual(app.surface, { ui: true, api: false }, 'app.yaml declares surface: ui');
+  // The docs handed to the Build assistant carry the skeleton guide.
+  assert.match(app.docs, /Sovereign standard app/, 'docs identify the standard app');
+  assert.match(app.docs, /epics\//, 'docs describe the epics/<epic>/<story> structure');
+  assert.match(app.docs, /identity contract/i, 'docs state the identity contract');
+});
+
+test('templateFiles: sovereign-app ships the full standard-app skeleton', () => {
+  const paths = templateFiles('sovereign-app', 'Std App', 'std-app').map((f) => f.path);
+  for (const p of [
+    'src/App.tsx',
+    'src/template/sections.tsx',
+    'src/template/identity.tsx',
+    'src/template/scope.ts',
+    'src/template/pages/Admin.tsx',
+    'src/template/pages/Overview.tsx',
+    'src/core/store.ts',
+    'app.yaml',
+    'README.md',
+    'Dockerfile',
+    '.forgejo/workflows/ci.yml',
+  ]) {
+    assert.ok(paths.includes(p), `scaffold includes ${p}`);
+  }
+});
+
+// ---------------------------------------------------- four-template picker ----
+
+test('APP_TEMPLATES: the create picker offers exactly the four choices, Application first', async () => {
+  const { APP_TEMPLATES } = await import('./apps.ts');
+  assert.deepEqual(
+    APP_TEMPLATES.map((t: { key: string }) => t.key),
+    ['sovereign-app', 'website', 'api-service', 'empty'],
+  );
+  assert.equal(APP_TEMPLATES[0].label, 'Application', 'the default is labelled Application');
+});
+
+test('createApp: website → public Vite site, surface ui, docs carry the page contract', async () => {
+  __resetAppsCache();
+  const app = await createApp(user, { name: 'Acme Site', template: 'website' });
+  assert.equal(app.template, 'website');
+  assert.deepEqual(app.surface, { ui: true, api: false }, 'app.yaml declares surface: ui');
+  assert.match(app.docs, /How epics add pages/, 'docs are the sections contract');
+  const paths = templateFiles('website', 'Acme Site', 'acme-site').map((f) => f.path);
+  assert.ok(paths.includes('src/sections.tsx') && paths.includes('nginx.conf'), 'sections + shared infra');
+});
+
+test('createApp: api-service → headless, surface api declared (never mislabeled)', async () => {
+  __resetAppsCache();
+  const app = await createApp(user, { name: 'Billing API', template: 'api-service' });
+  assert.equal(app.template, 'api-service');
+  assert.deepEqual(app.surface, { ui: false, api: true }, 'app.yaml declares surface: api');
+  const paths = templateFiles('api-service', 'Billing API', 'billing-api').map((f) => f.path);
+  assert.ok(paths.includes('server.mjs'), 'ships the zero-dep server');
+  assert.ok(!paths.includes('index.html'), 'no UI entry');
+});
+
+test('createApp: empty → the bare minimum that still builds and deploys', async () => {
+  __resetAppsCache();
+  const app = await createApp(user, { name: 'Scratch', template: 'empty' });
+  assert.equal(app.template, 'empty');
+  assert.deepEqual(app.surface, { ui: true, api: false });
+  const paths = templateFiles('empty', 'Scratch', 'scratch').map((f) => f.path);
+  for (const p of ['src/main.tsx', 'src/App.tsx', 'Dockerfile', '.forgejo/workflows/ci.yml']) {
+    assert.ok(paths.includes(p), `minimal scaffold includes ${p}`);
+  }
+});
+
+test('createApp: legacy templates still work for existing flows (not in the picker)', async () => {
+  __resetAppsCache();
+  const app = await createApp(user, { name: 'Legacy Vite', template: 'vite-os' });
+  assert.equal(app.template, 'vite-os', 'legacy keys keep creating');
+});
+
+test('active-domain: a My app created in domain A is hidden when domain B is active, shown under A / All', async () => {
+  __resetAppsCache();
+  const owner = { id: 'dsc1', name: 'DSC', domains: ['sales'], role: 'admin' as const };
+  await createApp(owner, { name: 'SalesApp', template: 'empty' }); // Personal, domain = sales
+
+  // Acting in a different domain (auth.ts narrows user.domains to [active]) → hidden.
+  const inFinance = { ...owner, domains: ['finance'] };
+  assert.equal((await listAppsForUser(inFinance)).some((a) => a.name === 'SalesApp'), false, 'hidden in other domain');
+
+  // Acting in sales → shown.
+  assert.equal((await listAppsForUser(owner)).some((a) => a.name === 'SalesApp'), true, 'shown in its domain');
+
+  // All Domains (every membership) → shown.
+  const allDomains = { ...owner, domains: ['sales', 'finance'] };
+  assert.equal((await listAppsForUser(allDomains)).some((a) => a.name === 'SalesApp'), true, 'shown under All Domains');
+});
+
+// -------------------------------------------------------------------- registry prune --
+//
+// The pure prune policy behind the CI "Prune old registry versions" step: keep the
+// newest N immutable SHA tags plus the protected `latest`, DELETE the rest. Proves
+// DELETEs are issued only for versions beyond the newest 2 — and NONE when <= 2 exist.
+
+test('containerVersionsToPrune: deletes versions beyond the newest 2 (by push time)', () => {
+  // Five real builds + the floating latest, given out of order to prove sorting.
+  const versions = [
+    { version: 'latest', created_at: '2026-07-31T10:00:00Z' },
+    { version: 'sha-oldest', created_at: '2026-07-27T09:00:00Z' },
+    { version: 'sha-newest', created_at: '2026-07-31T09:59:00Z' },
+    { version: 'sha-mid1', created_at: '2026-07-29T12:00:00Z' },
+    { version: 'sha-mid2', created_at: '2026-07-30T08:00:00Z' },
+    { version: 'sha-old2', created_at: '2026-07-28T06:00:00Z' },
+  ];
+  const toDelete = containerVersionsToPrune(versions, 2);
+  // Newest 2 SHA tags (sha-newest, sha-mid2) + latest are kept; the 3 older SHA tags go.
+  assert.deepEqual(toDelete, ['sha-mid1', 'sha-old2', 'sha-oldest'], 'deletes exactly the 3 oldest SHA tags');
+  assert.equal(toDelete.includes('latest'), false, 'never deletes the protected latest tag');
+  assert.equal(toDelete.includes('sha-newest'), false, 'keeps the newest');
+  assert.equal(toDelete.includes('sha-mid2'), false, 'keeps the 2nd-newest');
+});
+
+test('containerVersionsToPrune: returns [] when <= keep prunable versions exist', () => {
+  assert.deepEqual(containerVersionsToPrune([], 2), [], 'no versions → nothing to delete');
+  assert.deepEqual(
+    containerVersionsToPrune(
+      [{ version: 'latest', created_at: '2026-07-31T10:00:00Z' }, { version: 'sha-a', created_at: '2026-07-31T09:00:00Z' }],
+      2,
+    ),
+    [],
+    'one SHA tag (+ latest) → nothing to delete',
+  );
+  assert.deepEqual(
+    containerVersionsToPrune(
+      [
+        { version: 'sha-a', created_at: '2026-07-31T09:00:00Z' },
+        { version: 'sha-b', created_at: '2026-07-30T09:00:00Z' },
+      ],
+      2,
+    ),
+    [],
+    'exactly 2 SHA tags → nothing to delete',
+  );
+});
+
+test('containerVersionsToPrune: default keep is REGISTRY_KEEP_VERSIONS (2)', () => {
+  assert.equal(REGISTRY_KEEP_VERSIONS, 2);
+  const versions = [
+    { version: 'a', created_at: '2026-07-31T00:00:00Z' },
+    { version: 'b', created_at: '2026-07-30T00:00:00Z' },
+    { version: 'c', created_at: '2026-07-29T00:00:00Z' },
+  ];
+  assert.deepEqual(containerVersionsToPrune(versions), ['c'], 'default keeps newest 2, deletes 1');
 });

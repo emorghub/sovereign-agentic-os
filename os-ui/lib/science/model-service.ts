@@ -201,6 +201,25 @@ function persist(m: ServiceModel): ServiceModel {
 }
 
 /**
+ * Cross-domain governance move (admin-only, gated in lib/platform-admin/domain-move.ts).
+ * A model's identity is its `model` key; scoping reads its `domain` field, so we
+ * set it and persist. `sel.id` matches the model key; `sel.onlyUnassigned` sweeps
+ * only empty-domain records. Returns the model keys moved.
+ */
+export function moveModelsDomain(sel: { id?: string; onlyUnassigned?: boolean }, target: string): string[] {
+  const moved: string[] = [];
+  for (const m of store().values()) {
+    if (sel.id !== undefined && m.model !== sel.id) continue;
+    if (sel.onlyUnassigned && m.domain) continue;
+    if (m.domain === target) continue;
+    m.domain = target;
+    persist(m);
+    moved.push(m.model);
+  }
+  return moved;
+}
+
+/**
  * UNSCOPED full registry — for SYSTEM / governed contexts only (the model's own
  * serve path, aggregate counts). It returns every domain's models including other
  * users' Personal-tier ones, so it must NEVER back a per-viewer tab. UI/tab
@@ -214,21 +233,31 @@ export function listModels(): ServiceModel[] {
 export type ModelViewer = { id: string; domains: string[] };
 
 /**
- * RLS predicate mirroring `lib/artifacts.visibleToUser` for the model tier ladder:
- *   • Personal    → owner only (never leak another user's Personal model)
+ * RLS predicate for the model tier ladder under STRICT DOMAIN ISOLATION — EVERY tier
+ * narrows to the viewer's live (active) domain scope:
+ *   • Personal    → owner only AND domain must be in the viewer's live scope
  *   • Domain      → members of the owning domain only (no cross-domain leak)
- *   • Marketplace → published cross-domain (discovery; any domain may see + import)
+ *   • Marketplace → this tab's "Company" tier: the owning domain only (a certified
+ *     model homed in domain A must NOT show while acting in domain B). Cross-domain
+ *     discovery + import is the dedicated Marketplace catalog's job, not this list's.
+ *
+ * auth.ts narrows viewer.domains to [active] when a domain is chosen, so each tier
+ * filters to it; "All Domains" keeps every membership so all show. A domainless model
+ * always shows (the admin assigns it via the domain-move tool).
  */
 function modelVisibleToUser(m: ServiceModel, viewer: ModelViewer): boolean {
-  if (m.tier === 'Marketplace') return true;
-  if (m.tier === 'Personal') return m.owner === viewer.id;
-  return viewer.domains.includes(m.domain);
+  const inScope = !m.domain || viewer.domains.includes(m.domain);
+  if (m.tier === 'Marketplace') return inScope;
+  if (m.tier === 'Domain') return inScope;
+  // Personal: owner only, AND domain must be in the caller's live scope.
+  return m.owner === viewer.id && inScope;
 }
 
 /**
  * RLS-scoped model list for a viewer — the SAFE variant for any tab/cockpit
- * surface. Returns the viewer's own Personal models + the Domain models of the
- * domains they belong to + Marketplace-published models, and nothing else.
+ * surface. Returns the viewer's own Personal models (in-scope domain) + the Domain
+ * models of the domains they belong to + Marketplace-published models, and nothing
+ * else.
  */
 export function listModelsForUser(viewer: ModelViewer, opts: { includeArchived?: boolean } = {}): ServiceModel[] {
   return [...store().values()]

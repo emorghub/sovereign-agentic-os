@@ -10,6 +10,8 @@
  * the same shapes five times.
  */
 
+import { TIER_BADGE_CLASS } from '@/lib/core/scopes';
+
 export type MetricTier = 'personal' | 'domain' | 'marketplace';
 
 export type MetricSummary = {
@@ -36,7 +38,7 @@ export type MetricGroups = { mine: MetricSummary[]; domain: MetricSummary[]; mar
 
 export type CheckRow = { name: string; ok: boolean; detail: string };
 export type BuildRow = { tool: string; status: 'ok' | 'fail'; detail: string; error?: string };
-export type Mode = 'live' | 'offline-mock';
+export type Mode = 'live' | 'live (sql)' | 'offline-mock' | 'unavailable';
 
 export type DefineResult = {
   datasetId: string;
@@ -56,6 +58,13 @@ export type ExploreResult = {
   securityContext: Record<string, unknown>;
   sql: string;
   mode: Mode;
+  /** Honest degradation notices from the server resolver (dropped slice members, or
+   *  an unreachable semantic layer). Present ⇒ show it; never silently swallow. */
+  warning?: string;
+  /** True when a real deployment's Cube is unreachable — no number, an honest outage. */
+  unavailable?: boolean;
+  /** True when Cube is up but the measure hasn't sync'd yet (soft "syncing"). */
+  pending?: boolean;
 };
 
 export type GovernResult = {
@@ -66,14 +75,29 @@ export type GovernResult = {
   consistency: { ok?: boolean; member?: string | null; rows: CheckRow[] };
 };
 
-/** A dataset summary as the Data tab serves it — only Gold asset/product may host a metric. */
-export type DatasetTile = { id: string; name: string; tier: 'dataset' | 'asset' | 'product'; owner: string };
+/** A dataset summary as the Data tab serves it — only Gold asset/product may host a metric.
+ *  `tier` is typed tolerantly (any string) so a future dataset kind (e.g. "curated") can be
+ *  served without breaking the picker — {@link datasetLayerLabel} degrades to the raw kind. */
+export type DatasetTile = { id: string; name: string; tier: string; owner: string };
 export type DatasetGroups = { mine: DatasetTile[]; domain: DatasetTile[]; marketplace: DatasetTile[] };
 
+/**
+ * The friendly LAYER label for a dataset tier — CENTRALISED + tolerant. A metric lives on
+ * a governed Gold asset/product; a private `dataset` is a personal draft. An UNKNOWN kind
+ * (e.g. an upcoming "curated") is shown verbatim instead of crashing on a missing map key
+ * (watch-point 2 — the local `tierLabel` map used to throw for any new kind).
+ */
+const DATASET_LAYER_LABEL: Record<string, string> = { dataset: 'private', asset: 'asset', product: 'product' };
+export function datasetLayerLabel(tier: string): string {
+  return DATASET_LAYER_LABEL[tier] ?? tier;
+}
+
+// The badge CLASS per tier is OS-wide (lib/core/scopes) — only the tier VOCABULARY
+// differs per tab, so map this tab's keys onto the shared class map.
 export const TIER_BADGE: Record<MetricTier, string> = {
-  personal: 'vis-personal',
-  domain: 'vis-shared',
-  marketplace: 'vis-certified',
+  personal: TIER_BADGE_CLASS.personal,
+  domain: TIER_BADGE_CLASS.shared,
+  marketplace: TIER_BADGE_CLASS.certified,
 };
 export const TIER_WORD: Record<MetricTier, string> = {
   personal: 'Personal',
@@ -138,9 +162,9 @@ export function ChecksList({ rows }: { rows: CheckRow[] }) {
   );
 }
 
-/** The honest live / offline-mock label (gold when live, quiet otherwise). */
+/** The honest live / live (sql) / offline-mock label (gold when live, quiet otherwise). */
 export function ModeBadge({ mode }: { mode: Mode }) {
-  return <span className={`badge ${mode === 'live' ? 'ok' : 'muted'}`}>{mode}</span>;
+  return <span className={`badge ${mode.startsWith('live') ? 'ok' : 'muted'}`}>{mode}</span>;
 }
 
 /** The metric Build report (cube → metric-explorer, apply→verify) + its mode.

@@ -324,12 +324,40 @@ async function getCache(): Promise<Map<string, Connection>> {
   return map;
 }
 
+/**
+ * Cross-domain governance move (admin-only, gated in lib/platform-admin/domain-move.ts).
+ * Scoping reads the connection's `domain` field (its `principal` is a slug, not
+ * domain-derived), so we set the field and write through. `sel.id` moves one;
+ * `sel.onlyUnassigned` sweeps only empty-domain records. Returns the ids moved.
+ */
+export async function moveConnectionsDomain(sel: { id?: string; onlyUnassigned?: boolean }, target: string): Promise<string[]> {
+  const map = await getCache();
+  const moved: string[] = [];
+  for (const c of map.values()) {
+    if (sel.id !== undefined && c.id !== sel.id) continue;
+    if (sel.onlyUnassigned && c.domain) continue;
+    if (c.domain === target) continue;
+    c.domain = target;
+    writeThrough(c);
+    moved.push(c.id);
+  }
+  return moved;
+}
+
 // ------------------------------------------------------------------- Scoping ---
 
 function visibleToUser(c: Connection, user: CurrentUser): boolean {
-  if (c.visibility === 'Personal') return c.owner === user.id;
-  if (c.visibility === 'Shared') return user.domains.includes(c.domain);
-  return true; // Certified (Marketplace) — discoverable across domains
+  // STRICT DOMAIN ISOLATION: EVERY tier narrows to the caller's live (active) domain.
+  // auth.ts narrows user.domains to [active] when a domain is chosen; "All Domains"
+  // keeps every membership; a domainless connection always shows. Matches the
+  // data/files/metrics/pillars pattern.
+  const inScope = !c.domain || user.domains.includes(c.domain);
+  if (c.visibility === 'Personal') return c.owner === user.id && inScope;
+  if (c.visibility === 'Shared') return inScope;
+  // Certified (this tab's "Company" tier): the owning domain only — a certified
+  // connection homed in domain A must NOT show while acting in domain B. Cross-domain
+  // discovery is the dedicated Marketplace catalog's job, not this list's.
+  return inScope;
 }
 
 /** The edit-scope arg for a connection. A Personal connection is owner-only —
@@ -491,10 +519,13 @@ export async function createConnection(
     return cW;
   }
 
-  // Egress guardrail: an external endpoint must be on the allowlist (Admin
-  // guardrail; or an Admin-approved request). Checked BEFORE any credential use.
+  // Egress guardrail: an endpoint must be on the allowlist (Admin guardrail; or an
+  // Admin-approved request) — checked BEFORE any credential use. Deny-by-default now
+  // also covers INTERNAL / in-cluster / loopback targets (SSRF hardening): a
+  // user-supplied `http://query-tool:8080` (or trino/opa/minio/kubernetes.default.svc)
+  // is refused unless an operator explicitly allowlisted that host.
   const egress = isEgressAllowed(endpoint);
-  if (egress.external && !egress.allowed) {
+  if (!egress.allowed) {
     throw withStatus(
       new Error(`Endpoint host "${egress.host}" is not on the egress allowlist — request access and an Administrator must approve it first`),
       403,
@@ -700,6 +731,30 @@ const CONNECTION_HEALTH: Partial<Record<ConnectionTemplateKey, HealthFn>> = {
     return h.connected
       ? { ok: true, mode: 'live', detail: `Airflow at ${c.egress.host} is reachable${h.detail ? ` (${h.detail})` : ''}. The token is never sent on the health probe.` }
       : { ok: false, mode: 'offline', detail: `Airflow at ${c.egress.host} is unreachable (${h.reason ?? 'network error'}) — check the base URL + egress, then re-test.` };
+  },
+  // SALESFORCE: real client-credentials token grant + `SELECT Id FROM Organization
+  // LIMIT 1` over the REST API. A rejected credential is an honest x — never a fake
+  // green. The consumer secret never leaves the server (lib/connections/salesforce.ts).
+  'salesforce-api': async (c) => {
+    const { salesforceHealth } = await import('./salesforce.ts');
+    const h = await salesforceHealth(c);
+    c.mode = h.ok ? 'live' : 'offline';
+    c.health = h.ok ? 'healthy' : 'needs-reconnect';
+    return h.ok
+      ? { ok: true, mode: 'live', detail: `Salesforce is reachable (${h.detail}) The credential never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Salesforce is unreachable or refused the credential (${h.detail}) — check the Connected App + egress, then re-test.` };
+  },
+  // KAJABI: real client-credentials token grant + `GET /v1/sites?page[size]=1` over
+  // the public API. A rejected credential is an honest x — never a fake green. The
+  // client secret never leaves the server (lib/connections/kajabi.ts).
+  'kajabi-api': async (c) => {
+    const { kajabiHealth } = await import('./kajabi.ts');
+    const h = await kajabiHealth(c);
+    c.mode = h.ok ? 'live' : 'offline';
+    c.health = h.ok ? 'healthy' : 'needs-reconnect';
+    return h.ok
+      ? { ok: true, mode: 'live', detail: `Kajabi is reachable (${h.detail}) The credential never leaves the server.` }
+      : { ok: false, mode: 'offline', detail: `Kajabi is unreachable or refused the credential (${h.detail}) — check the Public API key + egress, then re-test.` };
   },
   github: async (c) => {
     const h = await githubHealth(githubConnFrom(c));
@@ -1475,10 +1530,12 @@ async function runAllow(
   reason: string,
   mode?: string,
 ): Promise<ToolCallResult> {
-  // CONNECTOR-STANDARD §3.3: egress allowlist re-checked before EVERY external call
-  // (fail-closed — mirrors the create-time check at ~line 465). An internal/offline
-  // endpoint (external:false) is always allowed; only external hosts are gated.
-  if (c.egress.external) {
+  // CONNECTOR-STANDARD §3.3: egress allowlist re-checked before EVERY call (fail-closed
+  // — mirrors the create-time check). Deny-by-default now also covers INTERNAL /
+  // in-cluster / loopback targets (SSRF hardening): a user-supplied `http://query-tool`
+  // (or trino/opa/minio/kubernetes.default.svc) is refused unless an operator explicitly
+  // allowlisted that host. `isEgressAllowed` returns allowed:false for such targets.
+  {
     const egress = isEgressAllowed(c.endpoint);
     if (!egress.allowed) {
       const tr = await trace({ principal: c.principal, tool, input: { args, asAgent }, output: { denied: `egress not allowed: ${egress.host}` }, decision: 'deny' });

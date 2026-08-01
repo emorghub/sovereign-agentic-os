@@ -26,7 +26,7 @@ import {
   canTransition,
   tierAfter,
   visibilityFor,
-} from '../data/dataset-schema.ts';
+} from '../data/index.ts';
 import { canRead } from './dls.ts';
 import { canManageArtifact, type ArtifactScope } from '../governance/edit-scope.ts';
 import { promotionGate, gateReason } from './promotion.ts';
@@ -97,6 +97,9 @@ export type FileSummary = {
   storage: Storage;
   status: FileStatus;
   bytes: number;
+  /** True when original bytes are stored AND render inline (image/pdf/video/audio) —
+   *  the grid shows a thumbnail / the preview shows a live viewer via /raw. */
+  hasPreview: boolean;
   /** Soft-archived (retained, reversible). Absent/false = live. */
   archived?: boolean;
 };
@@ -311,10 +314,42 @@ function persist(rec: FileRecord, a: FileAsset): FileRecord {
   return rec;
 }
 
+/**
+ * Cross-domain governance move (admin-only, gated in lib/platform-admin/domain-move.ts).
+ * A file carries its domain in the canonical yaml (scoping parses it) and, for a
+ * shared/certified file, in its domain read-grant (the policy source). So we
+ * parse → set a.domain → repoint any domain grant → persist, which re-serializes
+ * and stamps rec.domain. `sel.id` moves one; `sel.onlyUnassigned` sweeps only
+ * empty-domain records. Returns the ids moved.
+ */
+export function moveFilesDomain(sel: { id?: string; onlyUnassigned?: boolean }, target: string): string[] {
+  const moved: string[] = [];
+  for (const rec of fs().store.values()) {
+    if (sel.id !== undefined && rec.id !== sel.id) continue;
+    if (sel.onlyUnassigned && rec.domain) continue;
+    if (rec.domain === target) continue;
+    const a = parseAsset(rec.yaml);
+    a.domain = target;
+    for (const g of a.grants) if (g.grantee.kind === 'domain') g.grantee.id = target;
+    persist(rec, a);
+    moved.push(rec.id);
+  }
+  return moved;
+}
+
 // --------------------------------------------------------------------- lists --
 
 function statusOf(a: FileAsset): FileStatus {
   return a.indexing.mode === 'stored-only' ? 'stored' : 'searchable';
+}
+
+/** True when a stored object's content-type renders inline in a browser (the Quick
+ *  Look viewer + grid thumbnails use /raw for exactly these). Pure + exported so the
+ *  client can branch its <img>/<iframe>/<video>/<audio> the same way. */
+export function inlineRenderable(contentType: string | undefined | null): boolean {
+  if (!contentType) return false;
+  const t = contentType.toLowerCase();
+  return t.startsWith('image/') || t.startsWith('video/') || t.startsWith('audio/') || t === 'application/pdf';
 }
 
 function summarise(a: FileAsset, rec: FileRecord): FileSummary {
@@ -324,6 +359,7 @@ function summarise(a: FileAsset, rec: FileRecord): FileSummary {
     tags: a.tags, sensitivity: a.sensitivity, freshness: a.freshness,
     version: a.version, deepLink: a.deepLink, storage: a.storage,
     status: statusOf(a), bytes: rec.bytes,
+    hasPreview: !!rec.object && inlineRenderable(rec.object.contentType),
     archived: rec.archived ?? false,
   };
 }
@@ -352,10 +388,19 @@ export function listFiles(user: Principal, opts: { includeArchived?: boolean } =
     const a = parseAsset(rec.yaml);
     if (!canView(a, user)) continue;
     const s = summarise(a, rec);
-    if (a.owner === user.id) owned.push(s);
+    // STRICT DOMAIN ISOLATION: EVERY tier — My, Domain AND Company (product) — narrows to
+    // the ACTIVE domain. auth.ts narrows user.domains to [active] when a domain is chosen,
+    // so each tier filters to it; "All Domains" keeps every membership so all show; a
+    // domainless file always shows. This closes the leak where canView returns true for the
+    // OWNER regardless of domain, so without the per-tier gate an owner's domain-A
+    // asset/product leaked into Domain/Company while acting in domain B. Cross-domain
+    // discovery of a certified product is the dedicated Marketplace's job, not this list's.
+    const inScope = !a.domain || user.domains.includes(a.domain);
+    if (a.owner === user.id && inScope) owned.push(s);
+    if (!inScope) continue; // strict active-domain isolation, every tier, incl the owner
     // Group by VISIBILITY (tier), not ownership: a promoted asset is domain content and
-    // belongs under Domain even when the caller authored it; a certified product under
-    // Marketplace; a private file (owner-only, via canView) under Personal.
+    // belongs under Domain even when the caller authored it; a certified product under this
+    // tab's "Company" tier; a private file (owner-only, via canView) under Personal.
     if (a.tier === 'product') marketplace.push(s);
     else if (a.tier === 'asset') domain.push(s);
     else mine.push(s);
@@ -532,6 +577,25 @@ export function setDocs(id: string, user: Principal, docs: { description?: strin
   versions.record(rec.id, user.id, snapshotState(rec), 'edit docs');
   if (docs.description !== undefined) a.description = docs.description;
   if (docs.tags !== undefined) a.tags = docs.tags.map((t) => t.trim()).filter(Boolean);
+  persist(rec, a);
+  return a;
+}
+
+/**
+ * Rename a file — change its DISPLAY name only. Edit-scoped exactly like every other
+ * edit (owner always; an in-domain domain_admin / platform admin on a shared/product
+ * file, via `editOf` → the reused `canManageArtifact` gate). The name is a pure display
+ * label: the object key + deep link are derived from id/owner (see `objectKeyForAsset`),
+ * NOT the name, so the stored bytes never move. Re-versions like `setDocs`.
+ */
+export function renameFile(id: string, user: Principal, newName: string): FileAsset {
+  const rec = get(id);
+  const a = editOf(rec, user);
+  const name = newName.trim();
+  if (!name) fail('a file needs a name', 400);
+  if (name === a.name) return a; // no-op → no version churn
+  versions.record(rec.id, user.id, snapshotState(rec), 'rename');
+  a.name = name;
   persist(rec, a);
   return a;
 }

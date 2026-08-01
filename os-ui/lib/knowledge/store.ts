@@ -19,6 +19,7 @@ import { osMirror } from '../infra/os-mirror.ts';
 import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
 import { canManageArtifact, type ArtifactScope } from '../governance/edit-scope.ts';
 import { type ManualScope, resolveManual } from './manual.ts';
+import { EMPTY_LINKS, type WorkflowLinks } from './links.ts';
 
 export type { ArtifactVersion };
 export type { ManualScope };
@@ -60,11 +61,16 @@ export type WorkflowRecord = {
   certifiedBy: string | null;
   /** Soft-archived: hidden from the working lists, reversible, retained. */
   archived?: boolean;
+  /**
+   * Data & Metrics links — governed dataset + metric ids this process runs on.
+   * Optional (nil-safe): old records simply have none; reads default to empty.
+   */
+  links?: WorkflowLinks;
 };
 
 export type WorkflowSummary = Omit<WorkflowRecord, 'md' | 'tacit'>;
 
-export type WorkflowView = WorkflowRecord & { workflow: Workflow; sha: string };
+export type WorkflowView = WorkflowRecord & { workflow: Workflow; sha: string; links: WorkflowLinks };
 
 // ----------------------------------------------------------------- helpers ---
 
@@ -131,6 +137,7 @@ const mirror = osMirror({
         md: { type: 'text', index: false },
         tacit: { type: 'text', index: false },
         archived: { type: 'boolean' },
+        links: { type: 'object', enabled: false },
       },
     },
   },
@@ -186,6 +193,25 @@ export function __resetStore(): void {
   mirror.__reset();
   versions.__reset();
   domainVersions.__reset();
+}
+
+/**
+ * Cross-domain governance move (admin-only, gated in lib/platform-admin/domain-move.ts).
+ * Scoping reads the record's `domain` field, so we set it and write through.
+ * `sel.id` moves one; `sel.onlyUnassigned` sweeps only empty-domain records.
+ * Returns the ids moved.
+ */
+export function moveWorkflowsDomain(sel: { id?: string; onlyUnassigned?: boolean }, target: string): string[] {
+  const moved: string[] = [];
+  for (const rec of ks().workflows.values()) {
+    if (sel.id !== undefined && rec.id !== sel.id) continue;
+    if (sel.onlyUnassigned && rec.domain) continue;
+    if (rec.domain === target) continue;
+    rec.domain = target;
+    writeThrough(rec);
+    moved.push(rec.id);
+  }
+  return moved;
 }
 
 // --------------------------------------------------------------- scoping -----
@@ -252,9 +278,17 @@ export function listWorkflows(user: Principal, opts: { includeArchived?: boolean
     if (rec.archived && !opts.includeArchived) continue;
     if (!canView(rec, user)) continue;
     // Group by VISIBILITY, not ownership: Shared workflows are domain knowledge and
-    // belong under Domain even when the caller authored them; Marketplace under
-    // Marketplace; Personal (the caller's own drafts, plus same-domain drafts a
-    // builder stewards — already gated by canView) under Personal.
+    // belong under Domain even when the caller authored them; Marketplace under this tab's
+    // "Company" tier; Personal (the caller's own drafts, plus same-domain drafts a builder
+    // stewards — already gated by canView) under Personal.
+    // STRICT DOMAIN ISOLATION: EVERY tier — My, Domain AND Company — narrows to the ACTIVE
+    // domain (auth.ts narrows user.domains to [active]; "All Domains" keeps every membership;
+    // a domainless workflow always shows). canView already narrows Shared→domain; the extra
+    // inScope gate narrows Personal AND the Marketplace/Company tier (a certified workflow
+    // homed in domain A must not show in domain B — cross-domain discovery is the dedicated
+    // Marketplace's job, not this list's).
+    const inScope = !rec.domain || user.domains.includes(rec.domain);
+    if (!inScope) continue;
     if (rec.visibility === 'Marketplace') {
       marketplace.push(summarise(rec));
     } else if (rec.visibility === 'Shared') {
@@ -274,7 +308,8 @@ export function listWorkflows(user: Principal, opts: { includeArchived?: boolean
 
 export function getWorkflow(id: string, user: Principal): WorkflowView {
   const rec = requireView(id, user);
-  return { ...rec, workflow: parseWorkflow(rec.md), sha: sha(rec.md) };
+  // `links` defaults here so every consumer is nil-safe on pre-links records.
+  return { ...rec, links: rec.links ?? EMPTY_LINKS, workflow: parseWorkflow(rec.md), sha: sha(rec.md) };
 }
 
 export function createWorkflow(
@@ -370,6 +405,30 @@ export function updateWorkflow(
     writeThrough(rec);
   }
 
+  return rec;
+}
+
+/**
+ * Rename a workflow — change its display TITLE only. Edit-scoped exactly like every
+ * other edit (`requireEdit` → the reused `canManageArtifact` gate: owner always; an
+ * in-domain domain_admin / platform admin on a Shared/Marketplace workflow). The title
+ * is the display label — it is stored in the workflow's frontmatter AND denormalised to
+ * `rec.title` (which the durable mirror indexes as a keyword), so a rename rewrites the
+ * canonical `md`, re-derives `rec.title`, and writes through. Re-versions like `updateWorkflow`.
+ */
+export function renameKnowledge(id: string, user: Principal, newTitle: string): WorkflowRecord {
+  const rec = requireEdit(id, user);
+  const title = newTitle.trim();
+  if (!title) fail('a workflow needs a title', 400);
+  if (title === rec.title) return rec; // no-op → no version churn
+  // Snapshot the PRIOR canonical source before overwriting it (auditable + reversible).
+  versions.record(id, user.id, snapshotState(rec), 'rename');
+  const w = parseWorkflow(rec.md);
+  w.title = title;
+  rec.md = serializeWorkflow(w);
+  rec.title = title; // keep the denormalised (indexed) title in lockstep
+  rec.updatedAt = now();
+  writeThrough(rec);
   return rec;
 }
 
@@ -646,6 +705,22 @@ export function updateTacit(id: string, user: Principal, tacit: string): Workflo
   if (tacit === rec.tacit) return rec; // no-op edit → no version churn
   versions.record(id, user.id, snapshotState(rec), 'edit tacit');
   rec.tacit = tacit;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return rec;
+}
+
+// ------------------------------------------- Data & Metrics links ------------
+
+/**
+ * Replace the workflow's Data & Metrics links (dataset + metric ids). Edit-scoped
+ * like every other workflow mutation. The caller (the API route) has ALREADY
+ * dropped ids the user can't view via `filterVisibleLinks` — the store just
+ * persists. Not versioned (metadata like `archived`, not canonical source).
+ */
+export function setWorkflowLinks(id: string, user: Principal, links: WorkflowLinks): WorkflowRecord {
+  const rec = requireEdit(id, user);
+  rec.links = { datasets: [...links.datasets], metrics: [...links.metrics] };
   rec.updatedAt = now();
   writeThrough(rec);
   return rec;

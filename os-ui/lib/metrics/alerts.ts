@@ -2,14 +2,16 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { measureMember } from './model.ts';
-import type { Dataset, Measure } from '../data/dataset-schema.ts';
+import type { Dataset, Measure } from '../data/index.ts';
 
 /**
  * Alerts on governed metrics. An alert sets a THRESHOLD on a metric member; on breach it
  * NOTIFIES (email/Slack/in-app) AND can TRIGGER a governed agent — an event → a LangGraph
  * run (Langfuse-traced). An alert evaluates the SAME member the explorer/dashboard/agent
- * resolve, so it fires on the same number a viewer sees. Alerts belong with Metrics (a
- * threshold on a metric), not Dashboards.
+ * resolve, through the SAME governed-SQL path (exploreMetric — Cube is off the read path,
+ * Phase 2), AS the rule's OWNER, so it fires on exactly the number that owner sees. The
+ * headless value resolution + honest 'unavailable'/'pending' skip live in build/alert-eval.ts.
+ * Alerts belong with Metrics (a threshold on a metric), not Dashboards.
  *
  * Pure: {@link evaluateAlert} decides; the live wiring (notify, enqueue the agent run) is
  * injected at the route. Modelled so the kind-gate "an alert notifies AND triggers an

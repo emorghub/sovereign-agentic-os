@@ -16,7 +16,10 @@ import {
   type ColumnDoc,
   type TrustLevel,
   type DatasetUpstream,
+  type GoldSpec,
   type DataCheck,
+  type DatasetSync,
+  DATASET_SYNC_MODES,
   DatasetError,
   canTransition,
   emptyVersions,
@@ -27,8 +30,9 @@ import {
   visibilityFor,
 } from './dataset-schema.ts';
 import { transparencyGate, gateReason } from './transparency.ts';
-import { CUBE_ARTIFACT, EXPOSURE_ARTIFACT, scaffoldCubeYaml, scaffoldExposureYaml, metricGoldReady } from './metrics.ts';
-import { assetTarget, productTarget, personalSchema, domainSchema, slug, versionTarget } from './store-fqn.ts';
+import { CUBE_ARTIFACT, EXPOSURE_ARTIFACT, scaffoldCubeYaml, scaffoldExposureYaml, metricSqlReady, metricCubeReady } from './metrics.ts';
+import { SEMANTIC_ARTIFACT, scaffoldSemanticYaml } from './semantic.ts';
+import { assetTarget, productTarget, personalSchema, domainSchema, physicalSlug, versionTarget } from './store-fqn.ts';
 import { config } from '../core/config.ts';
 import { osMirror } from '../infra/os-mirror.ts';
 import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
@@ -36,6 +40,7 @@ import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
 // explicit row so it persists even when empty. Reused, never forked (mirrors Files).
 import { createFolder, type FolderScope, type Principal as FolderPrincipal } from '../folders/index.ts';
 import { normaliseFolderPath } from '../core/folders.ts';
+import { isValidCron } from '../agents/cron-util.ts';
 
 // Re-export the FQN helpers so existing consumers keep importing them from the store.
 export { assetTarget, productTarget } from './store-fqn.ts';
@@ -71,6 +76,10 @@ export type DatasetRecord = {
 export type DatasetSummary = {
   id: string;
   name: string;
+  /** The FROZEN physical slug (absent ⇒ derivable from `name`). Carried on the summary
+   *  so summary-driven FQN builders (catalog) stay pinned to the physical table across a
+   *  rename — resolve it via `physicalSlug(summary)`. */
+  slug?: string;
   owner: string;
   domain: string;
   tier: Tier;
@@ -85,6 +94,9 @@ export type DatasetSummary = {
   storage: ReturnType<typeof storageFor>;
   /** Soft-archived (retained, reversible). Absent/false = live. */
   archived?: boolean;
+  /** VISIBLE STALE STATE (Northpeak fix): the promoted domain table holds a prior
+   *  snapshot (source rebuilt, publish CTAS not yet re-run). Absent = in sync. */
+  domainTableStale?: boolean;
 };
 
 type DataStoreState = {
@@ -321,6 +333,28 @@ function persist(rec: DatasetRecord, d: Dataset, snap?: { author: string; summar
   return rec;
 }
 
+/**
+ * Cross-domain governance move (admin-only, gated in lib/platform-admin/domain-move.ts).
+ * A dataset carries its domain in BOTH the record field AND its canonical yaml
+ * (scoping parses the yaml), so we parse → set d.domain → persist, which
+ * re-serializes the yaml and stamps rec.domain together — the store's own
+ * discipline, not a partial poke. `sel.id` moves one; `sel.onlyUnassigned`
+ * sweeps only empty-domain records. Returns the ids moved.
+ */
+export function moveDatasetsDomain(sel: { id?: string; onlyUnassigned?: boolean }, target: string): string[] {
+  const moved: string[] = [];
+  for (const rec of ds().store.values()) {
+    if (sel.id !== undefined && rec.id !== sel.id) continue;
+    if (sel.onlyUnassigned && rec.domain) continue;
+    if (rec.domain === target) continue;
+    const d = parseDataset(rec.yaml);
+    d.domain = target;
+    persist(rec, d);
+    moved.push(rec.id);
+  }
+  return moved;
+}
+
 // --------------------------------------------------------------------- lists --
 
 function furthest(d: Dataset): { freshness: string | null; layer: Layer | null } {
@@ -338,6 +372,7 @@ function summarise(d: Dataset, archived = false): DatasetSummary {
   return {
     id: d.id,
     name: d.name,
+    ...(d.slug ? { slug: d.slug } : {}),
     owner: d.owner,
     domain: d.domain,
     tier: d.tier,
@@ -348,6 +383,7 @@ function summarise(d: Dataset, archived = false): DatasetSummary {
     dots: { bronze: d.versions.bronze.built, silver: d.versions.silver.built, gold: d.versions.gold.built },
     storage: storageFor(d.tier),
     archived,
+    ...(d.domainTableStale ? { domainTableStale: true } : {}),
   };
 }
 
@@ -367,10 +403,17 @@ export function listDatasets(user: Principal, opts: { includeArchived?: boolean 
     if (!canView(d, user)) continue;
     // Group by VISIBILITY (tier), not ownership: a promoted asset is domain data and
     // belongs under Domain even when the caller authored it; a certified product under
-    // Marketplace; a private dataset (owner-only, via canView) under Personal.
-    if (d.tier === 'product') marketplace.push(summarise(d, rec.archived));
-    else if (d.tier === 'asset') domain.push(summarise(d, rec.archived));
-    else mine.push(summarise(d, rec.archived));
+    // this tab's "Company" tier; a private dataset (owner-only, via canView) under Personal.
+    // STRICT DOMAIN ISOLATION (platform-admin model): EVERY tier — My, Domain AND Company —
+    // narrows to the ACTIVE domain for EVERYONE incl the owner/admin (canView returns true
+    // for the owner regardless of domain, so without this an owner sees their domain-A
+    // artifacts while acting in domain B). "All Domains" = every membership → shown; a
+    // domainless (unassigned) artifact always shows. Cross-domain discovery of a certified
+    // product happens ONLY through the dedicated Marketplace catalog surface, never here.
+    const inScope = !d.domain || user.domains.includes(d.domain);
+    if (d.tier === 'product') { if (inScope) marketplace.push(summarise(d, rec.archived)); }
+    else if (d.tier === 'asset') { if (inScope) domain.push(summarise(d, rec.archived)); }
+    else if (inScope) mine.push(summarise(d, rec.archived));
   }
   const byName = (a: DatasetSummary, b: DatasetSummary) => a.name.localeCompare(b.name);
   return { mine: mine.sort(byName), domain: domain.sort(byName), marketplace: marketplace.sort(byName) };
@@ -445,15 +488,42 @@ export function listGovernedDatasets(): Dataset[] {
   return out;
 }
 
+/**
+ * UNSCOPED single-dataset read for the sync scheduler (mirrors the agents store's
+ * `systemForScheduler`): a CronJob trigger carries no human session, so the executor
+ * loads the record by id, then resolves the OWNER's live identity and runs AS them.
+ * Server-side callers only — never expose through a user-facing route.
+ */
+export function datasetForScheduler(id: string): Dataset | null {
+  ensureSeeded();
+  const rec = ds().store.get(id);
+  if (!rec || rec.archived) return null;
+  return parseDataset(rec.yaml);
+}
+
+/** UNSCOPED list of live datasets with a sync configured — the fallback sweep's
+ *  worklist (`/api/data/sync-due`). Server-side callers only. */
+export function datasetsWithSync(): Dataset[] {
+  ensureSeeded();
+  const out: Dataset[] = [];
+  for (const rec of ds().store.values()) {
+    if (rec.archived) continue;
+    const d = parseDataset(rec.yaml);
+    if (d.sync) out.push(d);
+  }
+  return out;
+}
+
 /** A dataset the caller may JOIN into a Gold build (stage-4 reuse). */
 export type JoinableDataset = { id: string; name: string; domain: string; tier: Tier; fqn: string; columns: string[] };
 
 /**
- * The canView-scoped list of OTHER datasets the caller can reuse in a Gold join: only
- * governed tiers (asset/product) they may READ (never a private dataset they don't own)
- * that actually have a physical table (silver/gold built). This is the SAME `canView`
- * gate the catalog/list use — the join picker can never surface a dataset the caller
- * can't see, and the route re-checks `getDataset` per pick as defense in depth.
+ * The canView- AND active-domain-scoped list of OTHER datasets the caller can reuse in
+ * a Gold join: only governed tiers (asset/product) they may READ (never a private
+ * dataset they don't own), narrowed to the operating domain, that actually have a
+ * physical table (silver/gold built). Same gates as the catalog/list — the join picker
+ * can never surface a dataset the caller's active domain doesn't hold, and the route
+ * re-checks `getDataset` per pick as defense in depth.
  */
 export function listJoinable(user: Principal, excludeId?: string): JoinableDataset[] {
   ensureSeeded();
@@ -463,6 +533,14 @@ export function listJoinable(user: Principal, excludeId?: string): JoinableDatas
     if (d.id === excludeId) continue;
     if (d.tier === 'dataset') continue; // private, owner-only — not reusable
     if (!canView(d, user)) continue; // the hard visibility gate
+    // ACTIVE-DOMAIN NARROWING (the same inScope gate the main list applies to all
+    // tiers): canView alone leaks across domains — an owner/admin passes it for their
+    // OTHER domains' assets, and a certified product is canView-true tenant-wide. The
+    // join picker must only offer what the operating domain holds; cross-domain
+    // discovery of a certified product happens ONLY through the Marketplace catalog,
+    // never here. (Leak seen live 2026-07-31: kiekert datasets offered in the JOIN TO
+    // dropdown while operating in agentic-leader.)
+    if (d.domain && !user.domains.includes(d.domain)) continue;
     if (!d.versions.gold.built && !d.versions.silver.built) continue; // must be materialized
     out.push({ id: d.id, name: d.name, domain: d.domain, tier: d.tier, fqn: assetTarget(d), columns: d.columns.map((c) => c.name) });
   }
@@ -503,7 +581,7 @@ export function listAskable(user: Principal): AskableDataset[] {
       name: d.name,
       domain: d.domain,
       tier: d.tier,
-      fqn: `iceberg.${schema}.${f.layer}_${slug(d.name)}`,
+      fqn: `iceberg.${schema}.${f.layer}_${physicalSlug(d)}`,
       description: d.description,
       columns: d.columns,
     });
@@ -513,7 +591,7 @@ export function listAskable(user: Principal): AskableDataset[] {
 
 // ------------------------------------------------------------- create / edit --
 
-export function createDataset(user: Principal, input: { name: string; domain?: string }): Dataset {
+export function createDataset(user: Principal, input: { name: string; domain?: string; origin?: 'ingest' | 'curated' }): Dataset {
   ensureSeeded();
   const domain = input.domain && user.domains.includes(input.domain) ? input.domain : user.domains[0] ?? 'platform';
   const wanted = (input.name.trim() || 'Untitled dataset').toLowerCase();
@@ -547,6 +625,8 @@ export function createDataset(user: Principal, input: { name: string; domain?: s
     // #155: every NEW dataset gets the domain-namespaced cube identity. Existing datasets
     // (no marker) keep their legacy un-namespaced name — so live Cube models are untouched.
     cubeNamespaced: true,
+    // TWO-PATH create: only the curated birth is recorded (absent ⇒ ingest, byte-stable).
+    ...(input.origin === 'curated' ? { origin: 'curated' as const } : {}),
   };
   const rec: DatasetRecord = { id: d.id, owner: d.owner, domain: d.domain, yaml: serializeDataset(d), updatedAt: now() };
   ds().store.set(rec.id, rec);
@@ -601,6 +681,12 @@ export function buildVersion(
   if (patch.body !== undefined && next.artifact) {
     rec.artifacts = { ...(rec.artifacts ?? {}), [next.artifact]: patch.body };
   }
+  // Northpeak fix (materialization drift): rebuilding the PUBLISHED layer (or building a
+  // gold above a silver-published asset) of an ALREADY-PROMOTED dataset rewrites only the
+  // owner's personal lane — the governed domain copy now holds a prior snapshot (or lacks
+  // the new layer entirely). Flag it STALE until the publish CTAS re-runs. Bronze builds
+  // (incl. sync freshness marks) don't touch the domain copy directly and stay unflagged.
+  if (d.tier !== 'dataset' && layer !== 'bronze') d.domainTableStale = true;
   persist(rec, d, { author: user.id, summary: `build ${layer}` });
   return d;
 }
@@ -611,18 +697,33 @@ export function buildVersion(
  * promotion — T7) and the multi-upstream lineage edges (the additional datasets the
  * join read). Editing is Creator+ on a dataset you can edit; called ONLY after the
  * Build report is ✓ (the honesty contract — no dot without a real materialized table).
+ *
+ * `goldSpec` (optional) is the RAW editable build spec — persisted so the panel
+ * re-hydrates the joins/columns/measures and the definition stays editable + rebuildable.
+ * A rebuild REPLACES it (the last successful spec is the current one). `upstreams` may be
+ * EMPTY for a single-table Gold (no join partner) — the version still lights.
  */
 export function buildGoldJoin(
   id: string,
   user: Principal,
-  input: { measures: Measure[]; upstreams: DatasetUpstream[]; artifact: string; body: string },
+  input: { measures: Measure[]; upstreams: DatasetUpstream[]; artifact: string; body: string; goldSpec?: GoldSpec },
 ): Dataset {
   const rec = get(id);
   const d = editOf(rec, user);
   d.versions.gold = { built: true, passThrough: false, quality: 'unknown', updatedAt: now(), artifact: input.artifact };
   rec.artifacts = { ...(rec.artifacts ?? {}), [input.artifact]: input.body };
-  d.measures = input.measures;
+  // Measures are declared in the PUBLISH stage now (the Gold panel builds a row-level
+  // projection and always sends none) — a gold rebuild must never wipe them. Only a
+  // build that explicitly brings measures (e.g. the MCP tool) replaces the list.
+  if (input.measures.length) d.measures = input.measures;
   d.upstreams = input.upstreams;
+  if (input.goldSpec) d.goldSpec = input.goldSpec;
+  // Northpeak fix (materialization drift): if this dataset is ALREADY promoted, the
+  // governed domain table (`iceberg.<domain>.gold_<slug>`) — the FQN Cube + every consumer
+  // reads — is now a PRIOR snapshot: this rebuild only rewrote the owner's personal-lane
+  // Gold. Flag it STALE so the domain copy is honestly known to be behind until the publish
+  // CTAS re-runs (auto-refreshed by a builder+ rebuilder in the route, else surfaced + re-promoted).
+  if (d.tier !== 'dataset') d.domainTableStale = true;
   persist(rec, d, { author: user.id, summary: 'build gold join' });
   return d;
 }
@@ -642,6 +743,42 @@ export function setDocs(
     d.columns = docs.columns.filter((c) => c.name.trim()).map((c) => ({ name: c.name.trim(), description: c.description ?? '' }));
   }
   persist(rec, d, { author: user.id, summary: 'edit docs' });
+  return d;
+}
+
+/**
+ * Rename a dataset — change its DISPLAY name ONLY. Edit-scoped exactly like every
+ * other mutation (owner always; an in-domain domain_admin / platform admin on a
+ * shared/certified dataset — the reused {@link canManageArtifact} gate).
+ *
+ * CRITICAL — the physical identity NEVER moves: the physical table / Cube / dbt name
+ * is derived from the FROZEN `slug`, so BEFORE we touch the name we PIN `d.slug` to the
+ * dataset's CURRENT physical slug (`physicalSlug(d)` = the existing frozen slug if it was
+ * already renamed once, else `slug(oldName)`). From then on `physicalSlug` returns that
+ * pinned value regardless of the display name, so every FQN/cube/dbt path stays put and
+ * no live Iceberg table is ever orphaned. The name is then set + persisted + versioned.
+ *
+ * Within-domain name uniqueness is re-checked (same rule as {@link createDataset}) so a
+ * rename can't collide two datasets onto one shared cube/model file.
+ */
+export function renameDataset(id: string, user: Principal, newName: string): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  const name = newName.trim();
+  if (!name) fail('a dataset needs a name', 400);
+  if (name === d.name) return d; // no-op → no version churn, no slug freeze
+  // Re-enforce within-domain uniqueness (a rename must not collide onto another's slug).
+  const wanted = name.toLowerCase();
+  for (const other of ds().store.values()) {
+    if (other.id === id || other.domain !== d.domain) continue;
+    if (parseDataset(other.yaml).name.trim().toLowerCase() === wanted) {
+      fail(`A dataset named “${name}” already exists in ${d.domain} — pick a unique name.`, 409);
+    }
+  }
+  // FREEZE the physical slug to the CURRENT table BEFORE the name changes, then rename.
+  d.slug = physicalSlug(d); // pin: existing frozen slug, else slug(oldName)
+  d.name = name;
+  persist(rec, d, { author: user.id, summary: 'rename' });
   return d;
 }
 
@@ -755,6 +892,46 @@ export function setMonitor(
   return d;
 }
 
+/**
+ * Configure (or clear, with `null`) a dataset's SCHEDULED INCREMENTAL SYNC. The strict
+ * validation gate: the tolerant schema parse never rejects, so every invariant an
+ * executable sync needs is enforced HERE — valid cron, a cursor for incremental modes,
+ * merge keys for merge mode. Edit scope is the same owner/domain_admin/admin gate every
+ * structural edit uses ({@link editOf}). CronJob reconciliation is the caller's job
+ * (`sync-cron.ts`) — this only persists the definition.
+ */
+export function setDatasetSync(id: string, user: Principal, sync: DatasetSync | null): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  if (sync) {
+    if (!sync.connectionId) fail('sync: connectionId required', 400);
+    if (!sync.source?.schema || !sync.source?.table) fail('sync: source schema + table required', 400);
+    if (!DATASET_SYNC_MODES.includes(sync.mode)) fail(`sync: invalid mode '${String(sync.mode)}'`, 400);
+    if (!isValidCron(sync.schedule?.cron)) {
+      fail('sync: invalid cron expression — expected 5 fields (e.g. "0 6 * * *")', 400);
+    }
+    if (sync.mode !== 'full-refresh') {
+      if (!sync.cursor?.column) fail(`sync: ${sync.mode} mode requires a cursor column`, 400);
+      if (sync.cursor.kind !== 'timestamp' && sync.cursor.kind !== 'number' && sync.cursor.kind !== 'kafka-offsets') {
+        fail(`sync: cursor kind '${sync.cursor.kind}' is not implemented yet (timestamp|number|kafka-offsets)`, 400);
+      }
+    }
+    // Kafka offset sync is APPEND-ONLY (streams have no stable key to merge on, and
+    // replacing an unbounded topic copy is the reset ACTION, not a schedule mode).
+    if (sync.cursor?.kind === 'kafka-offsets' && sync.mode !== 'append') {
+      fail('sync: kafka-offsets cursors support append mode only', 400);
+    }
+    if (sync.mode === 'merge' && (!sync.mergeKeys || sync.mergeKeys.length === 0)) {
+      fail('sync: merge mode requires at least one merge key', 400);
+    }
+    d.sync = sync;
+  } else {
+    delete d.sync;
+  }
+  persist(rec, d, { author: user.id, summary: sync ? 'configure sync' : 'remove sync' });
+  return d;
+}
+
 /** Pass-through carries the prior layer's quality forward unchanged. */
 function carryQuality(d: Dataset, layer: Layer): Quality {
   if (layer === 'silver') return d.versions.bronze.quality;
@@ -763,28 +940,35 @@ function carryQuality(d: Dataset, layer: Layer): Quality {
 }
 
 /**
- * Define a metric on the GOLD version — the Cube handover (data-ui-ux.md). Requires
- * a built Gold version AND a GOVERNED tier (asset/product): Cube reads the Trino
- * mart, so the Gold must already live in Trino (data-architecture-model.md — metrics
- * are on gold assets/products, not personal datasets). Regenerates the cube_dbt Cube
- * model + the dbt exposure artifacts so they always match the measures.
+ * Define a metric on the GOLD version. Since the metrics→Trino migration (Phase 1) a metric
+ * is a VIRTUAL DECLARATION served as governed Trino SQL over the physical gold mart, read AS
+ * the viewer — so defining one requires ONLY a BUILT Gold, of ANY tier (a personal dataset's
+ * metric reads its own personal lane). We always emit the portable MetricFlow-style SEMANTIC
+ * declaration; the Cube model + dbt exposure artifacts are emitted ONLY for a CUBE-ready
+ * (governed) dataset, so a broken cube is never registered on personal gold (#91 preserved).
  */
 export function defineMeasure(id: string, user: Principal, measure: Measure): Dataset {
   const rec = get(id);
   const d = metricScopeOf(rec, user);
-  // FAIL-CLOSED metric gate (#91): a cube can only bind to a governed DOMAIN gold mart.
-  // Registering a metric on un-promoted personal gold builds a broken cube (Cube's
-  // `cube-*` principal can't read the personal lane). Refuse with the clear message.
-  const ready = metricGoldReady(d);
+  // SQL-READY gate: define/serve need only a built Gold (any tier) — the metric serves as
+  // governed Trino SQL run AS the viewer. Refuse a dataset with no built Gold honestly.
+  const ready = metricSqlReady(d);
   if (!ready.ok) fail(ready.message ?? 'This dataset is not ready for a metric', 400);
   if (d.measures.some((m) => m.name === measure.name)) fail(`Measure '${measure.name}' already defined`, 409);
   d.measures.push(measure);
-  // Regenerate the tool-native artifacts from the updated dataset (cube_dbt + exposure).
-  rec.artifacts = {
+  // The portable MetricFlow-style semantic declaration is ALWAYS emitted (it is served as
+  // Trino SQL, works on personal gold). The cube_dbt model + dbt exposure are CUBE artifacts
+  // — emit them ONLY when the dataset is cube-ready (governed), never on personal gold where
+  // the cube's `cube-*` principal can't read the personal lane (#91 fail-closed preserved).
+  const artifacts: Record<string, string> = {
     ...(rec.artifacts ?? {}),
-    [CUBE_ARTIFACT(d)]: scaffoldCubeYaml(d),
-    [EXPOSURE_ARTIFACT]: scaffoldExposureYaml(d),
+    [SEMANTIC_ARTIFACT(d)]: scaffoldSemanticYaml(d),
   };
+  if (metricCubeReady(d).ok) {
+    artifacts[CUBE_ARTIFACT(d)] = scaffoldCubeYaml(d);
+    artifacts[EXPOSURE_ARTIFACT] = scaffoldExposureYaml(d);
+  }
+  rec.artifacts = artifacts;
   persist(rec, d, { author: user.id, summary: `define metric ${measure.name}` });
   return d;
 }
@@ -807,10 +991,15 @@ export function removeMeasure(id: string, user: Principal, measureName: string):
   if (d.measures.length === before) return { removed: false }; // nothing to drop
   const artifacts = { ...(rec.artifacts ?? {}) };
   if (d.measures.length > 0) {
-    artifacts[CUBE_ARTIFACT(d)] = scaffoldCubeYaml(d);
-    artifacts[EXPOSURE_ARTIFACT] = scaffoldExposureYaml(d);
+    artifacts[SEMANTIC_ARTIFACT(d)] = scaffoldSemanticYaml(d);
+    // Cube artifacts only for a cube-ready (governed) dataset — never registered on personal gold.
+    if (metricCubeReady(d).ok) {
+      artifacts[CUBE_ARTIFACT(d)] = scaffoldCubeYaml(d);
+      artifacts[EXPOSURE_ARTIFACT] = scaffoldExposureYaml(d);
+    }
   } else {
     // Last measure gone → the metric artifacts no longer exist for this dataset.
+    delete artifacts[SEMANTIC_ARTIFACT(d)];
     delete artifacts[CUBE_ARTIFACT(d)];
     delete artifacts[EXPOSURE_ARTIFACT];
   }
@@ -962,6 +1151,11 @@ export function applyApprovedPromotion(req: PromotionRequest, approver: Principa
   d.tier = 'asset'; // storageFor(asset) === 'trino-iceberg'
   d.visibility = visibilityFor('asset', req.visibility);
   d.grants = req.grants;
+  // #146: a governed shared asset becomes part of the analytics-as-code estate —
+  // mark it git-backed so the promote hook records its dbt model + schema.yml in the
+  // `analytics` mono-repo (observability mirror; the runtime CTAS is unchanged). The
+  // flag is sticky + persisted (parseDataset carries it forward through certify).
+  d.gitBacked = true;
   persist(rec, d);
   return d;
 }
@@ -1010,6 +1204,30 @@ export async function verifyPromotedMaterialization(
   const d = editOf(rec, user); // owner or domain admin — edit authority to repair
   if (d.tier === 'dataset') fail('This dataset is not promoted — nothing to re-materialize', 409);
   await requireDomainTableMaterialized(assetTarget(d), user, verify);
+  // The domain table now resolves → it is in sync with the source again. Clear the STALE
+  // marker (idempotent: no-op when it was never set) so consumers stop being warned.
+  if (d.domainTableStale) {
+    delete d.domainTableStale;
+    persist(rec, d, { author: user.id, summary: 're-materialize: domain table confirmed in sync' });
+  }
+  return d;
+}
+
+/** Clear the STALE-domain-table marker after a confirmed re-materialization (the publish
+ *  CTAS re-ran + the domain probe passed). Gated like a promotion approval — the OWNER or
+ *  any BUILDER+ in the dataset's domain (the same people who may run the refresh CTAS) —
+ *  NOT the narrower edit scope, so the approving Builder who just re-materialized can
+ *  honestly clear the drift they fixed. Idempotent: a no-op when the flag was never set. */
+export function clearDomainTableStale(id: string, user: Principal): Dataset {
+  const rec = get(id);
+  const d = parseDataset(rec.yaml);
+  const inDomain = user.domains.includes(d.domain);
+  const mayClear = d.owner === user.id || (inDomain && roleAtLeast(user.role, 'builder'));
+  if (!mayClear) fail('Clearing the stale marker requires the owner or a Builder in the dataset’s domain', 403);
+  if (d.domainTableStale) {
+    delete d.domainTableStale;
+    persist(rec, d, { author: user.id, summary: 're-materialize: domain table refreshed' });
+  }
   return d;
 }
 
@@ -1214,8 +1432,13 @@ export function listFiles(id: string, user: Principal): { files: string[]; datas
     const a = d.versions[l].artifact;
     if (a) files.push(a);
   }
-  // Metric artifacts (cube_dbt model + dbt exposure) appear once a measure exists.
-  if (d.measures.length > 0) files.push(CUBE_ARTIFACT(d), EXPOSURE_ARTIFACT);
+  // Metric artifacts appear once a measure exists: the portable MetricFlow semantic
+  // declaration always; the cube_dbt model + dbt exposure only for a cube-ready (governed)
+  // dataset (they aren't emitted on personal gold).
+  if (d.measures.length > 0) {
+    files.push(SEMANTIC_ARTIFACT(d));
+    if (metricCubeReady(d).ok) files.push(CUBE_ARTIFACT(d), EXPOSURE_ARTIFACT);
+  }
   return { files, dataset: d };
 }
 
@@ -1227,7 +1450,7 @@ export function readFile(id: string, user: Principal, path: string): RepoFile {
     return { path, content, sha: sha(content) };
   }
   const isVersion = (['bronze', 'silver', 'gold'] as Layer[]).some((l) => d.versions[l].artifact === path);
-  const isMetric = d.measures.length > 0 && (path === CUBE_ARTIFACT(d) || path === EXPOSURE_ARTIFACT);
+  const isMetric = d.measures.length > 0 && (path === SEMANTIC_ARTIFACT(d) || path === CUBE_ARTIFACT(d) || path === EXPOSURE_ARTIFACT);
   if (!isVersion && !isMetric) fail(`Path '${path}' is not part of this dataset`, 404);
   // The authored/generated body if present; otherwise a stub the live adapter
   // (Phase 6) materialises on Build.

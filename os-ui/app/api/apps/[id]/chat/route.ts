@@ -9,29 +9,14 @@ import { getSnapshot } from '@/lib/software/snapshot';
 import { diffTrees, type FileChange } from '@/lib/software/build-changeset';
 import { runTabAgent, renderAssistantText } from '@/lib/assistant/runtime';
 import { AssistantNotConfiguredError } from '@/lib/assistant/complete';
+import { toolCallToLine, committedSummaryLine, type ActivityLine } from '@/lib/software/build-activity';
+import { asChatRunMode, isReadOnlyMode, modeDirective, modelRoleForMode, READ_ONLY_MODE_TOOLS, type ChatRunMode } from '@/lib/software/chat-modes';
+import { defineContextBlock, specPromptLines as specLines } from '@/lib/software/define-context';
+import type { BuildTarget } from '@/lib/software/build-target';
 
 export const dynamic = 'force-dynamic';
 
 type Msg = { role: 'user' | 'assistant'; content: string };
-type BuildMode = 'plan' | 'build';
-/** A story the Build run is targeting (from the Design EPIC/story selector). */
-type BuildStory = { epicId: string; storyId: string; label?: string };
-
-/**
- * PLAN mode = discuss + plan with ZERO code changes: the agent may only READ
- * (list/get software, read the app files, status) — no commit/preview/deploy. The
- * allowlist is enforced by the harness (not just prompted), so a Plan turn cannot
- * mutate the app. BUILD mode leaves the full software tool set in place.
- */
-const PLAN_MODE_TOOLS = [
-  'whoami',
-  'list_capabilities',
-  'get_guide',
-  'list_software',
-  'get_software',
-  'read_app_files',
-  'get_software_status',
-];
 
 /**
  * A concise, ACCURATE description of the OS-client SDK surface + the `vite-os`
@@ -95,67 +80,106 @@ function appContext(
   app: {
     id: string;
     name: string;
+    description?: string;
+    purpose?: string;
     template: string;
     subdomain: string;
     repo: { fullName: string };
     designDecisions: string;
     dataDescriptions: string;
     docs: string;
-    epics?: { id: string; title: string; stories: { id: string; title: string; asA: string; iWant: string; soThat: string; acceptance: string }[] }[];
+    epics?: { id: string; title: string; stories: { id: string; title: string; asA: string; iWant: string; soThat: string; acceptance: string; spec?: { features?: string[]; nfrs?: string[]; rules?: string[] } }[] }[];
   },
-  mode: BuildMode,
-  story: BuildStory | null,
+  mode: ChatRunMode,
+  target: BuildTarget | null,
 ): string {
-  const isViteOs = app.template === 'vite-os';
-  const stackLine = isViteOs
-    ? 'It is a Vite + React governed OS-frontend app that lives in its own Forgejo repo'
-    : 'It is a Next.js + Supabase app that lives in its own Forgejo repo';
+  // Governed OS frontends: every Vite-based scaffold (vite-os, sovereign-app,
+  // website, empty) — the vendored SDK/UI brief applies to all of them.
+  const isGovernedFrontend = ['vite-os', 'sovereign-app', 'website', 'empty'].includes(app.template);
+  const isSovereignApp = app.template === 'sovereign-app';
+  const stackLine =
+    app.template === 'api-service'
+      ? 'It is an APIs-only service (zero-dependency Node HTTP server, NO user interface) that lives in its own Forgejo repo'
+      : isGovernedFrontend
+        ? 'It is a Vite + React governed OS-frontend app that lives in its own Forgejo repo'
+        : 'It is a Next.js + Supabase app that lives in its own Forgejo repo';
   const lines = [
     `You are the build assistant for the "${app.name}" application (appId: ${app.id}).`,
     stackLine,
     `(${app.repo.fullName}) and ships via Forgejo Actions → Harbor → Argo CD to`,
     `${app.subdomain}.`,
+    // The full Define context (template + name + description + purpose) grounds every
+    // code change — features are built from what the app IS, never invented.
+    '',
+    defineContextBlock(app),
   ];
 
   // Governed-frontend apps talk to the OS only through the OS-client SDK — teach
   // the harness the real SDK surface + scaffold conventions so generated code is
   // grounded (never invents methods, never fabricates data).
-  if (isViteOs) {
+  if (isGovernedFrontend) {
     lines.push('', OS_SDK_BRIEF);
   }
-
-  if (mode === 'plan') {
+  // The Sovereign standard app carries a skeleton contract (also in ## Docs below):
+  // keep it intact and extend it section-by-section.
+  if (isSovereignApp) {
     lines.push(
       '',
-      '## Mode: PLAN (read-only)',
-      'You are in PLAN mode. Do NOT write, commit, preview or deploy anything — those',
-      'tools are unavailable to you here. READ the app files and status as needed, then',
-      'reply with a concise, concrete implementation plan (the files you WOULD change and',
-      'why). The user will switch to BUILD mode to execute it.',
-    );
-  } else {
-    lines.push(
-      '',
-      '## Mode: BUILD (execute end-to-end)',
-      `To build: generate the files, then call \`commit\` with THIS appId (${app.id}) to`,
-      'write them (re-parsed on every commit), `start_preview` for the private sandbox, and',
-      '`request_deploy` to open the Builder review gate. When you make a design decision or',
-      'change the data model, state it explicitly so it can be captured under the app.',
+      '## Sovereign standard app — skeleton contract + code structure',
+      'This app is a Sovereign standard app. Its code MIRRORS the epic/story spec:',
+      '  • src/template/ — the FIXED scaffold: OS-delegated identity (template/identity.tsx —',
+      '    no local accounts/passwords, ever), the scope helpers (template/scope.ts — every',
+      '    record carries owner + domain), roles, app-meta, the AppShell layout (template/',
+      '    shell.tsx), the section registry (template/sections.tsx) and the Admin/Overview',
+      '    pages. NEVER remove it.',
+      '  • src/core/ — overarching custom functionality + the SHARED governed data plane',
+      '    (core/store.ts — the OS SDK, NOT Supabase) and shared pages.',
+      '  • src/epics/<epic>/<story>/ — where each built story\'s feature code + its data go;',
+      '    src/epics/<epic>/general/ for epic-wide shared code.',
+      '  • src/App.tsx / src/main.tsx — THIN entrypoints ONLY (they mount the template Shell).',
+      'To add a feature: create src/epics/<epic>/<story>/<Name>.tsx and register ONE entry in',
+      'src/template/sections.tsx (nav + routing). Keep template/ intact and the entrypoints',
+      'thin. See ## Docs for the full skeleton guide and the code-structure convention.',
     );
   }
 
-  if (story) {
-    const epic = app.epics?.find((e) => e.id === story.epicId);
-    const st = epic?.stories.find((s) => s.id === story.storyId);
+  // The `## Mode: …` directive (plan/build/test/review) — pure, unit-tested.
+  lines.push('', ...modeDirective(mode, app.id));
+
+  // The targeted scope from the epic/story tree: a single story (the classic
+  // target), an EPIC (work its stories in order), or nothing (= whole app).
+  if (target?.kind === 'story') {
+    const epic = app.epics?.find((e) => e.id === target.epicId);
+    const st = epic?.stories.find((s) => s.id === target.storyId);
     if (st) {
       lines.push(
         '',
-        '## Target story (implement THIS story)',
+        '## Target story (THIS story is the scope)',
         `EPIC: ${epic?.title || '(untitled)'}`,
         `Story: ${st.title || '(untitled)'}`,
         `As a ${st.asA || '…'}, I want ${st.iWant || '…'}, so that ${st.soThat || '…'}.`,
         st.acceptance ? `Acceptance: ${st.acceptance}` : '',
-        'Focus this turn on delivering exactly this story.',
+        ...specLines(st.spec),
+        'Focus this turn on exactly this story; deliver its features to spec.',
+      );
+    }
+  } else if (target?.kind === 'epic') {
+    const epic = app.epics?.find((e) => e.id === target.epicId);
+    if (epic) {
+      lines.push(
+        '',
+        '## Target EPIC (THIS epic is the scope)',
+        `EPIC: ${epic.title || '(untitled)'}`,
+        'Its stories, in order:',
+        ...epic.stories.map((s, i) => {
+          const acceptance = s.acceptance ? ` Acceptance: ${s.acceptance}` : '';
+          const spec = specLines(s.spec);
+          const specSuffix = spec.length ? ` [${spec.join(' | ')}]` : '';
+          return `${i + 1}. ${s.title || '(untitled)'} — as a ${s.asA || '…'}, I want ${s.iWant || '…'}, so that ${s.soThat || '…'}.${acceptance}${specSuffix}`;
+        }),
+        mode === 'build'
+          ? 'Work the stories IN ORDER, each to its acceptance criteria; state clearly which you delivered this turn.'
+          : 'Cover every story of this EPIC in your response.',
       );
     }
   }
@@ -184,14 +208,21 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const { id } = await ctx.params;
 
   let messages: Msg[] = [];
-  let mode: BuildMode = 'build';
-  let story: BuildStory | null = null;
+  let mode: ChatRunMode = 'build';
+  let target: BuildTarget | null = null;
   try {
     const body = await req.json();
     messages = Array.isArray(body?.messages) ? body.messages : [];
-    if (body?.mode === 'plan' || body?.mode === 'build') mode = body.mode;
-    if (body?.story && typeof body.story.epicId === 'string' && typeof body.story.storyId === 'string') {
-      story = { epicId: body.story.epicId, storyId: body.story.storyId, label: typeof body.story.label === 'string' ? body.story.label : undefined };
+    mode = asChatRunMode(body?.mode);
+    // The targeted scope: `target` ({kind, epicId?, storyId?}) is the current shape;
+    // the legacy `story` ({epicId, storyId}) stays accepted for backward compat.
+    const t = body?.target;
+    if (t?.kind === 'app') target = { kind: 'app' };
+    else if (t?.kind === 'epic' && typeof t.epicId === 'string') target = { kind: 'epic', epicId: t.epicId };
+    else if (t?.kind === 'story' && typeof t.epicId === 'string' && typeof t.storyId === 'string') {
+      target = { kind: 'story', epicId: t.epicId, storyId: t.storyId };
+    } else if (body?.story && typeof body.story.epicId === 'string' && typeof body.story.storyId === 'string') {
+      target = { kind: 'story', epicId: body.story.epicId, storyId: body.story.storyId };
     }
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
@@ -214,40 +245,105 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   // before/after changeset a Build turn produced (the harness commits through
   // `commitToApp`, which updates this same per-app snapshot).
   const before = getSnapshot(app.id);
+  // Per-stage MODEL TIER (Software tab policy): plan (Design) / test / review run on the
+  // REASONING model — the spec-drafting, verification and review reasoning; build (code
+  // GENERATION) runs on STANDARD — the standard model does the bulk file writing and is
+  // NEVER auto-escalated to reasoning. See lib/software/chat-modes.ts modelRoleForMode.
+  const model = roleModel(modelRoleForMode(mode));
 
-  let content = '';
-  let changes: FileChange[] = [];
-  const model = roleModel('standard');
-  try {
-    const result = await runTabAgent({
-      user,
-      tab: 'software',
-      messages: clean,
-      extraContext: appContext(app, mode, story),
-      // PLAN mode is read-only — enforced by the harness, not just the prompt.
-      toolNames: mode === 'plan' ? PLAN_MODE_TOOLS : undefined,
-    });
-    content = renderAssistantText(result);
-    // Diff the committed tree after the run (build mode only ever writes).
-    if (mode === 'build') changes = diffTrees(before, getSnapshot(app.id));
-  } catch (e) {
-    if (e instanceof AssistantNotConfiguredError) {
-      content = `(${e.message})`;
-    } else {
-      content =
-        (e as Error).name === 'AbortError'
-          ? '(the build assistant is still warming up — the model did not respond in time. Your message is saved; send it again in a few seconds.)'
-          : '(build assistant offline — LiteLLM unreachable. Your message is saved under the app; the design decisions and data model are captured on this page.)';
-    }
-  }
+  /**
+   * STREAMING Build run (SSE, text/event-stream). Each event is one JSON line
+   * prefixed `data: `. The client renders `activity` events as a live feed AS
+   * the agent works, then the terminal `final` event carries the backward-
+   * compatible payload ({ content, changes }) the old one-shot client relied on.
+   *
+   * Event shapes (all `{ type, ... }`):
+   *   { type: 'plan', text }                          — the plan, once, first
+   *   { type: 'activity', line: ActivityLine, raw }   — one per tool step, live
+   *   { type: 'final', role, content, model, mode, changes }
+   *   { type: 'error', message }                      — a run-level failure
+   */
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (obj: unknown) => {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+        } catch {
+          /* controller already closed (client aborted) — ignore */
+        }
+      };
 
-  // Persist the running conversation under the app (home of record).
-  const persisted: Msg[] = [...clean, { role: 'assistant', content }];
-  try {
-    await saveChat(id, user, persisted);
-  } catch {
-    /* persistence best-effort */
-  }
+      let content = '';
+      // The calm closing summary shown in the final bubble (the plan + per-tool
+      // actions already streamed live into the feed, so the bubble need not repeat
+      // the whole markdown wall). `content` below stays the FULL render for
+      // persistence + backward-compat.
+      let finalText = '';
+      let changes: FileChange[] = [];
+      try {
+        const result = await runTabAgent({
+          user,
+          tab: 'software',
+          messages: clean,
+          extraContext: appContext(app, mode, target),
+          // Plan/test/review are read-only — enforced by the harness, not just the prompt.
+          toolNames: isReadOnlyMode(mode) ? READ_ONLY_MODE_TOOLS : undefined,
+          onPlan: (plan) => send({ type: 'plan', text: plan }),
+          onStep: (step) => {
+            const line: ActivityLine = toolCallToLine(step);
+            // `raw` carries the real tool I/O for the Builders-only "show details"
+            // affordance; the client keeps it hidden by default.
+            send({ type: 'activity', line, raw: { tool: step.tool, args: step.args, result: step.result } });
+          },
+        });
+        content = renderAssistantText(result);
+        finalText = result.finalText;
+        // Diff the committed tree after the run (build mode only ever writes).
+        if (mode === 'build') changes = diffTrees(before, getSnapshot(app.id));
+        // A closing activity line summarizing the real committed changeset.
+        const summary = mode === 'build' ? committedSummaryLine(app.name, changes) : null;
+        if (summary) send({ type: 'activity', line: { tool: 'commit', text: summary, isError: false } });
+      } catch (e) {
+        if (e instanceof AssistantNotConfiguredError) {
+          content = `(${e.message})`;
+        } else {
+          content =
+            (e as Error).name === 'AbortError'
+              ? '(the build assistant is still warming up — the model did not respond in time. Your message is saved; send it again in a few seconds.)'
+              : '(build assistant offline — LiteLLM unreachable. Your message is saved under the app; the design decisions and data model are captured on this page.)';
+        }
+      }
 
-  return NextResponse.json({ role: 'assistant', content: content || '(no content)', model, mode, changes });
+      // Persist the running conversation under the app (home of record).
+      const persisted: Msg[] = [...clean, { role: 'assistant', content }];
+      try {
+        await saveChat(id, user, persisted);
+      } catch {
+        /* persistence best-effort */
+      }
+
+      // Terminal event — backward-compatible payload the client reads for the
+      // final assistant bubble + the committed diff. `content` is the full render
+      // (persisted); `finalText` is the calm closing line the bubble prefers.
+      send({
+        type: 'final',
+        role: 'assistant',
+        content: content || '(no content)',
+        finalText: finalText || content || '(no content)',
+        model,
+        mode,
+        changes,
+      });
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+    },
+  });
 }

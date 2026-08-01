@@ -16,7 +16,10 @@ import {
   cubeViewNameMatches,
   CUBE_ARTIFACT,
   goldMartFqn,
+  goldOutputColumns,
   metricGoldReady,
+  metricSqlReady,
+  metricCubeReady,
   viewMembers,
   PROMOTE_FIRST_MESSAGE,
 } from './metrics.ts';
@@ -48,6 +51,35 @@ test('cube_dbt scaffolds dimensions from columns; user-named measure is included
   assert.match(yaml, /includes: \[revenue, order_date, region, net_amount\]/);
 });
 
+test('goldOutputColumns: a Gold JOIN projects its OWN output columns (aliases + joined cols), not the base docs', () => {
+  const d = gold({
+    goldSpec: {
+      joins: [{ datasetId: 'ds_products', type: 'inner', baseCol: 'product_id', joinCol: 'product_id' }],
+      dimensions: [
+        { source: '0::order_id' },                       // base column, name kept
+        { source: '0::net_amount', as: 'net' },          // base column, RENAMED in gold
+        { source: '1::product_name' },                   // JOINED column (not in d.columns)
+      ],
+      measures: [],
+    },
+  });
+  const cols = goldOutputColumns(d);
+  assert.deepEqual(cols.map((c) => c.name), ['order_id', 'net', 'product_name']);
+  assert.equal(cols[0].description, 'Key.'); // base doc carried over by name
+  assert.equal(cols[1].description, 'Value.'); // doc carried via the SOURCE column
+  assert.equal(cols[2].description, ''); // joined column has no base doc
+  // …and the Cube scaffold binds its dimensions to the SAME gold output set.
+  const yaml = scaffoldCubeYaml(d);
+  assert.match(yaml, /- name: product_name/);
+  assert.match(yaml, /- name: net\n/);
+  assert.doesNotMatch(yaml, /- name: region/); // unprojected base column is NOT a dim
+});
+
+test('goldOutputColumns: pass-through / spec-less gold falls back to the documented columns', () => {
+  const d = gold();
+  assert.deepEqual(goldOutputColumns(d).map((c) => c.name), ['order_id', 'order_date', 'region', 'net_amount']);
+});
+
 test('dim types are inferred cube_dbt-style from the column names', () => {
   assert.equal(inferDimType('order_date'), 'time');
   assert.equal(inferDimType('created_at'), 'time');
@@ -75,6 +107,9 @@ test('a dashboard bundle binds the Cube view to the query service', () => {
 test('a measure-less gold still scaffolds a count cube (so the view is valid)', () => {
   const y = scaffoldCubeYaml(gold({ measures: [] }));
   assert.match(y, /name: count\n\s+type: count/);
+  // #142: the default cube-level `count` must ALSO be in the view `includes`, or the
+  // view exposes no measure at all (the empty Northpeak_Campaigns symptom).
+  assert.match(y, /includes: \[count, /);
 });
 
 test('the richer Cube measure fields emit only when present (plain measures unchanged)', () => {
@@ -120,6 +155,35 @@ test('#91 metric guard: a governed dataset without a built Gold is rejected', ()
   noGold.versions.gold.built = false;
   assert.equal(metricGoldReady(noGold).ok, false);
   assert.match(metricGoldReady(noGold).message!, /built Gold/);
+});
+
+// -------- metrics→Trino migration (Phase 1): SQL-ready vs Cube-ready gate SPLIT --------
+
+test('metricSqlReady: a PERSONAL built Gold is now READY (define/preview/explore drop promote-first)', () => {
+  // The whole point of Phase 1 — a metric serves as governed Trino SQL over the personal
+  // lane read AS the owner, so no promotion is needed to define or read it.
+  const personal = gold({ tier: 'dataset', visibility: 'private' });
+  assert.deepEqual(metricSqlReady(personal), { ok: true });
+});
+
+test('metricSqlReady: still requires a built Gold (no gold → honest reject)', () => {
+  const noGold = gold();
+  noGold.versions.gold.built = false;
+  assert.equal(metricSqlReady(noGold).ok, false);
+  assert.match(metricSqlReady(noGold).message!, /built Gold/);
+});
+
+test('metricCubeReady: the Cube-registration promote-first rule is PRESERVED for personal gold', () => {
+  const personal = gold({ tier: 'dataset', visibility: 'private' });
+  const r = metricCubeReady(personal);
+  assert.equal(r.ok, false);
+  assert.equal(r.message, PROMOTE_FIRST_MESSAGE);
+  // …and a governed built Gold is cube-ready.
+  assert.deepEqual(metricCubeReady(gold()), { ok: true });
+});
+
+test('metricGoldReady stays a back-compat alias for the Cube rule', () => {
+  assert.equal(metricGoldReady, metricCubeReady);
 });
 
 test('#91 dim reconciliation: drill_members naming a NON-mart column are dropped from the cube', () => {
@@ -215,4 +279,33 @@ test('#155 legacy dataset resolves under its bare name (matcher is a superset of
   const d = gold(); // no marker
   assert.ok(cubeNameMatches(d, 'orders'));
   assert.ok(cubeViewNameMatches(d, 'Orders'));
+});
+
+// ---------------------------------- FROZEN slug — Cube/dbt identity stability on rename --
+
+// A rename FREEZES the slug; the Cube name, view, gold-mart FQN and dbt mart ref all stay
+// pinned to the original physical identity — a live dashboard/metric never breaks.
+test('rename freezes the Cube + dbt identity (legacy, un-namespaced dataset)', () => {
+  const before = gold({ name: 'Orders' });          // no slug → slug("Orders") = "orders"
+  assert.equal(cubeName(before), 'orders');
+  assert.equal(cubeViewName(before), 'Orders');
+  assert.equal(goldMartFqn(before), 'iceberg.sales.gold_orders');
+  assert.match(scaffoldExposureYaml(before), /ref\('mart_orders'\)/);
+
+  // Rename "Orders" → "Sales Orders" pins slug="orders" (what renameDataset does).
+  const after = gold({ name: 'Sales Orders', slug: 'orders' });
+  assert.equal(cubeName(after), 'orders', 'cube name must NOT move to sales_orders');
+  assert.equal(cubeViewName(after), 'orders', 'view stays anchored to the frozen slug');
+  assert.equal(goldMartFqn(after), 'iceberg.sales.gold_orders', 'gold mart FQN frozen');
+  assert.match(scaffoldExposureYaml(after), /ref\('mart_orders'\)/);
+  assert.doesNotMatch(goldMartFqn(after), /sales_orders/);
+});
+
+// The SAME freeze holds for a #155 namespaced dataset — only the domain prefix + frozen slug.
+test('rename freezes the Cube identity (namespaced #155 dataset)', () => {
+  const after = gold({ name: 'Sales Orders', slug: 'orders', cubeNamespaced: true });
+  assert.equal(cubeName(after), 'sales__orders');
+  assert.equal(cubeViewName(after), 'sales__orders');
+  // The legacy bare name still resolves to the frozen slug (back-compat unbroken).
+  assert.ok(cubeNameMatches(after, 'orders'));
 });

@@ -2,11 +2,14 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
+import { withRoute } from '@/lib/core/route-server';
+import type { CurrentUser } from '@/lib/core/auth';
 import { requirePrincipal, errorResponse } from '@/lib/files/server';
 import { listFiles, createFile, attachObject, objectKeyForAsset, type UploadInput } from '@/lib/files/store';
 import { putBlob } from '@/lib/files/object-store';
 import '@/lib/files/object-store-server'; // registers the durable MinIO backend
 import { reindexFile } from '@/lib/files/pipeline-server';
+import { truncationError } from '@/lib/files/integrity';
 import { config } from '@/lib/core/config';
 import type { Sensitivity, Storage } from '@/lib/files/asset-schema';
 
@@ -14,23 +17,21 @@ export const dynamic = 'force-dynamic';
 
 /** The file browser: GET lists the user's drive (mine/domain/marketplace + facets);
  *  POST uploads a new file into the governed object store (a private file at v1). */
-export async function GET(req: Request) {
-  try {
-    const user = await requirePrincipal();
-    // ?archived=1 additionally returns soft-archived files (their own section), so an
-    // archived file stays openable → its preview exposes Restore + Delete (OS-wide rule).
-    const includeArchived = new URL(req.url).searchParams.get('archived') === '1';
-    return NextResponse.json(listFiles(user, { includeArchived }));
-  } catch (e) {
-    return errorResponse(e);
-  }
-}
+export const GET = withRoute(async ({ user, req }) => {
+  // ?archived=1 additionally returns soft-archived files (their own section), so an
+  // archived file stays openable → its preview exposes Restore + Delete (OS-wide rule).
+  const includeArchived = new URL(req.url).searchParams.get('archived') === '1';
+  return NextResponse.json(listFiles(user, { includeArchived }));
+}, { gate: requirePrincipal as () => Promise<CurrentUser> });
 
 /** True when a file's bytes should also be kept as indexable extracted text. */
 function isTextLike(name: string, type: string): boolean {
   return /^text\//.test(type) || /json|csv|xml|markdown|yaml/.test(type) || /\.(txt|md|csv|tsv|json|log|xml|yaml|yml)$/i.test(name);
 }
 
+/**
+ * SKIP (POST): multipart/formData + raw arrayBuffer — binary upload route.
+ */
 export async function POST(req: Request) {
   try {
     const user = await requirePrincipal();
@@ -61,6 +62,48 @@ export async function POST(req: Request) {
 
       const asset = createFile(user, { name, folder, tags, sensitivity, text, bytes: bytes.length });
       // Persist the original bytes under the file's governed prefix, then record it.
+      const key = objectKeyForAsset(asset);
+      if (key) {
+        await putBlob(key, bytes, fileType);
+        attachObject(asset.id, user, { contentType: fileType, bytes: bytes.length });
+      }
+      await reindexFile(asset, text);
+      return NextResponse.json({ asset }, { status: 201 });
+    }
+
+    // ---- UI upload (raw bytes): the browser POSTs the file as the RAW request
+    //      body with `?upload=raw&name=&folder=` — read via arrayBuffer(), which is
+    //      reliable for large bodies (Next/undici's formData() parser chokes on big
+    //      multipart uploads). Same governed create + object-store put as above. ----
+    if (new URL(req.url).searchParams.get('upload') === 'raw') {
+      const sp = new URL(req.url).searchParams;
+      const bytes = Buffer.from(await req.arrayBuffer());
+      if (bytes.length === 0) {
+        return NextResponse.json({ error: 'no file bytes received' }, { status: 400 });
+      }
+      // INTEGRITY GUARD: if the client declared a Content-Length, the body we read MUST
+      // match it. A short read means the upload was truncated/aborted mid-stream (e.g.
+      // an ingress 60s cut) — refuse to store corrupt bytes; surface a retryable error
+      // instead of silently persisting a broken file.
+      const incomplete = truncationError(bytes.length, req.headers.get('content-length'));
+      if (incomplete) {
+        return NextResponse.json({ error: incomplete }, { status: 400 });
+      }
+      const maxMb = Math.round(config.uploadMaxBytes / 1048576);
+      if (bytes.length > config.uploadMaxBytes) {
+        return NextResponse.json(
+          { error: `file exceeds the ${maxMb} MB upload limit`, maxMb },
+          { status: 413 },
+        );
+      }
+      const name = (sp.get('name') || 'upload').trim();
+      const folder = sp.get('folder') || '/';
+      const tags = String(sp.get('tags') ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+      const sensitivity = (sp.get('sensitivity') as Sensitivity) || undefined;
+      const fileType = contentType || 'application/octet-stream';
+      const text = isTextLike(name, fileType) ? bytes.toString('utf8') : '';
+
+      const asset = createFile(user, { name, folder, tags, sensitivity, text, bytes: bytes.length });
       const key = objectKeyForAsset(asset);
       if (key) {
         await putBlob(key, bytes, fileType);

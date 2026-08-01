@@ -7,6 +7,7 @@ import {
   runAgentic,
   parseReactAction,
   toOpenAiTools,
+  trackUsage,
   ToolCallingUnsupportedError,
   type LlmCall,
   type ToolSpec,
@@ -213,6 +214,44 @@ test('an EXACT repeated (tool,args) call executes the tool ONCE; repeats get a s
   assert.match(res.steps[1].result, /already ran this exact call/i);
   // Context stays bounded: only ONE copy of the big payload is ever in the transcript.
   assert.match(res.finalText, /The trend is up/);
+});
+
+test('a repeat whose prior result ERRORED re-runs — a failure is never cached as success', async () => {
+  // Reproduces the "commit → App not found → fabricated success" bug: the dedup guard
+  // must short-circuit only prior SUCCESSES. A failed call (e.g. a stale-cache 404)
+  // has to be RETRYABLE, or a transient error becomes a permanent dead end.
+  const dupCall = { id: 'c', name: 'commit', args: { appId: 'app_1' } };
+  const { llm } = scriptLlm([
+    { content: 'plan' },
+    { content: '', toolCalls: [dupCall] }, // 1st commit — errors
+    { content: '', toolCalls: [dupCall] }, // exact repeat — must RE-RUN, now succeeds
+    { content: 'Committed the files.' },
+  ]);
+  let executed = 0;
+  const res = await runAgentic({
+    system: 'sys',
+    userMessages: [{ role: 'user', content: 'build the app' }],
+    tools: TOOLS,
+    callTool: async () => {
+      executed += 1;
+      return executed === 1
+        ? { text: 'App not found', isError: true } // first attempt fails
+        : { text: 'committed 3 files', isError: false }; // retry succeeds
+    },
+    llm,
+    planModel: 'r',
+    actModel: 'e',
+    maxIterations: 8,
+  });
+  assert.equal(executed, 2, 'the failed call was retried, not blocked by the dedup guard');
+  assert.equal(res.steps.length, 2, 'both attempts are recorded');
+  assert.equal(res.steps[0].isError, true, 'the first attempt is the real error');
+  assert.equal(res.steps[1].isError, false, 'the retry executed for real and succeeded');
+  assert.doesNotMatch(
+    res.steps[1].result,
+    /already ran this exact call/i,
+    'a prior failure is never answered from the dedup note',
+  );
 });
 
 test('a node stuck re-firing the identical call breaks to a final synthesis and hands off', async () => {
@@ -429,4 +468,42 @@ test('displayed text is guarded — leaked <think> reasoning is stripped', async
   });
   assert.equal(res.plan.includes('secret plan'), false);
   assert.equal(res.finalText, 'Final answer.');
+});
+
+// --- trackUsage: the run-summary token accumulator ------------------------------
+
+test('trackUsage sums reported usage across calls and records the distinct models', async () => {
+  const inner: LlmCall = async (req) =>
+    req.model === 'reasoning'
+      ? { content: 'plan', toolCalls: [], usage: { input: 100, output: 10, total: 110 } }
+      : { content: 'act', toolCalls: [], usage: { input: 200, output: 20, total: 220 } };
+  const tracked = trackUsage(inner);
+  await tracked.llm({ model: 'reasoning', messages: [] });
+  await tracked.llm({ model: 'exec', messages: [] });
+  await tracked.llm({ model: 'exec', messages: [] });
+  assert.deepEqual(tracked.usage(), { input: 500, output: 50, total: 550 });
+  assert.deepEqual(tracked.models().sort(), ['exec', 'reasoning']);
+});
+
+test('trackUsage treats a call with MISSING usage as 0 but still sums the rest', async () => {
+  let i = 0;
+  const inner: LlmCall = async () => {
+    i += 1;
+    // The middle call reports no usage (a backend that omitted the block).
+    return i === 2
+      ? { content: 'silent', toolCalls: [] }
+      : { content: 'ok', toolCalls: [], usage: { input: 10, output: 5, total: 15 } };
+  };
+  const tracked = trackUsage(inner);
+  await tracked.llm({ model: 'm', messages: [] });
+  await tracked.llm({ model: 'm', messages: [] });
+  await tracked.llm({ model: 'm', messages: [] });
+  assert.deepEqual(tracked.usage(), { input: 20, output: 10, total: 30 });
+});
+
+test('trackUsage stays undefined when NO call reported usage (never fabricates 0)', async () => {
+  const tracked = trackUsage(async () => ({ content: 'x', toolCalls: [] }));
+  await tracked.llm({ model: 'm', messages: [] });
+  assert.equal(tracked.usage(), undefined);
+  assert.deepEqual(tracked.models(), ['m']);
 });

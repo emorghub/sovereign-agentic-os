@@ -23,10 +23,14 @@ import {
   deleteDataset,
   moveDataset,
   setDocs,
+  setDatasetSync,
+  renameDataset,
   listDatasetVersions,
   restoreDatasetVersion,
+  assetTarget,
   type Principal,
 } from './store.ts';
+import { versionTarget } from './store-fqn.ts';
 import { DatasetError } from './dataset-schema.ts';
 import { cubeName, cubeViewName, CUBE_ARTIFACT } from './metrics.ts';
 import { listFolders as folderList, __resetStore as resetFolders } from '../folders/index.ts';
@@ -86,6 +90,59 @@ test('GOVERNANCE: the Gold join picker (listJoinable) is canView-scoped', () => 
   assert.ok(!listJoinable(bea, orders).some((d) => d.id === orders));
 });
 
+test('SECURITY: listJoinable is ACTIVE-DOMAIN scoped — owner and certified-product bypasses never leak across domains', () => {
+  // Regression for the live leak (2026-07-31): an admin operating agentic-leader saw
+  // Kiekert datasets in the Gold JOIN TO dropdown. canView passes via the OWNER check
+  // (their own other-domain assets) and via tier 'product' (canView-true tenant-wide);
+  // the picker must ALSO narrow to the active domain, like the main list.
+  const boss: Principal = { id: 'boss', domains: ['sales', 'finance'], role: 'admin' };
+  const bossInSales: Principal = { id: 'boss', domains: ['sales'], role: 'admin' }; // operating sales
+  const bossInFinance: Principal = { id: 'boss', domains: ['finance'], role: 'admin' };
+
+  // A promoted FINANCE asset owned by boss (owner bypass)…
+  const finAsset = createDataset(boss, { name: 'Kiekert Cases', domain: 'finance' });
+  buildVersion(finAsset.id, boss, 'bronze', { quality: 'passing', artifact: 'bronze/k.dlt.yml' });
+  buildVersion(finAsset.id, boss, 'silver', { quality: 'passing', artifact: 'silver/k.sql' });
+  transition(finAsset.id, boss, 'promote', { visibility: 'domain' }); // → asset (finance)
+  // …and a CERTIFIED finance product (product bypass: canView-true for everyone).
+  const finProduct = createDataset(boss, { name: 'Kiekert Certified', domain: 'finance' });
+  buildVersion(finProduct.id, boss, 'bronze', { quality: 'passing', artifact: 'bronze/kc.dlt.yml' });
+  buildVersion(finProduct.id, boss, 'silver', { quality: 'passing', artifact: 'silver/kc.sql' });
+  transition(finProduct.id, boss, 'promote', { visibility: 'domain' });
+  transition(finProduct.id, boss, 'certify', { visibility: 'shared' }); // → product (finance)
+
+  // Operating SALES: neither finance dataset may appear — not for the owner-admin,
+  // not for an unrelated sales user (Marketplace is the only cross-domain surface).
+  for (const u of [bossInSales, bea]) {
+    const names = listJoinable(u).map((d) => d.name);
+    assert.ok(!names.includes('Kiekert Cases'), `owner-bypass leak for ${u.id}: ${names}`);
+    assert.ok(!names.includes('Kiekert Certified'), `product-bypass leak for ${u.id}: ${names}`);
+  }
+  // Operating FINANCE (positive control): both are offered.
+  const inFinance = listJoinable(bossInFinance).map((d) => d.name);
+  assert.ok(inFinance.includes('Kiekert Cases') && inFinance.includes('Kiekert Certified'), `expected both in finance, got: ${inFinance}`);
+  // "All domains" session (domains includes finance) also sees them.
+  assert.ok(listJoinable(boss).some((d) => d.name === 'Kiekert Certified'));
+});
+
+test('buildGoldJoin with NO measures preserves the Publish-defined ones (never wipes)', () => {
+  // Measures live in the Publish stage now — the Gold panel always sends an empty
+  // list, and a gold REBUILD must not clear what defineMeasure already declared.
+  const orders = seedOrders();
+  const goldInput = {
+    measures: [],
+    upstreams: [],
+    artifact: 'gold/mart_orders.sql',
+    body: 'create or replace table iceberg.personal_amir.gold_orders as select 1 as x',
+  };
+  buildGoldJoin(orders, amir, goldInput); // first build (row-level, no measures)
+  transition(orders, sara, 'promote', { visibility: 'domain' }); // metrics need a governed Gold
+  defineMeasure(orders, sara, { name: 'order_count', type: 'count', sql: '' }); // Publish stage
+  const rebuilt = buildGoldJoin(orders, amir, goldInput); // rebuild from the Gold panel
+  assert.equal(rebuilt.versions.gold.built, true);
+  assert.deepEqual(rebuilt.measures.map((m) => m.name), ['order_count']);
+});
+
 test('buildGoldJoin lights Gold + records measures and multi-upstream lineage', () => {
   const orders = seedOrders();
   const updated = buildGoldJoin(orders, amir, {
@@ -101,6 +158,53 @@ test('buildGoldJoin lights Gold + records measures and multi-upstream lineage', 
   // survives a serialize/parse round-trip (the durable single source).
   const reopened = getDataset(orders, amir);
   assert.equal(reopened.upstreams?.[0].name, 'Northpeak Commerce');
+});
+
+test('buildGoldJoin persists the raw goldSpec so the panel RE-HYDRATES joins/dims/measures', () => {
+  const orders = seedOrders();
+  const goldSpec = {
+    joins: [{ datasetId: 'ds_np', type: 'inner' as const, baseCol: 'order_id', joinCol: 'order_id' }],
+    dimensions: [{ source: '1::region' }, { source: '0::order_id', as: 'oid' }],
+    measures: [{ name: 'net', agg: 'sum', col: '1::net_amount' }, { name: 'n', agg: 'count' }],
+  };
+  buildGoldJoin(orders, amir, {
+    measures: [{ name: 'net', type: 'sum', sql: 'net' }],
+    upstreams: [{ datasetId: 'ds_np', name: 'Northpeak Commerce', fqn: 'iceberg.sales.gold_northpeak_commerce', joinType: 'inner' }],
+    artifact: 'gold/mart_orders.sql',
+    body: 'create or replace table iceberg.personal_amir.gold_orders as select 1 as x',
+    goldSpec,
+  });
+  // Round-trips through serialize/parse (the durable single source) exactly.
+  const reopened = getDataset(orders, amir);
+  assert.deepEqual(reopened.goldSpec, goldSpec);
+  assert.equal(reopened.goldSpec?.joins[0].datasetId, 'ds_np');
+  assert.equal(reopened.goldSpec?.joins[0].baseCol, 'order_id');
+  assert.deepEqual(reopened.goldSpec?.dimensions.map((d) => d.source), ['1::region', '0::order_id']);
+  assert.deepEqual(reopened.goldSpec?.measures.map((m) => m.name), ['net', 'n']);
+});
+
+test('a Gold build WITHOUT a goldSpec leaves the field absent (byte-stable, no churn)', () => {
+  const orders = seedOrders();
+  buildGoldJoin(orders, amir, {
+    measures: [], upstreams: [], artifact: 'gold/mart_orders.sql',
+    body: 'create or replace table iceberg.personal_amir.gold_orders as select 1 as x',
+  });
+  assert.equal(getDataset(orders, amir).goldSpec, undefined);
+});
+
+test('buildGoldJoin lights Gold for a single-table build (no join partner, empty upstreams)', () => {
+  const orders = seedOrders();
+  const updated = buildGoldJoin(orders, amir, {
+    measures: [{ name: 'orders', type: 'sum', sql: 'orders' }],
+    upstreams: [], // single-table Gold — no dataset was joined
+    artifact: 'gold/mart_orders.sql',
+    body: 'create or replace table iceberg.personal_amir.gold_orders as select count(*) as orders from iceberg.personal_amir.silver_orders t0',
+  });
+  assert.equal(updated.versions.gold.built, true);
+  assert.equal(updated.upstreams?.length, 0);
+  assert.deepEqual(updated.measures.map((m) => m.name), ['orders']);
+  const reopened = getDataset(orders, amir);
+  assert.equal(reopened.versions.gold.built, true);
 });
 
 test('a fresh tenant has no datasets', () => {
@@ -154,13 +258,16 @@ test('Builder role gate: a builder may promote, but only data they can edit', ()
   assert.throws(() => transition(d.id, bea, 'certify'), (e: DatasetError) => e.status === 403);
 });
 
-test('only Admin certifies asset -> product; product is marketplace-discoverable', () => {
+test('only Admin certifies asset -> product; the per-tab Company tier is domain-isolated', () => {
   const id = seedOrders();
   transition(id, sara, 'promote', { visibility: 'domain' });
   const product = transition(id, sara, 'certify', { visibility: 'shared' });
   assert.equal(product.tier, 'product');
-  // Now a finance user sees it in the marketplace group.
-  assert.equal(listDatasets(kenji).marketplace.some((x) => x.id === id), true);
+  // Strict isolation: the sales-homed product shows in a SALES user's Company tier…
+  assert.equal(listDatasets(sara).marketplace.some((x) => x.id === id), true);
+  // …but NOT in a finance user's per-tab list. Cross-domain discovery is the dedicated
+  // Marketplace catalog's job; a finance domain adopts it via importProduct.
+  assert.equal(listDatasets(kenji).marketplace.some((x) => x.id === id), false);
 });
 
 test('own promoted (Shared) dataset groups under Domain, not Mine', () => {
@@ -197,23 +304,27 @@ test('a named cross-domain individual grant lets that user view the asset', () =
   assert.doesNotThrow(() => getDataset(id, kenji));
 });
 
-test('define a metric requires a built Gold version on a GOVERNED asset/product', () => {
+test('define a metric requires only a built Gold (any tier) — metrics→Trino migration Phase 1', () => {
   const id = seedOrders();
-  // (1) no Gold yet → blocked on Gold
+  // (1) no Gold yet → still blocked on Gold (the metric serves SQL over the gold mart)
   assert.throws(
     () => defineMeasure(id, amir, { name: 'revenue', type: 'sum', sql: 'net_amount' }),
     /Gold/,
   );
   buildVersion(id, amir, 'gold', { quality: 'passing', artifact: 'gold/mart_orders.sql' });
-  // (2) Gold built but still a private dataset → blocked (Cube reads the Trino mart)
-  assert.throws(
-    () => defineMeasure(id, amir, { name: 'revenue', type: 'sum', sql: 'net_amount' }),
-    /governed/i,
-  );
-  // (3) promote to a governed asset → the metric is allowed; artifacts regenerate
+  // (2) Gold built on a PERSONAL dataset → now ALLOWED (served as governed Trino SQL over the
+  // owner's personal lane). The portable MetricFlow semantic declaration is emitted; the CUBE
+  // artifacts are NOT (a broken cube must never be registered on personal gold — #91 preserved).
+  const personal = defineMeasure(id, amir, { name: 'revenue', type: 'sum', sql: 'net_amount' });
+  assert.equal(personal.measures[0].name, 'revenue');
+  const personalFiles = listFiles(id, amir).files;
+  assert.ok(personalFiles.some((f) => f.startsWith('semantic/')), 'semantic declaration emitted on personal gold');
+  assert.ok(!personalFiles.some((f) => f.endsWith('.cube.yml')), 'no cube artifact on personal gold');
+  // (3) promote to a governed asset → the cube artifacts now regenerate too.
   transition(id, sara, 'promote', { visibility: 'domain' });
-  const d = defineMeasure(id, sara, { name: 'revenue', type: 'sum', sql: 'net_amount' });
-  assert.equal(d.measures[0].name, 'revenue');
+  defineMeasure(id, sara, { name: 'order_count', type: 'count', sql: '' });
+  const governedFiles = listFiles(id, sara).files;
+  assert.ok(governedFiles.some((f) => f.endsWith('.cube.yml')), 'cube artifact regenerates once governed');
 });
 
 test('files: dataset.yaml is editable, native artifacts are Build-materialised', () => {
@@ -496,4 +607,101 @@ test('#155 the SAME name is now ALLOWED across domains, with DISTINCT cube ident
   assert.notEqual(CUBE_ARTIFACT(salesDs), CUBE_ARTIFACT(finDs));
   assert.equal(cubeName(salesDs), 'sales__sales');
   assert.equal(cubeName(finDs), 'finance__sales');
+});
+
+// ------------------------------------------------- rename: display name + FROZEN slug --
+
+test('renameDataset: FQN STABILITY — a rename never moves the physical table', () => {
+  // Create "Foo", build through gold in amir's personal lane.
+  const d = createDataset(amir, { name: 'Foo' });
+  buildVersion(d.id, amir, 'bronze', { quality: 'passing', artifact: 'bronze/foo.dlt.yml' });
+  buildVersion(d.id, amir, 'silver', { quality: 'passing', artifact: 'silver/stg_foo.sql' });
+  buildVersion(d.id, amir, 'gold', { quality: 'passing', artifact: 'gold/mart_foo.sql' });
+
+  const before = getDataset(d.id, amir);
+  const ownerFqnBefore = versionTarget(before, 'gold', { id: amir.id });
+  assert.equal(ownerFqnBefore, 'iceberg.personal_amir.gold_foo');
+  assert.equal(cubeName(before), 'sales__foo'); // new datasets are namespaced (#155)
+
+  // Rename Foo → Bar.
+  const renamed = renameDataset(d.id, amir, 'Bar');
+  assert.equal(renamed.name, 'Bar');           // display name changed
+  assert.equal(renamed.slug, 'foo');           // slug FROZEN to the original physical table
+
+  const after = getDataset(d.id, amir);
+  // Every physical identity STILL uses slug("Foo") === "foo", NEVER slug("Bar") === "bar".
+  assert.equal(versionTarget(after, 'gold', { id: amir.id }), 'iceberg.personal_amir.gold_foo');
+  assert.equal(versionTarget(after, 'bronze', { id: amir.id }), 'iceberg.personal_amir.bronze_foo');
+  assert.equal(cubeName(after), 'sales__foo', 'cube identity is frozen across a rename');
+  assert.doesNotMatch(versionTarget(after, 'gold', { id: amir.id }), /_bar/, 'no live table orphaned');
+});
+
+test('renameDataset: an existing (never-renamed) dataset resolves to slug(name), unchanged', () => {
+  const d = createDataset(amir, { name: 'Orders' });
+  const before = getDataset(d.id, amir);
+  assert.equal(before.slug, undefined, 'no slug field until a rename decouples it');
+  assert.equal(cubeName(before), 'sales__orders'); // derived from slug("Orders")
+});
+
+test('renameDataset: owner allowed; a shared dataset admits domain_admin/admin; a non-owner non-admin denied', () => {
+  // amir owns a Personal dataset — owner may rename, but nobody else (private is owner-only).
+  const personal = createDataset(amir, { name: 'Private Foo' });
+  assert.equal(renameDataset(personal.id, amir, 'Private Bar').name, 'Private Bar');
+  // A domain builder is NOT an owner and cannot manage a PRIVATE dataset.
+  assert.throws(() => renameDataset(personal.id, bea, 'Hijack'), (e) => (e as DatasetError).status === 403);
+
+  // Promote to a shared asset so canManageArtifact admits an in-domain domain_admin.
+  buildVersion(personal.id, amir, 'bronze', { quality: 'passing', artifact: 'b.dlt.yml' });
+  buildVersion(personal.id, amir, 'silver', { quality: 'passing', artifact: 's.sql' });
+  setDocs(personal.id, amir, { description: 'docs', columns: [{ name: 'id', description: 'k' }] });
+  transition(personal.id, sara, 'promote'); // Admin promotes to a shared asset
+  const domainAdmin: Principal = { id: 'dadmin', domains: ['sales'], role: 'domain_admin' };
+  // A shared asset: an in-domain domain_admin may rename it.
+  assert.equal(renameDataset(personal.id, domainAdmin, 'Shared Renamed').name, 'Shared Renamed');
+  // A bare creator who is not the owner still may not.
+  const stranger: Principal = { id: 'nobody', domains: ['sales'], role: 'creator' };
+  assert.throws(() => renameDataset(personal.id, stranger, 'Nope'), (e) => (e as DatasetError).status === 403);
+});
+
+test('renameDataset: rejects an empty name and a within-domain duplicate', () => {
+  const a = createDataset(amir, { name: 'Alpha' });
+  createDataset(amir, { name: 'Beta' });
+  assert.throws(() => renameDataset(a.id, amir, '   '), (e) => (e as DatasetError).status === 400);
+  assert.throws(() => renameDataset(a.id, amir, 'Beta'), (e) => (e as DatasetError).status === 409);
+});
+
+// ------------------------------------------------------- scheduled sync setter --
+
+test('setDatasetSync validates, persists, and clears; edit-gated', async () => {
+  await ensureHydrated();
+  const id = createDataset(amir, { name: 'Synced orders' }).id;
+  const sync = {
+    connectionId: 'conn_pg',
+    source: { schema: 'public', table: 'orders' },
+    mode: 'append' as const,
+    cursor: { kind: 'timestamp' as const, column: 'updated_at' },
+    schedule: { cron: '0 6 * * *' },
+    enabled: true,
+  };
+  const d = setDatasetSync(id, amir, sync);
+  assert.deepEqual(d.sync, sync);
+  assert.deepEqual(getDataset(id, amir).sync, sync);
+
+  // Invalid configs are strict 400s.
+  assert.throws(() => setDatasetSync(id, amir, { ...sync, schedule: { cron: 'bad' } }), /cron/);
+  assert.throws(() => setDatasetSync(id, amir, { ...sync, cursor: undefined }), /cursor/);
+  assert.throws(
+    () => setDatasetSync(id, amir, { ...sync, mode: 'merge' as const }),
+    /merge key/,
+  );
+  assert.throws(
+    () => setDatasetSync(id, amir, { ...sync, cursor: { kind: 'delta-version' as const, column: 'v' } }),
+    /not implemented/,
+  );
+
+  // A non-owner peer cannot touch a private dataset's sync.
+  assert.throws(() => setDatasetSync(id, kenji, null), DatasetError);
+
+  // Clearing removes the block.
+  assert.equal(setDatasetSync(id, amir, null).sync, undefined);
 });

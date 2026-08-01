@@ -389,7 +389,7 @@ async function newBrandedDoc(): Promise<{
   const [{ jsPDF }, autoTableMod] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);
   const autoTable = autoTableMod.default as unknown as (d: jsPDF, o: Record<string, unknown>) => void;
   const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-  const brand = registerBrandFonts(doc);
+  const brand = await registerBrandFonts(doc);
   const p = makePainter(doc, autoTable, brand);
   return { doc, p, brand };
 }
@@ -511,7 +511,15 @@ export async function downloadEvalPdf(
   }
 
   if (report.judge) {
-    p.heading('AI judge');
+    p.heading('AI judge  (experimental)');
+    p.text(
+      'Experimental — LLM-as-judge scoring is still being developed. Treat the scores below as a rough signal, not a definitive measure of quality.',
+      9,
+      false,
+      13,
+      BRAND.muted,
+    );
+    p.space(4);
     p.text(`Overall ${report.judge.overall} / 5`, 12, true, 18, BRAND.goldText);
     for (const r of report.judge.rows) {
       p.space(4);

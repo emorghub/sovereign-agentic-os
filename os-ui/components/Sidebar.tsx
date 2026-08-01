@@ -5,13 +5,16 @@ import { usePathname } from 'next/navigation';
 import { TAB_GROUPS, filterTabGroups, type Tab } from '@/lib/core/tabs';
 import { useUser } from '@/lib/useUser';
 import { emitTabNav } from '@/lib/core/tab-nav';
+import { DomainSwitcher } from '@/components/core/DomainSwitcher';
+import { DomainStartPrompt } from '@/components/core/DomainStartPrompt';
 // Static import so the brand mark is emitted into .next/static (served in the
 // standalone container, where public/ is not copied).
 import lotus from './lotus.svg';
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { user } = useUser();
+  const { user, domainChosen } = useUser();
+  const multiDomain = (user?.allDomains?.length ?? user?.domains.length ?? 0) > 1;
 
   async function signOut() {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -22,8 +25,10 @@ export default function Sidebar() {
   }
 
   // Derive the visible tab groups once per render. filterTabGroups uses the
-  // machine-readable minRole on each tab — no string parsing, no edge cases.
-  const visibleGroups = filterTabGroups(TAB_GROUPS, user?.role ?? null);
+  // machine-readable minRole + requiresLayer on each tab — no string parsing,
+  // no edge cases. Layers are the ACTIVE domain's (from /api/auth/me); unknown
+  // layers fail open, so a missing record never hides navigation.
+  const visibleGroups = filterTabGroups(TAB_GROUPS, user?.role ?? null, user?.activeDomainLayers ?? null);
 
   function renderTab(tab: Tab) {
     if (!tab.href) {
@@ -55,6 +60,9 @@ export default function Sidebar() {
 
   return (
     <aside className="sidebar">
+      {user && multiDomain && !domainChosen ? (
+        <DomainStartPrompt allDomains={user.allDomains ?? user.domains} />
+      ) : null}
       <div className="brand">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
@@ -96,8 +104,17 @@ export default function Sidebar() {
               <span className="who-name">{user.name}</span>
               <span className={`badge ${user.role === 'admin' ? 'ok' : 'muted'}`}>{user.role}</span>
             </div>
-            {user.domains.length > 1 ? 'Domains: ' : 'Domain: '}
-            <strong>{user.domains.join(', ')}</strong>
+            {multiDomain ? (
+              <DomainSwitcher
+                allDomains={user.allDomains ?? user.domains}
+                activeDomain={user.activeDomain ?? null}
+              />
+            ) : (
+              <div className="who-domain">
+                {'Domain: '}
+                <strong>{user.domains.join(', ')}</strong>
+              </div>
+            )}
             <button className="btn ghost" style={{ marginTop: 10, width: '100%', padding: '5px 10px' }} onClick={signOut}>
               Sign out
             </button>

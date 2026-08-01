@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import type { Dataset, Measure, ColumnDoc } from './dataset-schema.ts';
-import { domainSchema } from './store-fqn.ts';
+import { domainSchema, physicalSlug } from './store-fqn.ts';
 
 /**
  * The Metric handover to Cube (data-ui-ux.md §"Define a metric — the Cube handover",
@@ -44,7 +44,18 @@ export function cubeDomainPrefix(d: Dataset): string {
  * so a given dataset's identity is stable for its whole life.
  */
 export function cubeName(d: Dataset): string {
-  return d.cubeNamespaced ? `${cubeDomainPrefix(d)}__${slug(d.name)}` : slug(d.name);
+  const s = physicalSlug(d); // FROZEN slug — a rename never moves the cube identity
+  return d.cubeNamespaced ? `${cubeDomainPrefix(d)}__${s}` : s;
+}
+
+/** The physical VIEW base (a valid Cube identifier). It is the SAME frozen identity as
+ *  `cubeName`: while the slug is still derivable (never renamed) it keeps the historical
+ *  case-preserving transform of the name (byte-stable — live views don't churn); once a
+ *  rename has FROZEN the slug it derives from that frozen slug, so the view identifier
+ *  stays pinned to the physical table across a rename. */
+function physicalViewBase(d: Dataset): string {
+  if (d.slug) return d.slug; // decoupled: anchor the view to the frozen physical slug
+  return d.name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'View';
 }
 
 /** The Cube VIEW name dashboards + the agent metrics tool resolve. MUST be a valid
@@ -53,7 +64,7 @@ export function cubeName(d: Dataset): string {
  *  NAMESPACED (`<domain>__<View>`) for post-#155 datasets, LEGACY (bare View) otherwise —
  *  moves in lockstep with `cubeName` so the cube + its view are always the same scheme. */
 export function cubeViewName(d: Dataset): string {
-  const view = d.name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'View';
+  const view = physicalViewBase(d);
   return d.cubeNamespaced ? `${cubeDomainPrefix(d)}__${view}` : view;
 }
 
@@ -63,12 +74,12 @@ export function cubeViewName(d: Dataset): string {
  *  `cubeName(d)`; for a namespaced one it is the collision-prone name we deliberately
  *  moved off of, kept resolvable so nothing that referenced it breaks. */
 export function legacyCubeName(d: Dataset): string {
-  return slug(d.name);
+  return physicalSlug(d);
 }
 
 /** The un-namespaced (legacy) view name a dataset WOULD have had before #155. */
 export function legacyCubeViewName(d: Dataset): string {
-  return d.name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'View';
+  return physicalViewBase(d);
 }
 
 /** Back-compat resolver: does `name` refer to this dataset's cube — under EITHER its
@@ -87,7 +98,7 @@ export function cubeViewNameMatches(d: Dataset, view: string): boolean {
 
 /** The Gold mart FQN the cube binds to via `sql_table` (the handover contract). */
 export function goldMartFqn(d: Dataset): string {
-  return `iceberg.${domainSchema(d.domain)}.gold_${slug(d.name)}`;
+  return `iceberg.${domainSchema(d.domain)}.gold_${physicalSlug(d)}`;
 }
 
 /** The clear, single-source message a metric guard returns when the gold isn't governed. */
@@ -95,20 +106,69 @@ export const PROMOTE_FIRST_MESSAGE =
   'Promote this dataset to Shared first — a metric needs a governed Gold in the domain schema (Cube reads the domain mart, not your personal lane).';
 
 /**
- * FAIL-CLOSED metric/cube gate (#91): a Cube binds to `iceberg.<domain>.gold_<slug>`
+ * SQL-READY gate (the metrics→Trino migration, Phase 1): a metric now SERVES as governed
+ * Trino SQL over the PHYSICAL gold mart run AS the viewer (OPA row/column security
+ * applies), so define + preview + explore require ONLY a BUILT Gold — of ANY tier. A
+ * personal dataset's gold lives in the owner's `personal_<uid>` lane and the owner reads
+ * it AS themselves (Trino/OPA `is_owned_personal`), so a metric on personal gold is now
+ * possible: no promotion needed to define or read it. Returns `{ ok:false, message }`
+ * (never throws — callers decide 400 vs skip).
+ */
+export function metricSqlReady(d: Dataset): { ok: boolean; message?: string } {
+  if (!d.versions.gold.built) {
+    return { ok: false, message: 'Define a metric only on a built Gold version.' };
+  }
+  return { ok: true };
+}
+
+/**
+ * FAIL-CLOSED metric/CUBE gate (#91): a Cube binds to `iceberg.<domain>.gold_<slug>`
  * — a table that exists ONLY once the dataset is a PROMOTED asset/product (the
  * governed CTAS landed the gold in the domain schema). Cube reads Trino as `cube-sales`,
  * entitled only to governed DOMAIN schemas, so a metric on an un-promoted personal
  * dataset points at a non-existent domain table and the cube can't compile/read.
  * Returns `{ ok:false, message }` (never throws — callers decide 400 vs skip) so a
  * broken cube is NEVER registered. Requires BOTH a built Gold AND a governed tier.
+ *
+ * This is the CUBE-REGISTRATION gate ONLY (scaffold/sidecar). Serving a metric no longer
+ * needs it — see {@link metricSqlReady}. Cube stays on the dashboards path (Phase 2), so
+ * the promote-first rule is preserved wherever a CUBE artifact would be produced.
  */
-export function metricGoldReady(d: Dataset): { ok: boolean; message?: string } {
-  if (!d.versions.gold.built) {
-    return { ok: false, message: 'Define a metric only on a built Gold version.' };
-  }
+export function metricCubeReady(d: Dataset): { ok: boolean; message?: string } {
+  const sql = metricSqlReady(d);
+  if (!sql.ok) return sql;
   if (d.tier === 'dataset') return { ok: false, message: PROMOTE_FIRST_MESSAGE };
   return { ok: true };
+}
+
+/** @deprecated Back-compat alias for {@link metricCubeReady} (the Cube-registration rule).
+ *  Callers on the metric READ/DEFINE path have moved to {@link metricSqlReady}. */
+export const metricGoldReady = metricCubeReady;
+
+/**
+ * The ACTUAL columns of the built Gold table. A Gold built through the JOIN builder
+ * projects `goldSpec.dimensions` — its output names (the `as` alias, else the source
+ * column) can DIFFER from `d.columns` (which documents the base/Silver schema): a join
+ * adds columns from other datasets, a projection drops some. Everything that reads the
+ * gold mart (the metric builder's column palette, the Cube dims) must use THIS set, or
+ * a joined column never appears and a dropped one 400s. Falls back to `d.columns` when
+ * no gold spec projects anything (pass-through / single-table gold keeps the base).
+ */
+export function goldOutputColumns(d: Dataset): ColumnDoc[] {
+  const dims = d.goldSpec?.dimensions ?? [];
+  if (!d.versions.gold.built || dims.length === 0) return d.columns;
+  const docOf = new Map(d.columns.map((c) => [c.name, c.description]));
+  const out: ColumnDoc[] = [];
+  const seen = new Set<string>();
+  for (const dim of dims) {
+    const i = dim.source.indexOf('::');
+    const src = i >= 0 ? dim.source.slice(i + 2) : dim.source;
+    const name = dim.as?.trim() || src;
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, description: docOf.get(name) ?? docOf.get(src) ?? '' });
+  }
+  return out.length ? out : d.columns;
 }
 
 /** cube_dbt's dbt data_type → Cube dimension type. We have no live manifest in kind,
@@ -165,25 +225,47 @@ function measureYaml(m: Measure, knownMembers: Set<string>): string {
  *  slice dimensions against this set (drop non-members) — mirrors the security
  *  scrub in lib/infra/governed.ts. Kept in lockstep with `scaffoldCubeYaml`. */
 export function viewMembers(d: Dataset): Set<string> {
-  const pk = primaryKeyColumn(d.columns);
+  const cols = goldOutputColumns(d);
+  const pk = primaryKeyColumn(cols);
   const measureNames = new Set(d.measures.map((m) => m.name));
-  const dimCols = d.columns.filter((c) => c.name === pk || !measureNames.has(c.name));
+  const dimCols = cols.filter((c) => c.name === pk || !measureNames.has(c.name));
   return new Set<string>([
     ...d.measures.map((m) => m.name),
     ...dimCols.filter((c) => c.name !== pk).map((c) => c.name),
   ]);
 }
 
+/** The REGISTRY-derived dimension members of a dataset's Cube view (`View.column`),
+ *  split into plain vs time dimensions exactly as `scaffoldCubeYaml` emits them (non-pk,
+ *  measure-collision dropped, `inferDimType` decides time). The Northpeak fix uses this
+ *  as the panel-builder palette FALLBACK when Cube does not (yet/anymore) serve the view —
+ *  so a chart can still be created WITH its group-by spec (and flagged), instead of the
+ *  palette silently emptying and the group-by being discarded at create time. */
+export function registryDimensionMembers(d: Dataset): { dimensions: string[]; timeDimensions: string[] } {
+  const view = cubeViewName(d);
+  const cols = goldOutputColumns(d);
+  const pk = primaryKeyColumn(cols);
+  const measureNames = new Set(d.measures.map((m) => m.name));
+  const dimCols = cols.filter((c) => c.name !== pk && !measureNames.has(c.name));
+  const dimensions: string[] = [];
+  const timeDimensions: string[] = [];
+  for (const c of dimCols) {
+    (inferDimType(c.name) === 'time' ? timeDimensions : dimensions).push(`${view}.${c.name}`);
+  }
+  return { dimensions, timeDimensions };
+}
+
 /** Build the Cube model YAML (cube + view) from the Gold columns + named measures —
  *  the file the Metric step would hand-write only the `measures:` block of. */
 export function scaffoldCubeYaml(d: Dataset): string {
   const cube = cubeName(d);
-  const pk = primaryKeyColumn(d.columns);
+  const cols = goldOutputColumns(d);
+  const pk = primaryKeyColumn(cols);
   // A measure and a dimension may NOT share a name in a Cube (Cube rejects it with
   // "defined more than once" → the whole schema 500s). When a gold column is also a
   // measure name, the measure wins — skip the colliding dimension (keep the pk).
   const measureNames = new Set(d.measures.map((m) => m.name));
-  const dimCols = d.columns.filter((c) => c.name === pk || !measureNames.has(c.name));
+  const dimCols = cols.filter((c) => c.name === pk || !measureNames.has(c.name));
   const dims = dimCols.map((c) => {
     const type = c.name === pk ? 'number' : inferDimType(c.name);
     const pkLine = c.name === pk ? '\n        primary_key: true' : '';
@@ -196,6 +278,10 @@ export function scaffoldCubeYaml(d: Dataset): string {
   const knownMembers = new Set<string>([...dimCols.map((c) => c.name), ...measureNames]);
   const measures = (d.measures.length ? d.measures : [{ name: 'count', type: 'count', sql: '' } as Measure]).map((m) => measureYaml(m, knownMembers));
   const includes = [...viewMembers(d)]; // the view's member set (measures + non-pk dims)
+  // A measure-less dataset scaffolds the default cube-level `count` measure (above) —
+  // include it in the view too, or the view exposes no measure at all (#142: empty
+  // views like Northpeak_Campaigns).
+  if (d.measures.length === 0 && !includes.includes('count')) includes.unshift('count');
   return [
     'cubes:',
     `  - name: ${cube}`,
@@ -217,7 +303,7 @@ export function scaffoldCubeYaml(d: Dataset): string {
 /** One dbt `exposure` per Cube view — rides in on the dbt artifacts so the
  *  mart→metric edge appears in OpenMetadata automatically (data-ui-ux.md §C). */
 export function scaffoldExposureYaml(d: Dataset): string {
-  const s = slug(d.name);
+  const s = physicalSlug(d); // FROZEN — the dbt mart model name never moves on a rename
   // The exposure NAME namespaces with the cube (so two domains' exposures don't collide);
   // the dbt `ref('mart_<slug>')` still points at the dataset's dbt mart model (unchanged —
   // the dbt project owns that name; #155 is scoped to the cube identity). Legacy datasets

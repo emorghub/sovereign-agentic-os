@@ -145,7 +145,16 @@ export function compileSilver(spec: SilverSpec): string {
       case 'cast': {
         if (!CAST_TYPES.includes(op.type)) throw new TransformError(`unsupported type '${op.type}'`);
         const col = find(op.column);
-        col.expr = `cast(${col.expr} as ${op.type})`;
+        if (op.type === 'boolean') {
+          // Tolerant boolean: real data says yes/no (the original Bronze coercion case),
+          // which Trino's plain varchar→boolean cast rejects. Map the common spellings;
+          // anything else falls through to the strict cast so garbage still fails LOUDLY
+          // (native true/false/t/f/1/0 are handled by that fallback unchanged).
+          const v = `lower(trim(cast(${col.expr} as varchar)))`;
+          col.expr = `(case when ${v} in ('yes', 'y') then true when ${v} in ('no', 'n') then false else cast(${col.expr} as boolean) end)`;
+        } else {
+          col.expr = `cast(${col.expr} as ${op.type})`;
+        }
         break;
       }
       case 'trim': {
@@ -219,6 +228,13 @@ export function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'dataset';
 }
 
+/** The FROZEN physical slug of a dataset (mirrors store-fqn.physicalSlug): the pinned
+ *  `slug` when set, else `slug(name)`. Every build FQN uses this so a renamed dataset
+ *  keeps writing to its ORIGINAL physical table instead of a new-name table. */
+export function physicalSlug(d: { slug?: string; name: string }): string {
+  return d.slug ?? slug(d.name);
+}
+
 /** The caller's private sandbox schema. MUST match the query-tool guard's
  *  `personal_schema(uid)` exactly, so the compiled target passes its authorization. */
 export function personalSchema(uid: string): string {
@@ -235,24 +251,28 @@ export function domainSchema(domain: string): string {
 }
 
 /**
- * The schema a Silver build writes into: the dataset's own domain when the dataset is
- * already governed AND the caller is in that domain (the query-tool re-checks the
- * builder role floor); otherwise the caller's personal sandbox schema. This is the
- * ONE place the Silver write-target is chosen — it is always the CALLER's schema,
- * never a literal cross-domain schema.
+ * The schema a guided BUILD writes into: ALWAYS the caller's personal sandbox, for
+ * every tier. The personal lane is the build WORKSPACE — Bronze physically exists
+ * ONLY there (ingest never writes a domain schema), and the store flags an
+ * already-promoted dataset STALE on rebuild precisely because "the rebuild rewrote
+ * only the owner's personal lane". The governed domain copy is written EXCLUSIVELY
+ * by the publish / re-materialize CTAS ({@link publishPlan}). Routing a promoted
+ * dataset's build into the domain schema was a live bug: its Bronze source doesn't
+ * exist there (TABLE_NOT_FOUND on `iceberg.<domain>.bronze_*`).
  */
-export function silverSchema(o: { tier: string; domain: string; uid: string; domains: string[] }): string {
-  if (o.tier !== 'dataset' && Array.isArray(o.domains) && o.domains.includes(o.domain)) return domainSchema(o.domain);
-  return personalSchema(o.uid);
+export function silverSchema(uid: string): string {
+  return personalSchema(uid);
 }
 
 // ================================================================ Gold join =====
 /**
- * The Gold JOIN COMPILER (Data tab, stage 4 — dataset REUSE). Picks 1..n ADDITIONAL
- * datasets the caller may read and joins them to the caller's own Silver base on
- * chosen keys, projecting joined dimensions + derived business measures
- * (SUM/AVG/COUNT/…/expressions) into ONE guard-passing
- * `CREATE OR REPLACE TABLE iceberg.<caller-schema>.gold_<slug> AS SELECT …`.
+ * The Gold COMPILER (Data tab, stage 4). Projects the caller's own Silver base — and,
+ * OPTIONALLY, 0..n ADDITIONAL datasets the caller may read joined on chosen keys —
+ * into dimensions + derived business measures (SUM/AVG/COUNT/…/expressions) as ONE
+ * guard-passing `CREATE OR REPLACE TABLE iceberg.<caller-schema>.gold_<slug> AS SELECT …`.
+ * A join is OPTIONAL: with zero joins this is a single-table projection of the Silver
+ * base into a real Gold mart (every ref must then be the base, ref 0); with 1..n joins
+ * it is dataset REUSE (the joined tables aliased t1..tn).
  *
  * Same discipline as {@link compileSilver}: single statement, no comments, no ';',
  * bare lowercase iceberg FQNs, target = the CALLER's own schema. The CTAS runs AS the
@@ -368,7 +388,8 @@ export function compileGoldJoin(spec: GoldJoinSpec): string {
   assertFqn(spec.source, 'source');
   assertFqn(spec.target, 'target');
   const joins = Array.isArray(spec.joins) ? spec.joins : [];
-  if (joins.length === 0) throw new TransformError('add at least one dataset to join');
+  // A join is OPTIONAL: 0 joins ⇒ a single-table Gold projection of the Silver base
+  // (every ref must be the base, ref 0); 1..n joins ⇒ dataset reuse (t1..tn).
   const maxRef = joins.length; // base = 0 … joins[n-1] = n
 
   const joinSql: string[] = [];
@@ -423,7 +444,9 @@ export function compileGoldJoin(spec: GoldJoinSpec): string {
   // Aggregating measures require a GROUP BY of the (non-aggregated) dimensions; an
   // all-measure spec (no dims) is a single grand-total row.
   const groupBy = measures.length > 0 && dimExprs.length > 0 ? ` group by ${dimExprs.join(', ')}` : '';
-  const body = `select ${selectList} from ${spec.source} ${tableAlias(0)} ${joinSql.join(' ')}${groupBy}`;
+  // With zero joins `joinSql` is empty — a single-table projection from the base alone.
+  const from = joinSql.length ? `${spec.source} ${tableAlias(0)} ${joinSql.join(' ')}` : `${spec.source} ${tableAlias(0)}`;
+  const body = `select ${selectList} from ${from}${groupBy}`;
   const sql = `create or replace table ${spec.target} as ${body}`;
   assertNoSqlMeta(sql, 'compiled SQL'); // defense in depth: never emit a guard-failing statement
   return sql;
@@ -448,13 +471,13 @@ export type SilverPlan = { source: string; target: string; schema: string; sql: 
  * CTAS. Server-authoritative: the route calls this (never trusts a client-sent SQL).
  */
 export function silverPlan(
-  dataset: { name: string; domain: string; tier: string },
+  dataset: { name: string; domain: string; tier: string; slug?: string },
   identity: { uid: string; domains: string[] },
   columns: string[],
   ops: TransformOp[],
 ): SilverPlan {
-  const schema = silverSchema({ tier: dataset.tier, domain: dataset.domain, uid: identity.uid, domains: identity.domains });
-  const s = slug(dataset.name);
+  const schema = silverSchema(identity.uid);
+  const s = physicalSlug(dataset);
   const source = `iceberg.${schema}.bronze_${s}`;
   const target = `iceberg.${schema}.silver_${s}`;
   const sql = compileSilver({ source, target, columns, ops });
@@ -469,12 +492,12 @@ export function silverPlan(
  * their (sanitized) domain schema.
  */
 export function layerTarget(
-  dataset: { name: string; domain: string; tier: string },
+  dataset: { name: string; domain: string; tier: string; slug?: string },
   identity: { uid: string; domains: string[] },
   layer: 'bronze' | 'silver' | 'gold',
 ): string {
-  const schema = silverSchema({ tier: dataset.tier, domain: dataset.domain, uid: identity.uid, domains: identity.domains });
-  return `iceberg.${schema}.${layer}_${slug(dataset.name)}`;
+  const schema = silverSchema(identity.uid);
+  return `iceberg.${schema}.${layer}_${physicalSlug(dataset)}`;
 }
 
 export type PassThroughPlan = { source: string; target: string; schema: string; sql: string };
@@ -487,12 +510,12 @@ export type PassThroughPlan = { source: string; target: string; schema: string; 
  * schema discipline as {@link silverPlan}; server-authoritative.
  */
 export function passThroughPlan(
-  dataset: { name: string; domain: string; tier: string },
+  dataset: { name: string; domain: string; tier: string; slug?: string },
   identity: { uid: string; domains: string[] },
   layer: 'silver' | 'gold',
 ): PassThroughPlan {
-  const schema = silverSchema({ tier: dataset.tier, domain: dataset.domain, uid: identity.uid, domains: identity.domains });
-  const s = slug(dataset.name);
+  const schema = silverSchema(identity.uid);
+  const s = physicalSlug(dataset);
   const prior = layer === 'silver' ? 'bronze' : 'silver';
   const source = `iceberg.${schema}.${prior}_${s}`;
   const target = `iceberg.${schema}.${layer}_${s}`;
@@ -549,6 +572,15 @@ export async function resolvePassThroughSource(
     }
   }
   if (await probe(target)) return { kind: 'adopt', target };
+  // Seeded-governed fallback: a promoted dataset whose ONLY physical table is the
+  // published DOMAIN copy (e.g. seeded straight into `iceberg.<domain>.gold_*`, no
+  // personal lane at all). Builds resolve to the personal-lane workspace, so the
+  // domain copy is not `target` — but it EXISTS and is the honest thing to adopt.
+  if (dataset.tier !== 'dataset') {
+    const domainCopy = `iceberg.${domainSchema(dataset.domain)}.${layer}_${physicalSlug(dataset)}`;
+    tried.push(domainCopy);
+    if (await probe(domainCopy)) return { kind: 'adopt', target: domainCopy };
+  }
   return { kind: 'none', target, tried };
 }
 
@@ -582,13 +614,14 @@ export type PublishPlan = {
  */
 export function publishPlan(d: {
   name: string;
+  slug?: string;
   domain: string;
   owner: string;
   versions: { silver: { built: boolean }; gold: { built: boolean } };
 }): PublishPlan {
   const layer = d.versions.gold.built ? 'gold' : d.versions.silver.built ? 'silver' : null;
   if (!layer) throw new TransformError('nothing to publish — build a Silver or Gold version first');
-  const s = slug(d.name);
+  const s = physicalSlug(d); // FROZEN — the promotion CTAS copies the ACTUAL personal table
   const sourceSchema = personalSchema(d.owner);
   const source = `iceberg.${sourceSchema}.${layer}_${s}`;
   const target = `iceberg.${domainSchema(d.domain)}.${layer}_${s}`;
@@ -608,20 +641,21 @@ export type ResolvedJoin = { table: string; type: JoinType; on: JoinCond[] };
 export type GoldJoinPlan = { source: string; target: string; schema: string; sql: string };
 
 /**
- * Resolve the caller's Silver base + Gold target FQNs and compile the join CTAS.
+ * Resolve the caller's Silver base + Gold target FQNs and compile the Gold CTAS.
  * Server-authoritative (the route calls this, never a client-sent SQL): the target is
  * ALWAYS the caller's own schema — never a literal cross-domain schema — exactly like
- * {@link silverPlan}. The joined tables come pre-resolved (visible to the caller).
+ * {@link silverPlan}. `joins` may be EMPTY (a single-table Gold projection of the Silver
+ * base) or 1..n pre-resolved tables visible to the caller (dataset reuse).
  */
 export function goldJoinPlan(
-  dataset: { name: string; domain: string; tier: string },
+  dataset: { name: string; domain: string; tier: string; slug?: string },
   identity: { uid: string; domains: string[] },
   joins: ResolvedJoin[],
   dimensions: GoldDimension[],
   measures: GoldMeasure[],
 ): GoldJoinPlan {
-  const schema = silverSchema({ tier: dataset.tier, domain: dataset.domain, uid: identity.uid, domains: identity.domains });
-  const s = slug(dataset.name);
+  const schema = silverSchema(identity.uid);
+  const s = physicalSlug(dataset);
   const source = `iceberg.${schema}.silver_${s}`;
   const target = `iceberg.${schema}.gold_${s}`;
   const sql = compileGoldJoin({ source, joins, dimensions, measures, target });

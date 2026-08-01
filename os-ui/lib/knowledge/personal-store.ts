@@ -119,6 +119,25 @@ export function __resetStore(): void {
   versions.__reset();
 }
 
+/**
+ * Cross-domain governance move (admin-only, gated in lib/platform-admin/domain-move.ts).
+ * Scoping reads the record's `domain` field, so we set it and write through.
+ * `sel.id` moves one; `sel.onlyUnassigned` sweeps only empty-domain records.
+ * Returns the ids moved.
+ */
+export function movePersonalKnowledgeDomain(sel: { id?: string; onlyUnassigned?: boolean }, target: string): string[] {
+  const moved: string[] = [];
+  for (const rec of st().entries.values()) {
+    if (sel.id !== undefined && rec.id !== sel.id) continue;
+    if (sel.onlyUnassigned && rec.domain) continue;
+    if (rec.domain === target) continue;
+    rec.domain = target;
+    writeThrough(rec);
+    moved.push(rec.id);
+  }
+  return moved;
+}
+
 // --------------------------------------------------------------- scoping -----
 function get(id: string): PersonalKnowledgeRecord {
   ensureSeeded();
@@ -169,12 +188,22 @@ function summarise(rec: PersonalKnowledgeRecord): PersonalKnowledgeSummary {
   return rest;
 }
 
-/** Grouped payload matching every other OS store: mine / domain / marketplace. */
+/** Grouped payload matching every other OS store: mine / domain / marketplace.
+ *
+ *  `activeDomain` mirrors the OS-wide domain switcher: when non-null EVERY tier is
+ *  restricted to entries stamped with that domain (STRICT DOMAIN ISOLATION —
+ *  consistent with how `listFolders` and the artifact lists behave on a scoped
+ *  domain). "My", "Domain" (Shared) AND "Company" (Marketplace/Certified) all narrow:
+ *  a certified entry homed in domain A must not show while acting in domain B — cross-
+ *  domain discovery is the dedicated Marketplace's job, not this list's. A domainless
+ *  entry always shows. null / undefined = "All domains" — shows every owned / visible
+ *  entry. */
 export function listPersonalKnowledge(
   user: Principal,
-  opts: { includeArchived?: boolean } = {},
+  opts: { includeArchived?: boolean; activeDomain?: string | null } = {},
 ): PersonalKnowledgeGroups {
   ensureSeeded();
+  const activeDomain = opts.activeDomain ?? null;
   const mine: PersonalKnowledgeSummary[] = [];
   const domain: PersonalKnowledgeSummary[] = [];
   const marketplace: PersonalKnowledgeSummary[] = [];
@@ -182,9 +211,16 @@ export function listPersonalKnowledge(
   for (const rec of st().entries.values()) {
     if (rec.archived && !opts.includeArchived) continue;
     if (!canView(rec, user)) continue;
-    if (rec.visibility === 'Marketplace') marketplace.push(summarise(rec));
-    else if (rec.visibility === 'Shared') domain.push(summarise(rec));
-    else mine.push(summarise(rec));
+    // Strict active-domain isolation for EVERY tier: hide anything homed in another
+    // domain (a domainless entry always shows so the admin can domain-move it).
+    if (activeDomain !== null && rec.domain && rec.domain !== activeDomain) continue;
+    if (rec.visibility === 'Marketplace') {
+      marketplace.push(summarise(rec));
+    } else if (rec.visibility === 'Shared') {
+      domain.push(summarise(rec));
+    } else {
+      mine.push(summarise(rec));
+    }
   }
 
   const byTitle = (a: PersonalKnowledgeSummary, b: PersonalKnowledgeSummary) => a.title.localeCompare(b.title);

@@ -227,7 +227,76 @@ const MONGODB: InstallGuide = {
   caveat: 'MongoDB is schemaless: schema inference can be imperfect and a brand-new/empty collection may not list until sampled or given a manual `_schema` entry — this is how a document store is catalogued, not a failure. Reachability, credentials, and `_schema` write access are confirmed against your live deployment at Register/Test time.',
 };
 
+
+const KAFKA: InstallGuide = {
+  key: 'kafka',
+  title: 'Apache Kafka',
+  summary: 'Federate Kafka topics through the native Trino kafka connector (read-only), then keep an append-only lakehouse copy fresh with the offset-cursor scheduled sync.',
+  prerequisites: [
+    'Reachable Kafka **bootstrap servers** (`host:port[,host:port...]`, default port 9092) from the Trino pod.',
+    'The **topic names** to expose — each becomes one table. Lowercase `[a-z_][a-z0-9_]*` names only (v1); topics with dots/dashes are not addressable as governed tables.',
+    'Brokers on **PLAINTEXT** or **SSL with public-CA certificates** (JVM default truststore). SASL / custom truststores need an operator-mounted `kafka.config.resources` file — use the GitOps registration path for those.',
+    'Builder/Admin rights (service connector, not personal OAuth).',
+  ],
+  steps: [
+    'On the Apache Kafka card, click **Connect**.',
+    'Name the connection; pick a Trino **catalog name** (e.g. `kafka_events`).',
+    'Enter the **bootstrap servers** and the **topics** (comma-separated); optionally set the security protocol to `SSL`.',
+    'Create the connection, then on its card **Register** -> **Test** (`SHOW SCHEMAS`) -> **Browse** (schema `default` lists the configured topics).',
+    'To land a topic in the lakehouse: create a dataset with a **scheduled sync** on this connection — the first run creates the Bronze copy and the offset cursor takes over (append-only).',
+  ],
+  whatTheOsDoes:
+    'Registers **one governed Trino catalog** over the `kafka` connector; each configured topic is queryable live as `catalog.default.<topic>` under OPA, with the internal columns (`_partition_id`, `_partition_offset`, `_timestamp`, `_message`, `_key`) exposed. The scheduled sync tracks per-partition offset high-water marks and appends only new messages — there is no one-time import of an unbounded stream.',
+  caveat: 'Append-only: retried producers can re-deliver messages — de-duplicate downstream. Without a table-description file the payload arrives as the raw `_message` string (parse it in Silver). Broker reachability, SSL handshake, and the live offset sync are only confirmed against your cluster at Register/Test time.',
+};
+
 // ---- User-facing templates --------------------------------------------------
+
+const SALESFORCE: InstallGuide = {
+  key: 'salesforce-api',
+  title: 'Salesforce (REST API)',
+  summary: 'Connect a Salesforce org via a Connected App (OAuth client-credentials). Reads auto-allow, writes are bounded/held; objects sync incrementally by SystemModstamp.',
+  prerequisites: [
+    'A Salesforce **Connected App** with the **client-credentials flow** enabled and a run-as integration user (least privilege: read-only on the objects you sync).',
+    'The app\'s **Consumer Key** and **Consumer Secret** — entered as ONE credential `consumer_key:consumer_secret`; stored in Secrets Manager, **never** on the record.',
+    'Your org\'s **instance URL** (e.g. `https://yourorg.my.salesforce.com`) on the **egress allowlist**.',
+    'Builder/Admin rights (service-credential connector, not personal OAuth).',
+  ],
+  steps: [
+    'On the Salesforce card, click **Connect**.',
+    'Name the connection; enter the **instance URL** as the endpoint.',
+    'Paste the credential as `consumer_key:consumer_secret` — stored once in Secrets Manager.',
+    'Create the connection, then **Test** on its card (a real token grant + `SELECT Id FROM Organization`).',
+    'To land an object in the lakehouse: create a dataset with a **scheduled sync** on this connection (object discovery lists your queryable SObjects) — the first run creates the Bronze copy; later runs pull only records with a newer `SystemModstamp`.',
+  ],
+  whatTheOsDoes:
+    'Registers a governed outbound API connection. Reads auto-allow; writes are bounded/held for approval; deletes are blocked. Scheduled syncs run **as the dataset owner**: the OS probes `MAX(SystemModstamp)`, pulls the slice page-by-page over the REST query API, and streams each ~2000-row page to the lakehouse (bounded memory) with `_loaded_at`/`_batch_id` lineage on every row.',
+  caveat: 'Every sync consumes Salesforce **API quota** — schedule large objects sparingly. Deletes are NOT detected in v1 (no IsDeleted/queryAll yet); formula-field changes do not bump SystemModstamp. Reachability and credentials are only confirmed against your live org at Test time.',
+};
+
+const KAJABI: InstallGuide = {
+  key: 'kajabi-api',
+  title: 'Kajabi (REST API)',
+  summary: 'Connect a Kajabi account via its public API (OAuth client-credentials). Reads auto-allow, writes are held; purchases sync incrementally by updated_at — other resources honestly degrade (see the per-resource notes).',
+  prerequisites: [
+    'Kajabi **Pro plan** (or the Public API add-on) — the public API is not on every plan.',
+    'A **User API Key** from Kajabi **Settings → Public API** (`app.kajabi.com/admin/settings/public_api`) — only **Owners/Subowners** can create one; scope its permissions read-only where possible.',
+    'The key\'s **Client ID** and **Client Secret** — entered as ONE credential `client_id:client_secret`; stored in Secrets Manager, **never** on the record.',
+    'The API host `api.kajabi.com` on the **egress allowlist** (in the default list).',
+    'Builder/Admin rights (service-credential connector, not personal OAuth).',
+  ],
+  steps: [
+    'On the Kajabi card, click **Connect**.',
+    'Name the connection; keep the endpoint `https://api.kajabi.com`.',
+    'Paste the credential as `client_id:client_secret` — stored once in Secrets Manager.',
+    'Create the connection, then **Test** on its card (a real token grant + `GET /v1/sites`).',
+    'To land a resource in the lakehouse: create a dataset with a **scheduled sync** on this connection (discovery lists the documented resources: contacts, customers, purchases, orders, offers, products, …) — the first run creates the Bronze copy; later runs pull only newer records where the API supports it.',
+  ],
+  whatTheOsDoes:
+    'Registers a governed outbound API connection. Reads auto-allow; writes are held for approval; deletes are blocked. Scheduled syncs run **as the dataset owner**: the OS probes the resource\'s max cursor (`sort=-updated_at`/`-created_at`), pulls the JSON:API slice page-by-page (≤100 rows/page, stop-early at the watermark), flattens attributes + to-one relationship ids into columns, and streams each page to the lakehouse with `_loaded_at`/`_batch_id` lineage on every row.',
+  caveat: 'HONEST LIMITS: only **purchases** documents an update cursor (updated_at) — contacts/customers/orders/form_submissions sync **new records only** (created_at; edits need a full refresh), and transactions/offers/products/courses/forms/tags are **full-refresh only**. Deletes are never detected. Kajabi publishes **no rate-limit contract** — 429s surface honestly and the next run re-covers the slice. Multi-site accounts sync all sites (filter on the `site_id` column downstream). Reachability and credentials are only confirmed against your live account at Test time.',
+};
+
 
 const GDRIVE: InstallGuide = {
   key: 'gdrive',
@@ -641,9 +710,9 @@ const OM_CATALOG: InstallGuide = {
 
 const GUIDES: InstallGuide[] = [
   GLUE, SNOWFLAKE, BIGQUERY, DATABRICKS, FABRIC,
-  POSTGRESQL, MYSQL, SQLSERVER, MONGODB,
+  POSTGRESQL, MYSQL, SQLSERVER, MONGODB, KAFKA,
   GDRIVE, ONEDRIVE, NOTION, AIRFLOW, OM_CATALOG,
-  GITHUB, SUPABASE, ATLASSIAN,
+  GITHUB, SUPABASE, ATLASSIAN, SALESFORCE, KAJABI,
   SLACK, GMAIL, GCAL, OUTLOOK, TEAMS,
   ENTRA, PURVIEW, AI_FOUNDRY, SAGEMAKER,
   GCP_IDENTITY, GCP_DIRECTORY, SNOWFLAKE_GOVERNANCE,

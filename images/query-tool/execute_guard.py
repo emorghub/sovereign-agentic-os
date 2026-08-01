@@ -8,12 +8,22 @@ without the service dependencies and cannot be weakened by a runtime concern.
 
 Two independent gates, both enforced here BEFORE any SQL reaches Trino:
 
-  1. STATEMENT ALLOWLIST — only four DDL shapes are permitted:
+  1. STATEMENT ALLOWLIST — only these shapes are permitted:
        * CREATE SCHEMA IF NOT EXISTS iceberg.<schema>
        * CREATE OR REPLACE TABLE  iceberg.<schema>.<table> AS SELECT ...
        * CREATE TABLE IF NOT EXISTS iceberg.<schema>.<table> AS SELECT ...
        * DROP TABLE IF EXISTS      iceberg.<schema>.<table>
-     Everything else (INSERT/UPDATE/DELETE/MERGE/GRANT/ALTER/CALL/SET/plain
+       * INSERT INTO iceberg.<schema>.<table> SELECT ...          (incremental append)
+       * MERGE INTO  iceberg.<schema>.<table> USING ... ON ... WHEN ...  (upsert)
+       * DELETE FROM iceberg.<schema>.<table> WHERE _batch_id = '<id>'
+             (append-retry idempotency: un-land ONE sync batch, nothing else)
+       * ALTER TABLE iceberg.<schema>.<table> EXECUTE expire_snapshots(
+             retention_threshold => '<n>d')                       (maintenance)
+       * ALTER TABLE iceberg.<schema>.<table> EXECUTE optimize[(file_size_threshold
+             => '<n><unit>')]                                     (compaction)
+     The sync shapes exist for SCHEDULED INCREMENTAL SYNC and pass the SAME
+     target-schema/role gate as a CTAS. Everything else (plain INSERT ... VALUES,
+     UPDATE, arbitrary DELETE, GRANT/CALL/SET, other ALTERs/EXECUTE procs, plain
      CREATE TABLE, multiple statements, SQL comments) is rejected with 400.
      Comments and extra statements are rejected outright so nothing can be
      smuggled past the shape match.
@@ -39,7 +49,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 CATALOG = "iceberg"
-BUILDER_ROLES = {"builder", "admin"}  # role floor for domain-schema writes
+BUILDER_ROLES = {"builder", "domain_admin", "admin"}  # role floor for domain-schema writes (creator<builder<domain_admin<admin)
 
 # A bare, lowercase SQL identifier (no quoting allowed — keeps the surface tight).
 _IDENT = r"[a-z_][a-z0-9_]*"
@@ -60,6 +70,44 @@ _RE_DROP = re.compile(
     rf"drop\s+table\s+if\s+exists\s+{CATALOG}\.({_IDENT})\.({_IDENT})",
     re.IGNORECASE,
 )
+# Incremental sync (append): the inserted rows MUST come from a SELECT — a plain
+# `INSERT ... VALUES` stays rejected (no arbitrary literal writes on this path).
+_RE_INSERT_SELECT = re.compile(
+    rf"insert\s+into\s+{CATALOG}\.({_IDENT})\.({_IDENT})\s+select\b.*",
+    re.IGNORECASE | re.DOTALL,
+)
+# Incremental sync (upsert): a MERGE targeting an iceberg table, optionally aliased,
+# with the mandatory USING ... ON ... WHEN clauses in order. The source reads run as
+# the caller's principal under Trino->OPA, exactly like a CTAS SELECT.
+_RE_MERGE = re.compile(
+    rf"merge\s+into\s+{CATALOG}\.({_IDENT})\.({_IDENT})(?:\s+(?:as\s+)?{_IDENT})?"
+    rf"\s+using\s+.*\bon\b.*\bwhen\b.*",
+    re.IGNORECASE | re.DOTALL,
+)
+# Append-retry idempotency: un-land exactly ONE sync batch by its lineage column.
+# The predicate is fixed to `_batch_id = '<safe-literal>'` — arbitrary DELETEs stay
+# rejected, and the literal admits no quote so nothing can widen the predicate.
+_RE_DELETE_BATCH = re.compile(
+    rf"delete\s+from\s+{CATALOG}\.({_IDENT})\.({_IDENT})\s+where\s+"
+    r"_batch_id\s*=\s*'[A-Za-z0-9_.:\-]+'",
+    re.IGNORECASE,
+)
+# Iceberg snapshot maintenance: ONLY expire_snapshots with a literal retention
+# threshold ('<n>d' / '<n>h'). Any other ALTER (ADD COLUMN, other EXECUTE procs,
+# expression thresholds) stays rejected.
+_RE_EXPIRE_SNAPSHOTS = re.compile(
+    rf"alter\s+table\s+{CATALOG}\.({_IDENT})\.({_IDENT})\s+execute\s+"
+    r"expire_snapshots\s*\(\s*retention_threshold\s*=>\s*'[0-9]+[dh]'\s*\)",
+    re.IGNORECASE,
+)
+# Iceberg compaction: bare `optimize` or with a literal file_size_threshold. The
+# scheduled sync lands many small slice files; without periodic optimize the table
+# degrades — so it is allowlisted alongside expire_snapshots.
+_RE_OPTIMIZE = re.compile(
+    rf"alter\s+table\s+{CATALOG}\.({_IDENT})\.({_IDENT})\s+execute\s+optimize"
+    r"(\s*\(\s*file_size_threshold\s*=>\s*'[0-9]+[A-Za-z]{1,3}'\s*\))?",
+    re.IGNORECASE,
+)
 
 
 class ExecuteError(Exception):
@@ -70,9 +118,79 @@ class ExecuteError(Exception):
         self.status = status
 
 
+# --------------------------------------------------------------- read guard ----
+# Defence-in-depth for the /query READ path. Trino's OPA plugin is the authoritative
+# governance layer (row filters + column masks) and the query runs as the caller's
+# principal, but /query has historically accepted ANY SQL. This guard enforces the
+# READ contract at the edge: a single statement, no comment-smuggling, and no write /
+# DDL / privilege / procedure verb — so a compromised or confused caller cannot use
+# the read tool to mutate the lakehouse or escalate. It rejects before Trino is
+# touched. Writes have their own governed door (/execute + guard()).
+#
+# Leading keyword allowlist: only these can start a /query statement.
+_READ_LEADING = ("select", "with", "show", "describe", "desc", "explain", "values", "table")
+
+# Any of these verbs appearing as a standalone word anywhere in the statement is a
+# write / DDL / privilege / session / procedure operation and is refused on /query.
+# NB: `replace` is deliberately NOT listed — it is a legitimate Trino string function
+# (`replace(col,'a','b')`), and `CREATE OR REPLACE` is already caught by `create`.
+_FORBIDDEN_VERBS = (
+    "insert", "update", "delete", "merge", "upsert",
+    "create", "alter", "drop", "truncate", "rename",
+    "grant", "revoke", "deny",
+    "call", "commit", "rollback",
+    "reset", "use", "prepare", "deallocate",
+)
+
+
+def guard_read(sql: str) -> str:
+    """Validate a /query READ statement. Raises ExecuteError(400) for a write/DDL,
+    multiple statements, or a smuggled comment. Returns the trimmed single statement.
+
+    Reuses the SAME comment + single-statement discipline as the write path so the
+    two doors cannot diverge."""
+    if not sql or not sql.strip():
+        raise ExecuteError(400, "missing sql")
+    s = sql.strip()
+
+    # Reject comments outright — no comment-smuggling (same rule as the write path).
+    if "--" in s or "/*" in s or "*/" in s:
+        raise ExecuteError(400, "SQL comments are not allowed on the query path")
+
+    # Exactly ONE statement: strip a single optional trailing ';', then any remaining
+    # ';' means stacked statements.
+    if s.endswith(";"):
+        s = s[:-1].rstrip()
+    if ";" in s:
+        raise ExecuteError(400, "multiple statements are not allowed")
+    if not s:
+        raise ExecuteError(400, "missing sql")
+
+    lowered = s.lower()
+    first = re.match(r"[a-z]+", lowered)
+    if not first or first.group(0) not in _READ_LEADING:
+        raise ExecuteError(
+            400,
+            "only read-only statements are allowed on /query "
+            "(SELECT / WITH / SHOW / DESCRIBE / EXPLAIN / VALUES)",
+        )
+
+    # No write/DDL/privilege/procedure verb anywhere (word-boundary match so column
+    # names like `created_at` or `update_ts` are not tripped).
+    for verb in _FORBIDDEN_VERBS:
+        if re.search(rf"\b{verb}\b", lowered):
+            raise ExecuteError(
+                400,
+                f"statement contains a non-read operation ('{verb}') — "
+                "/query is read-only; use the governed write path for changes",
+            )
+    return s
+
+
 @dataclass
 class ParsedWrite:
-    kind: str            # 'create_schema' | 'ctas' | 'drop_table'
+    kind: str            # 'create_schema' | 'ctas' | 'drop_table' | 'insert_select' | 'merge'
+                         # | 'delete_batch' | 'expire_snapshots' | 'optimize'
     catalog: str         # always 'iceberg'
     schema: str          # target schema (the authorization subject)
     table: Optional[str] # None for create_schema
@@ -125,11 +243,34 @@ def parse_statement(sql: str) -> ParsedWrite:
     if m:
         return ParsedWrite("drop_table", CATALOG, m.group(1), m.group(2))
 
+    m = _RE_INSERT_SELECT.fullmatch(s)
+    if m:
+        return ParsedWrite("insert_select", CATALOG, m.group(1), m.group(2))
+
+    m = _RE_MERGE.fullmatch(s)
+    if m:
+        return ParsedWrite("merge", CATALOG, m.group(1), m.group(2))
+
+    m = _RE_DELETE_BATCH.fullmatch(s)
+    if m:
+        return ParsedWrite("delete_batch", CATALOG, m.group(1), m.group(2))
+
+    m = _RE_EXPIRE_SNAPSHOTS.fullmatch(s)
+    if m:
+        return ParsedWrite("expire_snapshots", CATALOG, m.group(1), m.group(2))
+
+    m = _RE_OPTIMIZE.fullmatch(s)
+    if m:
+        return ParsedWrite("optimize", CATALOG, m.group(1), m.group(2))
+
     raise ExecuteError(
         400,
         "statement not allowed: only CREATE SCHEMA IF NOT EXISTS, "
         "CREATE OR REPLACE TABLE ... AS SELECT, CREATE TABLE IF NOT EXISTS ... AS "
-        "SELECT, and DROP TABLE IF EXISTS against iceberg.<schema>.<table> are permitted",
+        "SELECT, DROP TABLE IF EXISTS, INSERT INTO ... SELECT, MERGE INTO ... USING "
+        "... ON ... WHEN ..., DELETE FROM ... WHERE _batch_id = '<id>', and ALTER "
+        "TABLE ... EXECUTE expire_snapshots(...)/optimize(...) "
+        "against iceberg.<schema>.<table> are permitted",
     )
 
 

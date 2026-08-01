@@ -10,12 +10,38 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, relative } from 'node:path';
 
 const OSUI = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p: string) => readFileSync(resolve(OSUI, p), 'utf8');
+
+// ---------------------------------------------------------------------------
+// Guard-pattern recognition (route-wrapper migration, wave 1).
+//
+// Middleware is fail-open by design, so EVERY api route handler must carry its
+// own session gate. Historically that gate was an inline `requireUser()` /
+// `requireAdmin()` / `requirePrincipal()` / `adminCtx()` call. The route-wrapper
+// migration introduces `withRoute(...)`, which runs that same gate internally
+// (its default gate is `requireUser`; an explicit `gate:` opt swaps it). So a
+// handler wrapped in `withRoute(` IS guarded — this predicate accepts it as an
+// equal-standing guard pattern. It stays STRICT: a route carrying NEITHER an
+// inline gate NOR `withRoute(` is ungated and must fail (proven below).
+//
+// Deliberate exceptions (documented, not accidental): a small set of routes are
+// intentionally UNAUTHENTICATED (cluster-internal sidecar endpoints) — they are
+// listed explicitly so the sweep can assert "guarded OR a known exception",
+// never silently pass an ungated route.
+// A route is "guarded" if it reads the session (`requireUser`/`requireAdmin`/
+// `requirePrincipal`/`adminCtx`/`currentUser`) or wraps the handler in
+// `withRoute` (which runs `requireUser` internally by default). `currentUser` is
+// the softer read used by routes that handle the anon case themselves (auth/me,
+// oauth callbacks that redirect, cost checks) — still a real session read, not
+// fail-open. `withRoute` matches with OR without generics (`withRoute(` /
+// `withRoute<…>(`).
+const GUARD_TOKENS = /requireUser|requireAdmin|requirePrincipal|adminCtx|currentUser|withRoute\s*[<(]/;
+const isGuarded = (src: string) => GUARD_TOKENS.test(src);
 
 test('GAP 1: every platform/* route requires admin', () => {
   for (const p of ['app/api/platform/toggle/route.ts', 'app/api/platform/components/route.ts', 'app/api/platform/doc/route.ts']) {
@@ -142,7 +168,7 @@ test('LOCKDOWN 6: the governed DATA authz spine fails CLOSED on OPA-unreachable'
 });
 
 test('LOCKDOWN 7: sign-in and sign-out do a full-page navigation to bust the router cache', () => {
-  assert.match(read('app/signin/page.tsx'), /window\.location\.assign\(next\)/, 'sign-in full-page navigates');
+  assert.match(read('app/(entry)/signin/page.tsx'), /window\.location\.assign\(next\)/, 'sign-in full-page navigates');
   assert.match(read('components/Sidebar.tsx'), /window\.location\.assign\('\/signin'\)/, 'sign-out full-page navigates');
 });
 
@@ -201,9 +227,9 @@ test('ROLE-PERMS: the role-permissions API is admin-only on both verbs', () => {
 // ---------------------------------------------------------------------------
 
 test('PLATFORM-GATE 1: /components has a server-side admin layout', () => {
-  const src = read('app/components/layout.tsx');
-  assert.match(src, /currentUser/, 'app/components/layout.tsx must call currentUser');
-  assert.match(src, /role !== 'admin'/, 'app/components/layout.tsx must gate non-admins');
+  const src = read('app/(govern)/components/layout.tsx');
+  assert.match(src, /currentUser/, 'app/(govern)/components/layout.tsx must call currentUser');
+  assert.match(src, /role !== 'admin'/, 'app/(govern)/components/layout.tsx must gate non-admins');
 });
 
 test('PLATFORM-GATE 2: /console is builder+ for the governed Query surface; the raw Shell stays admin-only', () => {
@@ -211,9 +237,9 @@ test('PLATFORM-GATE 2: /console is builder+ for the governed Query surface; the 
   // The page is now builder+ (governed Query — OPA/RLS per caller). The page re-checks
   // that gate, and gates the raw Shell (arbitrary command execution) to admins only
   // via canShell; the admin-query API + terminal broker enforce the same server-side.
-  const src = read('app/console/page.tsx');
-  assert.match(src, /roleAtLeast\(user\.role, 'builder'\)/, 'app/console/page.tsx must have a builder+ page gate');
-  assert.match(src, /canShell=\{user\.role === 'admin'\}/, 'app/console/page.tsx must gate the raw Shell to admins');
+  const src = read('app/(build)/console/page.tsx');
+  assert.match(src, /roleAtLeast\(user\.role, 'builder'\)/, 'app/(build)/console/page.tsx must have a builder+ page gate');
+  assert.match(src, /canShell=\{user\.role === 'admin'\}/, 'app/(build)/console/page.tsx must gate the raw Shell to admins');
   // The Query API must be builder+, and Cube mode must stay admin-only.
   const api = read('app/api/admin-query/route.ts');
   assert.match(api, /roleAtLeast\(u\.role, 'builder'\)/, 'admin-query must gate to builder+');
@@ -224,9 +250,9 @@ test('PLATFORM-GATE 3: /about is open to all roles (moved from Admin group to En
   // About / Licenses (open-source component list) is purely informational.
   // It was moved from the dissolved Admin group to the Entry group — all roles
   // can now read it. The server still calls currentUser() for future personalisation.
-  const src = read('app/about/page.tsx');
-  assert.match(src, /currentUser/, 'app/about/page.tsx must still call currentUser');
-  assert.doesNotMatch(src, /role !== 'admin'/, "app/about/page.tsx must NOT gate non-admins (all-roles accessible)");
+  const src = read('app/(entry)/about/page.tsx');
+  assert.match(src, /currentUser/, 'app/(entry)/about/page.tsx must still call currentUser');
+  assert.doesNotMatch(src, /role !== 'admin'/, "app/(entry)/about/page.tsx must NOT gate non-admins (all-roles accessible)");
 });
 
 test('PLATFORM-GATE 4: consolidated tab gates — Policies & Approvals is builder+, admin tabs unchanged', () => {
@@ -257,13 +283,13 @@ test('PLATFORM-GATE 4: consolidated tab gates — Policies & Approvals is builde
 
 test('PLATFORM-GATE 5: removed tab routes are redirect stubs, not content (no 404s for old links)', () => {
   const targets: Record<string, string> = {
-    'app/users/page.tsx': '/platform',
-    'app/gateway/page.tsx': '/components',
-    'app/orchestration/page.tsx': '/components',
-    'app/consoles/page.tsx': '/components',
-    'app/workbench/page.tsx': '/components',
-    'app/terminal/page.tsx': '/console',
-    'app/admin-query/page.tsx': '/console',
+    'app/(system)/users/page.tsx': '/platform',
+    'app/(system)/gateway/page.tsx': '/components',
+    'app/(system)/orchestration/page.tsx': '/components',
+    'app/(system)/consoles/page.tsx': '/components',
+    'app/(system)/workbench/page.tsx': '/components',
+    'app/(build)/terminal/page.tsx': '/console',
+    'app/(build)/admin-query/page.tsx': '/console',
   };
   for (const [p, target] of Object.entries(targets)) {
     const src = read(p);
@@ -277,4 +303,82 @@ test('RUN PATH: the agent RUN route derives a real default task, never "Test inv
   // The run path must fall back to a purpose-derived default, not the literal probe string.
   assert.match(src, /defaultRunTask\(view\.system\)/, 'an empty run prompt falls back to defaultRunTask');
   assert.doesNotMatch(src, /:\s*'Test invocation'/, 'the RUN path no longer defaults to "Test invocation"');
+});
+
+// ---------------------------------------------------------------------------
+// WRAPPER SWEEP (route-wrapper migration): every api route is guarded by an
+// inline gate OR by `withRoute` (which runs the gate internally) OR is one of a
+// small, EXPLICIT set of intentionally-unauthenticated routes (each with its own
+// non-session gate: an OS bearer token, a runtime token, or a public auth/health
+// endpoint). This is the fail-open tripwire for the whole `app/api` tree — it
+// stops any NEW or MIGRATED route from shipping with no guard at all, and it
+// proves `withRoute` counts as a guard so batches 2-3 can migrate onto it.
+
+// Intentionally unauthenticated (documented). Each is NOT a session route:
+//   • auth/*         — the sign-in / sign-out / recover / verify endpoints themselves
+//   • health         — liveness probe (no data)
+//   • mcp, mcp/[tab] — gated by an OS-issued per-user Bearer token (not the cookie)
+//   • cube/models    — cluster-internal model-sync sidecar (governed tiers only; see its docstring)
+//   • agents/scheduled-run, agents/tool — gated by the runtime Bearer token (runtimeTokenOk)
+const UNAUTHENTICATED_BY_DESIGN = new Set([
+  'app/api/health/route.ts',
+  'app/api/auth/verify/route.ts',
+  'app/api/auth/logout/route.ts',
+  'app/api/auth/recover/route.ts',
+  'app/api/auth/login/route.ts',
+  'app/api/mcp/route.ts',
+  'app/api/mcp/[tab]/route.ts',
+  'app/api/cube/models/route.ts',
+  'app/api/agents/scheduled-run/route.ts',
+  'app/api/agents/tool/route.ts',
+]);
+
+function allApiRoutes(): string[] {
+  const api = resolve(OSUI, 'app/api');
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const full = resolve(dir, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else if (ent.name === 'route.ts') out.push(relative(OSUI, full));
+    }
+  };
+  walk(api);
+  return out;
+}
+
+test('WRAPPER SWEEP: every api route is guarded (inline gate OR withRoute) — or a known unauthenticated exception', () => {
+  const ungated: string[] = [];
+  for (const p of allApiRoutes()) {
+    if (UNAUTHENTICATED_BY_DESIGN.has(p)) continue;
+    if (!isGuarded(read(p))) ungated.push(p);
+  }
+  assert.deepEqual(
+    ungated,
+    [],
+    `these routes carry no session gate and are not a declared exception:\n${ungated.join('\n')}`,
+  );
+});
+
+test('WRAPPER SWEEP is STRICT: a route with NEITHER an inline gate NOR withRoute fails the guard predicate', () => {
+  // A synthetic ungated handler (parse + respond, no gate of any kind) must NOT
+  // be recognised as guarded — this proves the predicate did not go fail-open.
+  const ungatedSrc = `
+    import { NextResponse } from 'next/server';
+    export async function GET(req: Request) {
+      const body = await req.json().catch(() => ({}));
+      return NextResponse.json({ ok: true, body });
+    }`;
+  assert.equal(isGuarded(ungatedSrc), false, 'an ungated route must not pass the guard predicate');
+  // And each accepted pattern IS recognised (inline gates + the wrapper, generics or not).
+  for (const guarded of [
+    'const x = await requireUser();',
+    'await requireAdmin();',
+    'const u = await requirePrincipal();',
+    'const ctx = await adminCtx();',
+    'export const GET = withRoute(async ({ user }) => NextResponse.json({}));',
+    'export const POST = withRoute<{ id: string }>(async ({ user, params }) => NextResponse.json({}));',
+  ]) {
+    assert.equal(isGuarded(guarded), true, `must recognise as guarded: ${guarded}`);
+  }
 });

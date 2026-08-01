@@ -3,8 +3,8 @@
  */
 import type { Dataset, Layer } from './dataset-schema.ts';
 import { transparencyGate, type GateResult } from './transparency.ts';
-import { slug } from './store-fqn.ts';
-import { cubeViewName, goldMartFqn } from './metrics.ts';
+import { slug, physicalSlug } from './store-fqn.ts';
+import { cubeViewName } from './metrics.ts';
 
 /**
  * End-to-end lineage for one dataset, assembled from the single source — spanning
@@ -49,7 +49,7 @@ const ARTIFACT: Record<Layer, (s: string) => string> = {
 };
 
 export function lineageFor(d: Dataset): LineageGraph {
-  const s = slug(d.name);
+  const s = physicalSlug(d); // FROZEN — artifact-path labels stay pinned across a rename
   const columns = d.columns.map((c) => c.name);
   const nodes: LineageNode[] = [];
   const edges: LineageEdge[] = [];
@@ -111,7 +111,3 @@ export function lineageFor(d: Dataset): LineageGraph {
   };
 }
 
-/** The governed mart FQN at the head of the consumption chain (handover contract). */
-export function lineageRootFqn(d: Dataset): string {
-  return goldMartFqn(d);
-}

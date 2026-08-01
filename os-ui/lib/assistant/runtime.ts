@@ -10,8 +10,10 @@ import {
   runAgentic,
   ToolCallingUnsupportedError,
   type AgenticResult,
+  type AgenticStep,
   type LlmCall,
   type LlmCompletion,
+  type LlmUsage,
   type ToolExecutor,
   type ToolSpec,
 } from './agentic.ts';
@@ -152,8 +154,27 @@ export function liteLlmCaller(): LlmCall {
     }
     const choices = (data.choices ?? []) as Array<Record<string, unknown>>;
     const message = (choices[0]?.message ?? {}) as Record<string, unknown>;
-    return parseLlmMessage(message);
+    const completion = parseLlmMessage(message);
+    // Surface the gateway's reported token usage so a run path can aggregate it
+    // (the Monitoring run-summary trace). Absent/malformed usage stays undefined.
+    const usage = parseLlmUsage(data.usage);
+    return usage ? { ...completion, usage } : completion;
   };
+}
+
+/**
+ * Parse a chat-completions `usage` block ({prompt_tokens, completion_tokens,
+ * total_tokens}) into the harness shape — only when the gateway actually reported
+ * numbers. Anything absent or malformed → undefined (usage is never fabricated).
+ */
+export function parseLlmUsage(raw: unknown): LlmUsage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const u = raw as { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown };
+  const input = typeof u.prompt_tokens === 'number' ? u.prompt_tokens : undefined;
+  const output = typeof u.completion_tokens === 'number' ? u.completion_tokens : undefined;
+  if (input === undefined && output === undefined) return undefined;
+  const total = typeof u.total_tokens === 'number' ? u.total_tokens : (input ?? 0) + (output ?? 0);
+  return { input: input ?? 0, output: output ?? 0, total };
 }
 
 /**
@@ -250,6 +271,15 @@ export type RunTabAgentInput = {
    * (no `commit` / `request_deploy` / `start_preview` write path).
    */
   toolNames?: string[];
+  /**
+   * Progress hook — called once per governed tool step as it executes (the SAME
+   * `AgenticStep` the result later carries). The Software Build stage plumbs this
+   * to a streaming response so each tool-call surfaces as a live activity line
+   * instead of a silent spinner. Pure UI wiring; it never changes what runs.
+   */
+  onStep?: (step: AgenticStep) => void;
+  /** Progress hook — called once with the plan text as soon as PLAN completes. */
+  onPlan?: (plan: string) => void;
   /** Injected in tests; defaults to the live LiteLLM caller. */
   llm?: LlmCall;
 };
@@ -286,6 +316,8 @@ export async function runTabAgent(input: RunTabAgentInput): Promise<AgenticResul
     maxIterations: input.maxIterations,
     budget: inputBudget(assistantId),
     maxOutputTokens: ctx.reservedOutput,
+    onStep: input.onStep,
+    onPlan: input.onPlan,
   });
 }
 

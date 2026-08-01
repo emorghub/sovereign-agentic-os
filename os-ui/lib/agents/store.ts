@@ -97,6 +97,19 @@ export type LastRun = {
    */
   grantedIds?: { data: string[]; knowledge: string[]; files: string[]; metrics: string[]; connections: string[] };
   output?: string;
+  /**
+   * The run's WRITE accounting, counted DIRECTLY from the executed steps (never
+   * inferred): how many records were written straight to the runner's own My scope
+   * (the My-direct rule) vs how many writes are HELD in Governance → Inbox. Drives the
+   * honest "wrote N to My <tab> · M awaiting approval" line in the Run panel + Evaluate.
+   * Additive + back-compatible: absent on runs recorded before it shipped.
+   */
+  writeSummary?: {
+    line: string;
+    wrote: { tab: string; count: number }[];
+    wroteTotal: number;
+    heldTotal: number;
+  };
   mode?: 'live' | 'offline-mock';
   traceStoreAvailable?: boolean;
   traceUrl?: string;
@@ -164,7 +177,13 @@ export const WHITELIST_HINT = 'only system.yaml, AGENT.md and MEMORY.md are edit
  * written by one route visible to every other route — and survives dev HMR. (Same
  * reason `lib/marketplace/store.ts` and `lib/approvals.ts` pin their state.)
  */
-type AgentsState = { store: Map<string, SystemRecord>; seeded: boolean; hydration: Promise<void> | null };
+type AgentsState = {
+  store: Map<string, SystemRecord>;
+  seeded: boolean;
+  hydration: Promise<void> | null;
+  /** Set when the last hydration found the mirror DOWN — gates the throttled retry. */
+  hydrateFailedAt?: number;
+};
 const STATE_KEY = Symbol.for('soa.agents.store');
 function state(): AgentsState {
   const g = globalThis as unknown as Record<symbol, AgentsState | undefined>;
@@ -213,18 +232,37 @@ function snapshotState(rec: SystemRecord): { yaml: string } {
   return { yaml: rec.yaml };
 }
 
+/** Retry a failed hydration at most this often (a down mirror must not add a
+ *  probe round-trip to EVERY request — mirrors lib/data/store.ts). */
+const HYDRATE_RETRY_MS = 60_000;
+
 export async function ensureHydrated(): Promise<void> {
   const s = state();
-  if (!s.hydration) s.hydration = Promise.all([hydrate(), versions.ensureHydrated()]).then(() => {});
+  if (!s.hydration) {
+    // After a mirror-down hydration, retry (throttled) instead of staying pinned
+    // to an empty registry for the pod's lifetime — a transient OpenSearch blip
+    // at boot must not "lose" every mirrored system until the next deploy.
+    if (s.hydrateFailedAt && Date.now() - s.hydrateFailedAt < HYDRATE_RETRY_MS) return;
+    s.hydration = hydrate();
+  }
   return s.hydration;
 }
 
 async function hydrate(): Promise<void> {
   const s = state();
-  const docs = (await mirror.hydrate(2000)) ?? [];
+  const docs = await mirror.hydrate(2000);
+  if (docs === null) {
+    // Mirror down → stay un-hydrated and retry on a later read (never cache a
+    // FAILED hydration as done — the data store's rule).
+    s.hydrateFailedAt = Date.now();
+    s.hydration = null;
+    return;
+  }
+  s.hydrateFailedAt = undefined;
   for (const rec of docs as SystemRecord[]) {
     if (rec && rec.id && !s.store.has(rec.id)) s.store.set(rec.id, rec);
   }
+  await versions.ensureHydrated();
   s.seeded = true;
 }
 
@@ -301,8 +339,28 @@ export function __resetStore(): void {
   s.store.clear();
   s.seeded = false;
   s.hydration = null;
+  s.hydrateFailedAt = undefined;
   mirror.__reset();
   versions.__reset();
+}
+
+/**
+ * Cross-domain governance move (admin-only, gated in lib/platform-admin/domain-move.ts).
+ * Scoping reads the record's `domain` field (the yaml's domain is cosmetic), so
+ * we set the field and write through. `sel.id` moves one; `sel.onlyUnassigned`
+ * sweeps only empty-domain records. Returns the ids moved.
+ */
+export function moveSystemsDomain(sel: { id?: string; onlyUnassigned?: boolean }, target: string): string[] {
+  const moved: string[] = [];
+  for (const rec of state().store.values()) {
+    if (sel.id !== undefined && rec.id !== sel.id) continue;
+    if (sel.onlyUnassigned && rec.domain) continue;
+    if (rec.domain === target) continue;
+    rec.domain = target;
+    writeThrough(rec);
+    moved.push(rec.id);
+  }
+  return moved;
 }
 
 // ------------------------------------------------------------------- scoping --
@@ -382,6 +440,23 @@ export type SystemGroups = { mine: SystemSummary[]; domain: SystemSummary[]; mar
  * restore or delete. A shared/marketplace system, once archived by its owner,
  * disappears from everyone's domain/marketplace list too.
  */
+/**
+ * The caller's systems, grouped. Archived systems are HIDDEN by default (soft
+ * archive) — the owner/Admin can list them explicitly via `includeArchived` to
+ * restore or delete. A shared/marketplace system, once archived by its owner,
+ * disappears from everyone's domain/marketplace list too.
+ *
+ * GROUP BY VISIBILITY, not ownership: a Shared system is DOMAIN knowledge and belongs
+ * under Domain even when the caller authored it; a Marketplace system under this tab's
+ * "Company" tier; only a Personal system is "Mine". (This fixes the leak where an owned
+ * Shared/Marketplace system showed under "My Agents" instead of "Domain Agents".)
+ *
+ * STRICT DOMAIN ISOLATION: EVERY tier — My, Domain AND Company — narrows to the ACTIVE
+ * domain. With an active domain chosen (sidebar switcher) auth.ts narrows user.domains to
+ * [active], so each tier filters to that domain; "All Domains" keeps every membership so
+ * all show. A domainless (unassigned) system always shows. Cross-domain discovery of a
+ * Marketplace system happens ONLY through the dedicated Marketplace catalog surface.
+ */
 export function listSystems(user: Principal, opts: { includeArchived?: boolean } = {}): SystemGroups {
   ensureSeeded();
   const mine: SystemSummary[] = [];
@@ -389,12 +464,91 @@ export function listSystems(user: Principal, opts: { includeArchived?: boolean }
   const marketplace: SystemSummary[] = [];
   for (const rec of state().store.values()) {
     if (rec.archived && !opts.includeArchived) continue;
-    if (rec.owner === user.id) mine.push(summarise(rec));
-    else if (rec.visibility === 'Shared' && user.domains.includes(rec.domain)) domain.push(summarise(rec));
-    else if (rec.visibility === 'Marketplace') marketplace.push(summarise(rec));
+    if (!canView(rec, user)) continue;
+    const inScope = !rec.domain || user.domains.includes(rec.domain);
+    if (!inScope) continue; // strict active-domain isolation, every tier, incl the owner
+    if (rec.visibility === 'Marketplace') marketplace.push(summarise(rec));
+    else if (rec.visibility === 'Shared') domain.push(summarise(rec));
+    else mine.push(summarise(rec)); // Personal
   }
   const byName = (a: SystemSummary, b: SystemSummary) => a.name.localeCompare(b.name);
   return { mine: mine.sort(byName), domain: domain.sort(byName), marketplace: marketplace.sort(byName) };
+}
+
+/** Agent systems visible to the user that hold a per-item (non-folder) DATA grant on
+ *  a given dataset — the reverse lookup the Data tab's Publish stage uses to list
+ *  "agent systems that use this dataset". Pure over {@link listSystems} + {@link getSystem}
+ *  (both RLS-scoped), so it never widens visibility. A system whose yaml can't be parsed
+ *  is skipped rather than throwing (fail-soft, matches the read-model discipline). */
+export function getSystemsUsingDataset(datasetId: string, user: Principal): SystemSummary[] {
+  const { mine, domain, marketplace } = listSystems(user);
+  const out: SystemSummary[] = [];
+  for (const s of [...mine, ...domain, ...marketplace]) {
+    try {
+      const view = getSystem(s.id, user);
+      if (view.system.grants.data.some((g) => g.id === datasetId && !g.folder)) out.push(s);
+    } catch {
+      // unreadable/unparseable system — skip, never fabricate a match
+    }
+  }
+  return out;
+}
+
+/** One agent-system row for Agent Monitoring: identity + last-run health + activity. */
+export type AgentHealthRow = {
+  id: string;
+  name: string;
+  scope: 'mine' | 'domain' | 'marketplace';
+  agentCount: number;
+  running: boolean;
+  scheduled: boolean;
+  /** ms epoch of the last run, or null if it has never run. */
+  lastRunAt: number | null;
+  /** true = last run succeeded, false = failed, null = never run. */
+  lastRunOk: boolean | null;
+  /** tool steps the last run held/blocked (governance denials) — the error count. */
+  held: number;
+  /** Rolled-up dot: green ok · amber ok-with-holds · red failed · grey never-run. */
+  health: 'green' | 'amber' | 'red' | 'grey';
+};
+
+/**
+ * Agent Monitoring feed: EVERY agent system the caller can access — their own
+ * (`mine`), shared-to-their-domain (`domain`), and marketplace (`marketplace`) —
+ * each with its last-run health. This is the artifact-centric monitor: you start
+ * from the agent systems you built or use, not from a firehose of raw traces. A
+ * never-run system shows `grey`/"not run yet" rather than being hidden.
+ */
+export function agentHealthRows(user: Principal): AgentHealthRow[] {
+  ensureSeeded();
+  const rows: AgentHealthRow[] = [];
+  for (const rec of state().store.values()) {
+    if (rec.archived) continue;
+    if (!canView(rec, user)) continue;
+    // Mirror listSystems: GROUP BY VISIBILITY (Shared→domain, Marketplace→marketplace,
+    // else→mine), and narrow EVERY tier to the active domain (strict isolation). A
+    // domainless system always shows; cross-domain discovery is the Marketplace's job.
+    if (rec.domain && !user.domains.includes(rec.domain)) continue;
+    const scope: AgentHealthRow['scope'] =
+      rec.visibility === 'Marketplace' ? 'marketplace' : rec.visibility === 'Shared' ? 'domain' : 'mine';
+    let agentCount = 0;
+    try { agentCount = parseSystem(rec.yaml).agents.length; } catch { agentCount = 0; }
+    const lr = rec.lastRun;
+    const health: AgentHealthRow['health'] = !lr ? 'grey' : !lr.ok ? 'red' : lr.held > 0 ? 'amber' : 'green';
+    rows.push({
+      id: rec.id,
+      name: rec.name,
+      scope,
+      agentCount,
+      running: rec.running,
+      scheduled: rec.schedule.kind !== 'manual',
+      lastRunAt: lr?.at ?? null,
+      lastRunOk: lr?.ok ?? null,
+      held: lr?.held ?? 0,
+      health,
+    });
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -443,7 +597,9 @@ export function getSystemForEdit(systemId: string, user: Principal): SystemView 
  * this widens NOTHING for Marketplace. File WRITES and Build still use
  * {@link getSystemForEdit}, keeping a crisp boundary: run ≠ edit.
  */
-function canRun(rec: SystemRecord, user: Principal): boolean {
+/** Exported so the systems GET route can stamp `canRun` onto the client payload.
+ *  Server is the source of truth — the client never re-computes authz. */
+export function canRunCheck(rec: SystemRecord, user: Principal): boolean {
   if (canEdit(rec, user)) return true;
   if (rec.visibility === 'Shared' && user.domains.includes(rec.domain)) {
     // Any in-domain member (creator+) may RUN a Shared agent; the base
@@ -455,7 +611,7 @@ function canRun(rec: SystemRecord, user: Principal): boolean {
 
 export function getSystemForRun(systemId: string, user: Principal): SystemView {
   const rec = get(systemId);
-  if (!canRun(rec, user)) fail('Not permitted to run this system', 403);
+  if (!canRunCheck(rec, user)) fail('Not permitted to run this system', 403);
   return { ...rec, system: parseSystem(rec.yaml) };
 }
 

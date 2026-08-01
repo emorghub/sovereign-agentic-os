@@ -173,8 +173,11 @@ function manageArg(a: Artifact): { owner: string; domain: string; scope: Artifac
 function visibleToUser(a: Artifact, user: CurrentUser): boolean {
   // Certified copies the user pulled from the Marketplace are theirs to see.
   if (a.origin === 'certified-copy') return a.owner === user.id;
-  // Personal: owner only.
-  if (a.visibility === 'Personal') return a.owner === user.id;
+  // Personal: owner only. ACTIVE-DOMAIN scope: a personal artifact is only
+  // shown when its domain is in the caller's live scope — with an active domain
+  // chosen, user.domains is narrowed to [active], so "My" filters to that
+  // domain too. "All domains" keeps user.domains = every membership.
+  if (a.visibility === 'Personal') return a.owner === user.id && (!a.domain || user.domains.includes(a.domain));
   // Shared: visible to everyone in that domain — but only for domains the user
   // belongs to.
   if (a.visibility === 'Shared') return user.domains.includes(a.domain);
@@ -413,6 +416,34 @@ export async function deleteArtifact(artId: string, user: CurrentUser): Promise<
   map.delete(artId);
   deleteThrough(artId);
   versions.purge(artId);
+}
+
+/**
+ * Cross-domain governance move (admin-only, gated by the caller in
+ * lib/platform-admin/domain-move.ts). Reassigns the stored `domain` on matching
+ * records and writes each change through the durable mirror — reusing this
+ * store's own persistence discipline. `sel.id` moves exactly one record;
+ * `sel.onlyUnassigned` sweeps only records whose domain is empty/missing. Never
+ * touches records that already carry a domain when `onlyUnassigned` is set.
+ * Returns the ids actually moved (already-on-target records are skipped).
+ */
+export async function moveArtifactsDomain(
+  sel: { id?: string; onlyUnassigned?: boolean },
+  target: string,
+): Promise<string[]> {
+  const map = await getCache();
+  const moved: string[] = [];
+  for (const a of map.values()) {
+    if (sel.id !== undefined && a.id !== sel.id) continue;
+    if (sel.onlyUnassigned && a.domain) continue;
+    if (a.domain === target) continue;
+    a.domain = target;
+    a.updatedAt = now();
+    map.set(a.id, a);
+    writeThrough(a);
+    moved.push(a.id);
+  }
+  return moved;
 }
 
 function withStatus(err: Error, status: number): Error {

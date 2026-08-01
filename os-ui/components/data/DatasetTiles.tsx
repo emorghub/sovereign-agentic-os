@@ -8,11 +8,15 @@ import { useUser } from '@/lib/useUser';
 import { roleAtLeast } from '@/lib/core/session';
 import { canManageArtifact } from '@/lib/governance/edit-scope';
 import { DATASET_SCOPES, tilesForScope, scopeCounts, type DatasetScope } from '@/lib/data/dataset-scopes';
+import { rootsForScope, TIER_BADGE_CLASS, type FolderRoot } from '@/lib/core/scopes';
+import { visibilityForTier } from '@/lib/core/artifact-model';
 import { itemsUnderFolder, normaliseFolderPath, folderName, type FolderPathNode } from '@/lib/core/folders';
 import FolderTree, { FolderPickerModal, type FolderRef } from '@/components/core/FolderTree';
 import FolderLayout from '@/components/core/FolderLayout';
 import { ensureFolderId, renamedPath } from '@/lib/folders/client';
+import { useFolders } from '@/lib/folders/useFolders';
 import { ConfirmProvider, useConfirm } from '@/components/lifecycle/ConfirmDialog';
+import { useToast } from '@/components/core/Toast';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import DomainTag from '@/components/DomainTag';
 import type { Visibility } from '@/lib/core/lifecycle';
@@ -39,23 +43,12 @@ type Groups = { mine: Tile[]; domain: Tile[]; marketplace: Tile[] };
 
 /** Which folder ROOT a dataset's folders live in — its private tree (dataset) or the
  *  domain tree (shared/certified). Mirrors how the store groups by tier. */
-type FolderRoot = 'personal' | 'domain';
 function rootOf(t: Tile): FolderRoot {
   return t.tier === 'dataset' ? 'personal' : 'domain';
 }
 
-/** Which folder roots are relevant for the active scope. Used to trim the rail and
- *  the folder picker so the user only sees roots that contain items in-scope. */
-function rootsForScope(scope: DatasetScope): FolderRoot[] {
-  if (scope === 'mine') return ['personal'];
-  if (scope === 'shared') return ['domain'];
-  if (scope === 'marketplace') return ['domain'];
-  return ['personal', 'domain']; // 'all'
-}
-
 /** Tile tier → the OS-wide lifecycle visibility (drives the delete gate). */
-const lcVis = (tier: Tile['tier']): Visibility =>
-  tier === 'asset' ? 'shared' : tier === 'product' ? 'certified' : 'personal';
+const lcVis = (tier: Tile['tier']): Visibility => visibilityForTier(tier);
 
 function freshLabel(iso: string | null): string {
   if (!iso) return 'not built yet';
@@ -68,7 +61,7 @@ function freshLabel(iso: string | null): string {
   return `updated ${d.toLocaleDateString()}`;
 }
 
-const TIER_BADGE: Record<Tile['tier'], string> = { dataset: 'vis-personal', asset: 'vis-shared', product: 'vis-certified' };
+const TIER_BADGE: Record<Tile['tier'], string> = { dataset: TIER_BADGE_CLASS.personal, asset: TIER_BADGE_CLASS.shared, product: TIER_BADGE_CLASS.certified };
 const TIER_WORD: Record<Tile['tier'], string> = { dataset: 'Dataset', asset: 'Data asset', product: 'Data product' };
 
 /** The B/S/G refinement dots on a tile — one logical dataset, three versions. */
@@ -160,23 +153,27 @@ function TileCard({ t, onOpen, onImport, onMove, canManage, onChanged, showDomai
 function DatasetTilesInner({ onOpen }: { onOpen: (id: string) => void }) {
   const { user } = useUser();
   const confirm = useConfirm();
+  const toast = useToast();
   // Importing a marketplace product grants the WHOLE domain read access, so the store
   // gates it to Builder/Admin (store.importProduct 403s others). Only surface Import to
   // those roles — no dead control (mirrors CertifyPanel's "no dead controls").
   const canImport = !!user && roleAtLeast(user.role, 'builder');
   const [groups, setGroups] = useState<Groups | null>(null);
   const [err, setErr] = useState('');
-  const [creating, setCreating] = useState(false);
+  // TWO-PATH create. `+ New dataset` opens a calm two-card chooser FIRST:
+  //   'choose'  — pick a path (📥 ingest new data · 🔗 curate from existing datasets)
+  //   'ingest'  — name it, create, land in the builder at Ingest (today's path, unchanged)
+  //   'curated' — name it, create with origin:'curated', land in the builder with a toast
+  //               pointing at the Harmonize stage (where the existing Gold join builder lives)
+  const [creating, setCreating] = useState<false | 'choose' | 'ingest' | 'curated'>(false);
   const [newName, setNewName] = useState('');
+  /** A taken name (409): the friendly duplicate notice + one-click open of the existing dataset. */
+  const [dupe, setDupe] = useState<{ name: string; id?: string } | null>(null);
   // Scope switcher — the Files-tab mental model: All · My · Shared · Marketplace.
   const [scope, setScope] = useState<DatasetScope>('all');
   // Folder rail (Wave 1 primitive, mirrors Files): a (root, path) selection filters
   // the grid to datasets under that folder. `null` = every dataset in the scope.
   const [sel, setSel] = useState<{ root: FolderRoot; path: string } | null>(null);
-  // Explicit folder rows from the governed registry, per root — unioned with folders
-  // synthesised from the visible datasets' own paths so implicit folders keep showing.
-  const [personalNodes, setPersonalNodes] = useState<FolderPathNode[]>([]);
-  const [domainNodes, setDomainNodes] = useState<FolderPathNode[]>([]);
   // Multi-select in the grid → bulk "Move selected…".
   const [picked, setPicked] = useState<Set<string>>(new Set());
   // Folder picker modal for dataset moves: ids being moved; null = closed.
@@ -185,6 +182,9 @@ function DatasetTilesInner({ onOpen }: { onOpen: (id: string) => void }) {
   const [folderMove, setFolderMove] = useState<FolderRef | null>(null);
   // Archive/lifecycle UI (mirrors the Knowledge tab's reference pattern).
   const [showArchived, setShowArchived] = useState(false);
+  // Explicit folder rows from the governed registry, per root (unioned below with
+  // folders synthesised from the visible datasets' own paths so implicit ones show).
+  const { personalNodes, domainNodes, loadFolders } = useFolders('data', showArchived);
   // Import-from-warehouse affordance: registered warehouse connections a builder can
   // materialize a table from. Lazily loaded from the same /api/connections endpoint the
   // Connections tab uses; only offered when there's at least one warehouse connection.
@@ -209,18 +209,6 @@ function DatasetTilesInner({ onOpen }: { onOpen: (id: string) => void }) {
     return () => { cancelled = true; };
   }, [canImportWarehouse]);
 
-  const loadFolders = useCallback(async () => {
-    try {
-      const suffix = showArchived ? '&archived=1' : '';
-      const [pRes, dRes] = await Promise.all([
-        fetch(`/api/folders?tab=data&scope=personal${suffix}`, { cache: 'no-store' }),
-        fetch(`/api/folders?tab=data&scope=domain${suffix}`, { cache: 'no-store' }),
-      ]);
-      if (pRes.ok) setPersonalNodes(((await pRes.json()).folders ?? []) as FolderPathNode[]);
-      if (dRes.ok) setDomainNodes(((await dRes.json()).folders ?? []) as FolderPathNode[]);
-    } catch { /* the synthesised rail still renders without the registry */ }
-  }, [showArchived]);
-
   const refresh = useCallback(async () => {
     setErr('');
     try {
@@ -236,19 +224,41 @@ function DatasetTilesInner({ onOpen }: { onOpen: (id: string) => void }) {
 
   const create = useCallback(async () => {
     const name = newName.trim();
-    if (!name) return;
+    if (!name || creating === false || creating === 'choose') return;
+    const curated = creating === 'curated';
     setErr('');
+    setDupe(null);
     try {
       const res = await fetch('/api/data/datasets', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name }),
+        // The curated birth is recorded on the record (nil-safe; absent ⇒ ingest).
+        body: JSON.stringify({ name, ...(curated ? { origin: 'curated' } : {}) }),
       });
       const data = await res.json();
-      if (!res.ok) { setErr(data.error ?? 'Could not create'); return; }
+      if (!res.ok) {
+        // FRIENDLY duplicate handling: names are unique per domain by design (one name =
+        // one gold table + one Cube model). Instead of a raw refusal, point at the
+        // existing dataset with a one-click open — the tiles already carry its id.
+        if (res.status === 409) {
+          const lower = name.toLowerCase();
+          const match = [...(groups?.mine ?? []), ...(groups?.domain ?? [])]
+            .find((t) => t.name.trim().toLowerCase() === lower);
+          setDupe({ name, id: match?.id });
+          return;
+        }
+        setErr(data.error ?? 'Could not create');
+        return;
+      }
       setNewName(''); setCreating(false);
+      // The builder lands a fresh dataset at Ingest (its stage derives from real state,
+      // no preselect hook exists) — so the curated path gets a clear signpost to the
+      // Harmonize stage, where the existing join-existing-datasets builder lives.
+      if (curated) {
+        toast.info('Curated dataset created — open the Harmonize stage to join existing datasets into it.');
+      }
       onOpen(data.dataset.id); // navigates to the new dataset's detail view
     } catch (e) { setErr((e as Error).message); }
-  }, [newName, onOpen]);
+  }, [newName, creating, onOpen, toast, groups]);
 
   const importProduct = useCallback(async (id: string) => {
     setErr('');
@@ -443,17 +453,72 @@ function DatasetTilesInner({ onOpen }: { onOpen: (id: string) => void }) {
             </button>
           ) : null}
           {creating ? (
-            <div className="row" style={{ gap: 8 }}>
-              <input autoFocus value={newName} placeholder="Dataset name" onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') create(); if (e.key === 'Escape') setCreating(false); }} />
-              <button className="btn" onClick={create} disabled={!newName.trim()}>Create</button>
-              <button className="btn ghost" onClick={() => { setCreating(false); setNewName(''); }}>Cancel</button>
-            </div>
+            <button className="btn ghost" onClick={() => { setCreating(false); setNewName(''); }}>Cancel</button>
           ) : (
-            <button className="btn" onClick={() => setCreating(true)}>+ New dataset</button>
+            <button className="btn" onClick={() => setCreating('choose')}>+ New dataset</button>
           )}
         </div>
       </div>
+
+      {/* TWO-PATH create — the chooser comes FIRST (before any naming). Two big, calm
+          cards on the Agents tmpl-card primitive: bring NEW data in (today's ingest
+          path, unchanged), or CURATE a new dataset from existing governed ones (the
+          reuse path — the Harmonize-stage join builder). Pick one, then name it. */}
+      {creating === 'choose' ? (
+        <div className="card" style={{ marginTop: 16 }}>
+          <h3 style={{ marginTop: 0, marginBottom: 2 }}>New dataset</h3>
+          <p className="hint" style={{ marginTop: 0 }}>How should it start?</p>
+          <div className="tmpl-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', maxWidth: 680, gap: 12 }}>
+            <button type="button" className="tmpl-card" style={{ padding: '18px 20px', gap: 6 }} onClick={() => setCreating('ingest')}>
+              <span aria-hidden style={{ fontSize: 24, lineHeight: 1 }}>📥</span>
+              <span className="tmpl-label" style={{ fontSize: 14 }}>Ingest new data</span>
+              <span className="tmpl-blurb" style={{ fontSize: 12 }}>Bring a file or extract in — it lands as raw Bronze you refine through the stages.</span>
+            </button>
+            <button type="button" className="tmpl-card" style={{ padding: '18px 20px', gap: 6 }} onClick={() => setCreating('curated')}>
+              <span aria-hidden style={{ fontSize: 24, lineHeight: 1 }}>🔗</span>
+              <span className="tmpl-label" style={{ fontSize: 14 }}>Create a curated dataset</span>
+              <span className="tmpl-blurb" style={{ fontSize: 12 }}>Combine existing governed datasets you can already read into one new joined dataset.</span>
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Path picked → name it. Same create endpoint for both; the curated path adds
+          origin:'curated' and, on create, a toast signpost to the Harmonize stage. */}
+      {creating === 'ingest' || creating === 'curated' ? (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div className="row" style={{ gap: 10, alignItems: 'center' }}>
+            <button className="btn ghost" onClick={() => setCreating('choose')}>← Back</button>
+            <strong>{creating === 'curated' ? '🔗 Create a curated dataset' : '📥 Ingest new data'}</strong>
+          </div>
+          <p className="hint" style={{ marginTop: 8 }}>
+            {creating === 'curated'
+              ? 'Name it — then join existing datasets into it at the Harmonize stage.'
+              : 'Name it — then bring your file or extract in at the Ingest stage.'}
+          </p>
+          <div className="row" style={{ gap: 8 }}>
+            <input autoFocus value={newName} placeholder="Dataset name" style={{ flex: 1, maxWidth: 380 }}
+              onChange={(e) => { setNewName(e.target.value); if (dupe) setDupe(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') create(); if (e.key === 'Escape') { setDupe(null); setCreating('choose'); } }} />
+            <button className="btn" onClick={create} disabled={!newName.trim()}>Create</button>
+          </div>
+          {/* Friendly duplicate handling — names are unique per domain by design (one
+              name = one gold table + one Cube model). Point at the existing dataset
+              instead of a raw refusal. */}
+          {dupe ? (
+            <div className="passthrough-note" style={{ marginTop: 10, maxWidth: 520 }}>
+              <span>“{dupe.name}” already exists in this domain — </span>
+              {dupe.id ? (
+                <button className="btn ghost sm" style={{ margin: '0 6px' }}
+                  onClick={() => { const id = dupe.id!; setDupe(null); setNewName(''); setCreating(false); onOpen(id); }}>
+                  Open “{dupe.name}” →
+                </button>
+              ) : null}
+              <span>{dupe.id ? 'or pick a distinguishing name (e.g. “' : 'pick a distinguishing name (e.g. “'}{dupe.name} (EMEA)”).</span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Import from warehouse — materialize a registered warehouse table into a
           governed dataset. Opens the browse → name → import panel; on success it

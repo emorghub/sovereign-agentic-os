@@ -5,6 +5,7 @@ import yaml from 'js-yaml';
 import { roleAtLeast } from '../core/session.ts';
 import type { Role } from '../core/session.ts';
 import { normaliseFolderPath } from '../core/folders.ts';
+import { isValidCron } from '../agents/cron-util.ts';
 
 /**
  * `dataset.yaml` — the SINGLE source of truth for one logical dataset (Data tab).
@@ -114,6 +115,32 @@ export const TRUST_LEVELS: TrustLevel[] = ['bronze', 'silver', 'gold'];
  *  the registry entry (a governed asset/product the builder could see). */
 export type DatasetUpstream = { datasetId: string; name: string; fqn: string; joinType: 'inner' | 'left' };
 
+/**
+ * The RAW, editable Gold build spec (stage-4) — persisted so the Gold panel RE-HYDRATES
+ * after a build: the join partners (datasetId + keys/type), the kept dimensions and the
+ * source measures all survive, so the definition stays visible + editable + rebuildable
+ * (not a one-shot black box). This is the panel's own vocabulary (datasetId-keyed joins,
+ * `ref::column` dimension/measure refs), kept deliberately opaque to the SHAPE layer:
+ * it is stored and returned verbatim, never interpreted here. Compilation still happens
+ * server-side from the resolved FQNs (`goldJoinPlan`) — this is purely the reproducible
+ * INPUT, never a trusted SQL source. ABSENT on every dataset built before this field
+ * existed (and on single-table/pass-through Gold with no stored spec) — byte-stable. */
+export type GoldSpecJoin = {
+  datasetId: string;
+  type: 'inner' | 'left';
+  baseCol: string;
+  joinCol: string;
+  adaptMode?: 'none' | 'cast' | 'text';
+  adaptType?: string;
+};
+export type GoldSpecDimension = { source: string; as?: string };
+export type GoldSpecMeasure = { name: string; agg: string; col?: string; op?: string; col2?: string };
+export type GoldSpec = {
+  joins: GoldSpecJoin[];
+  dimensions: GoldSpecDimension[];
+  measures: GoldSpecMeasure[];
+};
+
 /** The dropdown-driven data-quality rule kinds the DQ editor offers. Each compiles
  *  to a COUNT-of-violations SQL check run through the governed query path (see
  *  `lib/data/dq.ts`). `range` uses `min`/`max`; `accepted_values` uses `values`. */
@@ -147,10 +174,51 @@ export type DataCheck = {
   max?: number;
 };
 
+/** Sync mode / cursor-kind literals — kept in LOCKSTEP with `sync-sql.ts` (this base
+ *  module stays import-light so client bundles never drag the warehouse registry in).
+ *  Executable kinds: timestamp | number | kafka-offsets (per-partition offsets map,
+ *  append-only). The reserved kinds ('delta-version'|'bq-partition') parse but are
+ *  not executable yet. */
+export type DatasetSyncMode = 'full-refresh' | 'append' | 'merge';
+export const DATASET_SYNC_MODES: DatasetSyncMode[] = ['full-refresh', 'append', 'merge'];
+export type DatasetSyncCursorKind = 'timestamp' | 'number' | 'delta-version' | 'bq-partition' | 'kafka-offsets';
+const SYNC_CURSOR_KINDS: DatasetSyncCursorKind[] = ['timestamp', 'number', 'delta-version', 'bq-partition', 'kafka-offsets'];
+
+/** SCHEDULED INCREMENTAL SYNC config for a warehouse-imported dataset. ABSENT on every
+ *  dataset without a sync (byte-stable — exactly like `monitors?`). The WATERMARK is
+ *  deliberately NOT stored here: it lives in the durable sync-runs time-series
+ *  (`sync-runs.ts`, cursorAfter of the latest ok run) so a config edit never clobbers
+ *  sync progress and the dataset.yaml stays a pure definition. */
+export type DatasetSync = {
+  /** The warehouse connection the source table federates through. */
+  connectionId: string;
+  /** The source table inside that connection's external catalog. */
+  source: { schema: string; table: string };
+  mode: DatasetSyncMode;
+  /** Required for append/merge (the incremental window column). */
+  cursor?: { kind: DatasetSyncCursorKind; column: string };
+  /** Required for merge (the natural-key match columns). */
+  mergeKeys?: string[];
+  /** Late-data lookback for timestamp cursors (minutes; absent ⇒ the executor's
+   *  default of 15). Number cursors always sync with no lookback. */
+  lookbackMinutes?: number;
+  schedule: { cron: string };
+  enabled: boolean;
+};
+
 export type Dataset = {
   version: string;
   id: string;
   name: string;
+  /** The FROZEN physical slug — the stable identity every physical derivation
+   *  (Iceberg FQN, Cube name/view, dbt model path) is built from. Set ONCE and
+   *  NEVER changed: on create it is left ABSENT (so it defaults to `slug(name)`,
+   *  keeping every existing record byte-identical), and it is WRITTEN only when a
+   *  RENAME decouples the display name from the physical table — pinning the table
+   *  to its slug at the moment of rename so the physical identity never moves. Read
+   *  it through `physicalSlug(d)` (store-fqn.ts), never recompute from `name`.
+   *  OMITTED from the yaml whenever it still equals `slug(name)` (byte-stable). */
+  slug?: string;
   owner: string;
   domain: string;
   tier: Tier;
@@ -173,12 +241,19 @@ export type Dataset = {
   imports?: string[];
   /** Additional datasets joined into the Gold version (multi-upstream lineage). */
   upstreams?: DatasetUpstream[];
+  /** The RAW editable Gold build spec (joins + kept columns + measures) — re-hydrates
+   *  the Gold panel so the definition stays visible/editable/rebuildable. ABSENT until a
+   *  Gold JOIN/single-table build stores one (byte-stable for every prior record). */
+  goldSpec?: GoldSpec;
   /** Manually-authored data-quality check intentions (not auto-executed). */
   checks?: DataCheck[];
   /** Heuristic monitor toggles (freshness/volume/schema). ABSENT ⇒ all ON (default-ON);
    *  a member is stored ONLY when the owner turns it off, so a dataset that never touched
    *  the toggles serializes exactly as before (byte-stable, zero migration). */
   monitors?: { freshness?: boolean; volume?: boolean; schema?: boolean };
+  /** Scheduled incremental sync config. ABSENT on every dataset without a sync
+   *  (byte-stable, zero migration — the `monitors?` pattern). */
+  sync?: DatasetSync;
   /** Cube identity scheme marker (#155). When true, this dataset's cube name / view /
    *  model file are DOMAIN-NAMESPACED (`<domain>__<slug>`), so two domains can each name
    *  a dataset "Sales" without colliding on one shared cube/view/model file. ABSENT ⇒
@@ -194,6 +269,20 @@ export type Dataset = {
    *  pre-existing datasets stay un-emitted until they are re-promoted (zero migration,
    *  byte-stable). Set at promote time. Omitted from yaml when false. */
   gitBacked?: boolean;
+  /** How the dataset was born (TWO-PATH create). `'curated'` = built from EXISTING
+   *  governed datasets via the Gold join (the reuse path); `'ingest'`/ABSENT = the classic
+   *  bring-a-file/extract path. Only `'curated'` is ever written to the yaml — absent means
+   *  ingest, so every pre-existing record serializes exactly as before (byte-stable, zero
+   *  migration; the `cubeNamespaced` precedent). Purely descriptive: no gate reads it. */
+  origin?: 'ingest' | 'curated';
+  /** STALE-DOMAIN-TABLE marker (Northpeak fix). Set true when a PROMOTED dataset's
+   *  personal-lane Gold is REBUILT but the governed domain table (`iceberg.<domain>.gold_<slug>`
+   *  — the FQN Cube + every consumer reads) was not re-materialized in the same act, so the
+   *  domain copy holds a PRIOR snapshot. While true, consumers must be warned and the table
+   *  re-promoted (re-run the publish CTAS). CLEARED the moment the domain CTAS re-runs. ABSENT/
+   *  false ⇒ the domain table is in sync (or the dataset was never promoted) — omitted from
+   *  the yaml (byte-stable, zero migration; the `gitBacked` precedent). */
+  domainTableStale?: boolean;
 };
 
 export class DatasetError extends Error {
@@ -384,6 +473,79 @@ function parseUpstream(raw: unknown, i: number): DatasetUpstream {
   };
 }
 
+/** Re-hydrate the raw Gold spec, tolerating any absent/loose field (it is stored
+ *  verbatim, never trusted — the server re-compiles from resolved FQNs). Missing arrays
+ *  collapse to empty so a partial record still opens. */
+export function parseGoldSpec(raw: unknown): GoldSpec | undefined {
+  if (!isRecord(raw)) return undefined;
+  const joins = (Array.isArray(raw.joins) ? raw.joins : [])
+    .filter(isRecord)
+    .map((j): GoldSpecJoin => ({
+      datasetId: typeof j.datasetId === 'string' ? j.datasetId : '',
+      type: j.type === 'left' ? 'left' : 'inner',
+      baseCol: typeof j.baseCol === 'string' ? j.baseCol : '',
+      joinCol: typeof j.joinCol === 'string' ? j.joinCol : '',
+      ...(j.adaptMode === 'cast' || j.adaptMode === 'text' || j.adaptMode === 'none' ? { adaptMode: j.adaptMode } : {}),
+      ...(typeof j.adaptType === 'string' ? { adaptType: j.adaptType } : {}),
+    }));
+  const dimensions = (Array.isArray(raw.dimensions) ? raw.dimensions : [])
+    .filter(isRecord)
+    .map((d): GoldSpecDimension => ({
+      source: typeof d.source === 'string' ? d.source : '',
+      ...(typeof d.as === 'string' && d.as ? { as: d.as } : {}),
+    }));
+  const measures = (Array.isArray(raw.measures) ? raw.measures : [])
+    .filter(isRecord)
+    .map((m): GoldSpecMeasure => ({
+      name: typeof m.name === 'string' ? m.name : '',
+      agg: typeof m.agg === 'string' ? m.agg : 'sum',
+      ...(typeof m.col === 'string' && m.col ? { col: m.col } : {}),
+      ...(typeof m.op === 'string' && m.op ? { op: m.op } : {}),
+      ...(typeof m.col2 === 'string' && m.col2 ? { col2: m.col2 } : {}),
+    }));
+  if (joins.length === 0 && dimensions.length === 0 && measures.length === 0) return undefined;
+  return { joins, dimensions, measures };
+}
+
+/** Re-hydrate the sync block. Tolerant like `parseGoldSpec`: a record missing its
+ *  essentials (connection, source table, valid mode, valid cron) parses to undefined
+ *  rather than bricking the dataset — the setter is the strict gate. */
+export function parseSyncBlock(raw: unknown): DatasetSync | undefined {
+  if (!isRecord(raw)) return undefined;
+  const src = isRecord(raw.source) ? raw.source : {};
+  const sched = isRecord(raw.schedule) ? raw.schedule : {};
+  const mode = raw.mode as DatasetSyncMode;
+  if (
+    typeof raw.connectionId !== 'string' || !raw.connectionId ||
+    typeof src.schema !== 'string' || !src.schema ||
+    typeof src.table !== 'string' || !src.table ||
+    !DATASET_SYNC_MODES.includes(mode) ||
+    !isValidCron(typeof sched.cron === 'string' ? sched.cron : undefined)
+  ) {
+    return undefined;
+  }
+  const out: DatasetSync = {
+    connectionId: raw.connectionId,
+    source: { schema: src.schema, table: src.table },
+    mode,
+    schedule: { cron: String(sched.cron) },
+    enabled: raw.enabled === true,
+  };
+  const cur = raw.cursor;
+  if (isRecord(cur) && typeof cur.column === 'string' && cur.column &&
+      (SYNC_CURSOR_KINDS as string[]).includes(String(cur.kind))) {
+    out.cursor = { kind: cur.kind as DatasetSyncCursorKind, column: cur.column };
+  }
+  if (Array.isArray(raw.mergeKeys)) {
+    const keys = raw.mergeKeys.map((k) => String(k)).filter(Boolean);
+    if (keys.length > 0) out.mergeKeys = keys;
+  }
+  if (typeof raw.lookbackMinutes === 'number' && Number.isInteger(raw.lookbackMinutes) && raw.lookbackMinutes >= 0) {
+    out.lookbackMinutes = raw.lookbackMinutes;
+  }
+  return out;
+}
+
 function parseCheck(raw: unknown, i: number): DataCheck {
   if (!isRecord(raw)) throw new DatasetError(`dataset.yaml: checks[${i}] must be a mapping`);
   const base: DataCheck = {
@@ -436,6 +598,7 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
   }
   const imports = Array.isArray(doc.imports) ? doc.imports.map((x) => String(x)) : undefined;
   const upstreams = Array.isArray(doc.upstreams) ? doc.upstreams.map(parseUpstream) : undefined;
+  const goldSpec = parseGoldSpec(doc.goldSpec);
   const checks = checksRaw.length > 0 ? checksRaw.map(parseCheck) : undefined;
   // Monitor toggles: only an explicit `false` is stored (default-ON). Any member absent
   // ⇒ that monitor is on. An empty/all-true object collapses to undefined (byte-stable).
@@ -447,15 +610,25 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
     }
     if (Object.keys(m).length > 0) monitors = m;
   }
+  const sync = parseSyncBlock(doc.sync);
+  // The FROZEN physical slug: only stored once a rename has DECOUPLED it from the
+  // name. Absent ⇒ still derivable from the name (`physicalSlug` falls back to
+  // `slug(name)`), so every pre-rename record parses with no slug — byte-stable.
+  const slugRaw = typeof doc.slug === 'string' && doc.slug.trim() ? doc.slug.trim() : undefined;
   // #155: absent/false ⇒ legacy un-namespaced cube identity (every pre-#155 record).
   const cubeNamespaced = doc.cubeNamespaced === true ? true : undefined;
   // #146 Phase 6: absent/false ⇒ no dbt model emitted (pre-existing datasets stay un-emitted).
   const gitBacked = doc.gitBacked === true ? true : undefined;
+  // Northpeak fix: absent/false ⇒ the domain table is in sync (or never promoted).
+  const domainTableStale = doc.domainTableStale === true ? true : undefined;
+  // TWO-PATH create: only 'curated' is stored; absent ⇒ ingest (every pre-existing record).
+  const origin = doc.origin === 'curated' ? ('curated' as const) : undefined;
 
   return {
     version: doc.version !== undefined ? String(doc.version) : '1',
     id: typeof doc.id === 'string' ? doc.id : '',
     name: typeof doc.name === 'string' ? doc.name : 'Untitled dataset',
+    ...(slugRaw ? { slug: slugRaw } : {}),
     owner: typeof doc.owner === 'string' ? doc.owner : '',
     domain: typeof doc.domain === 'string' ? doc.domain : '',
     tier,
@@ -471,11 +644,23 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
     ...(certification ? { certification } : {}),
     ...(imports ? { imports } : {}),
     ...(upstreams ? { upstreams } : {}),
+    ...(goldSpec ? { goldSpec } : {}),
     ...(checks ? { checks } : {}),
     ...(monitors ? { monitors } : {}),
+    ...(sync ? { sync } : {}),
     ...(cubeNamespaced ? { cubeNamespaced } : {}),
     ...(gitBacked ? { gitBacked } : {}),
+    ...(domainTableStale ? { domainTableStale } : {}),
+    ...(origin ? { origin } : {}),
   };
+}
+
+/** The lowercase, guard-safe physical slug of a display name. Kept in lockstep with
+ *  `slug` in store-fqn.ts / metrics.ts (this base module must stay import-free of them
+ *  to avoid a cycle). Used ONLY to decide when the frozen `slug` is still derivable and
+ *  can be omitted from the yaml (byte-stability). */
+function nameSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'dataset';
 }
 
 export function serializeDataset(d: Dataset): string {
@@ -488,6 +673,10 @@ export function serializeDataset(d: Dataset): string {
     tier: d.tier,
     visibility: d.visibility,
   };
+  // The FROZEN physical slug is written ONLY once a rename has decoupled it from the
+  // name (i.e. it no longer equals `slug(name)`). While still derivable it is OMITTED,
+  // so every dataset that has never been renamed serializes byte-identically to before.
+  if (d.slug && d.slug !== nameSlug(d.name)) doc.slug = d.slug;
   // Omit-when-root (byte-stable, like the `layer !== 'gold'` omit precedent): a
   // dataset at the root serializes exactly as before, so no old record churns.
   if (d.folder && normaliseFolderPath(d.folder) !== '/') doc.folder = normaliseFolderPath(d.folder);
@@ -499,6 +688,11 @@ export function serializeDataset(d: Dataset): string {
   if (d.certification) doc.certification = d.certification;
   if (d.imports && d.imports.length > 0) doc.imports = d.imports;
   if (d.upstreams && d.upstreams.length > 0) doc.upstreams = d.upstreams;
+  // Omit-when-empty (byte-stable): a Gold spec is written only once a Gold build stores
+  // one; every dataset without a stored spec serializes exactly as before.
+  if (d.goldSpec && (d.goldSpec.joins.length > 0 || d.goldSpec.dimensions.length > 0 || d.goldSpec.measures.length > 0)) {
+    doc.goldSpec = d.goldSpec;
+  }
   if (d.checks && d.checks.length > 0) doc.checks = d.checks;
   // Only persist explicitly-disabled monitors (default-ON); an all-on dataset omits the
   // key entirely, so nothing that never touched the toggles churns in the mirror.
@@ -509,12 +703,31 @@ export function serializeDataset(d: Dataset): string {
     }
     if (Object.keys(m).length > 0) doc.monitors = m;
   }
+  // Omit-when-absent (byte-stable): only a dataset with a configured sync writes the
+  // block; optional members are omitted so the yaml stays minimal + stable.
+  if (d.sync) {
+    doc.sync = {
+      connectionId: d.sync.connectionId,
+      source: { schema: d.sync.source.schema, table: d.sync.source.table },
+      mode: d.sync.mode,
+      ...(d.sync.cursor ? { cursor: { kind: d.sync.cursor.kind, column: d.sync.cursor.column } } : {}),
+      ...(d.sync.mergeKeys && d.sync.mergeKeys.length > 0 ? { mergeKeys: d.sync.mergeKeys } : {}),
+      ...(d.sync.lookbackMinutes !== undefined ? { lookbackMinutes: d.sync.lookbackMinutes } : {}),
+      schedule: { cron: d.sync.schedule.cron },
+      enabled: d.sync.enabled,
+    };
+  }
   // Omit-when-false (byte-stable): a legacy (un-namespaced) dataset serializes exactly
   // as before #155, so no old record churns in the durable mirror.
   if (d.cubeNamespaced) doc.cubeNamespaced = true;
   // Omit-when-false (#146 Phase 6): pre-existing datasets serialize exactly as before,
   // un-emitted until re-promoted with gitBacked=true.
   if (d.gitBacked) doc.gitBacked = true;
+  // Omit-when-false (byte-stable): only a promoted dataset whose domain table drifted
+  // from a rebuild carries this; every in-sync/un-promoted dataset serializes as before.
+  if (d.domainTableStale) doc.domainTableStale = true;
+  // Omit-unless-curated (byte-stable): the classic ingest path serializes exactly as before.
+  if (d.origin === 'curated') doc.origin = 'curated';
   return yaml.dump(doc, { lineWidth: 100, noRefs: true });
 }
 

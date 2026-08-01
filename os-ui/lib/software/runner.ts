@@ -139,7 +139,16 @@ function labels(spec: RunnerSpec): Record<string, string> {
 
 // ------------------------------------------------------------- Manifests -------
 
-export function buildDeploymentManifest(spec: RunnerSpec, namespace: string): Record<string, unknown> {
+/**
+ * `deployedAt` (ISO timestamp) is stamped as a POD-TEMPLATE annotation so every
+ * re-deploy CHANGES the template and triggers a real rollout. Without it a
+ * re-apply of an identical spec (the image ref is the stable `:latest` tag) is a
+ * no-op to Kubernetes: the pod keeps running the image it pulled FIRST — which is
+ * why apps kept serving the scaffold stub after CI had long since published the
+ * real build. Combined with `imagePullPolicy: Always`, the restarted pod re-pulls
+ * the current `:latest` from the registry.
+ */
+export function buildDeploymentManifest(spec: RunnerSpec, namespace: string, deployedAt?: string): Record<string, unknown> {
   const name = runnerName(spec.slug);
   const sel = { app: name };
   return {
@@ -150,17 +159,36 @@ export function buildDeploymentManifest(spec: RunnerSpec, namespace: string): Re
       replicas: 1,
       selector: { matchLabels: sel },
       template: {
-        metadata: { labels: { ...labels(spec), ...sel } },
+        metadata: {
+          labels: { ...labels(spec), ...sel },
+          ...(deployedAt ? { annotations: { 'soa.sovereign-os/deployed-at': deployedAt } } : {}),
+        },
         spec: {
           containers: [
             {
               name: 'app',
               image: spec.image,
+              // Always re-pull: the runner serves mutable tags (`:latest`), so a
+              // restarted pod must fetch the image CI just published, not reuse
+              // the node's stale cache.
+              imagePullPolicy: 'Always',
               ports: [{ containerPort: spec.port }],
               resources: {
                 requests: { cpu: spec.cpu, memory: spec.memory },
                 // Memory limit == request (>= request, valid); cpu capped at 1.
                 limits: { cpu: '1', memory: spec.memory },
+              },
+              // Container hardening (defence-in-depth for untrusted student apps).
+              // These are safe for BOTH the current non-root scaffolds (nginx-
+              // unprivileged uid 101 / node uid 1000) AND any older root-nginx image
+              // still deployed: a static file server needs NO Linux capability to bind
+              // 8080 (>1024) or serve files, and never escalates privileges. We do NOT
+              // set `runAsNonRoot` HERE so an old root image already deployed does not
+              // CrashLoop on its next rollout — see the pod-level note below.
+              securityContext: {
+                allowPrivilegeEscalation: false,
+                capabilities: { drop: ['ALL'] },
+                seccompProfile: { type: 'RuntimeDefault' },
               },
               // TCP readiness is image-agnostic (an HTTP path may 404 on a
               // healthy app), so it drives the running/deploying transition
@@ -173,6 +201,16 @@ export function buildDeploymentManifest(spec: RunnerSpec, namespace: string): Re
               },
             },
           ],
+          // Pod-level hardening. `runAsNonRoot` is intentionally OMITTED for now: the
+          // All live apps have been rebuilt from non-root scaffolds with NUMERIC
+          // image users (kubelet can only verify runAsNonRoot against a numeric
+          // uid), so the pod now asserts non-root and the namespace can run PSS
+          // `restricted`. A root image reaching this manifest fails admission —
+          // by design, not by accident.
+          securityContext: {
+            seccompProfile: { type: 'RuntimeDefault' },
+            runAsNonRoot: true,
+          },
         },
       },
     },
@@ -313,7 +351,9 @@ export async function deployApp(app: RunnerApp, options: RunnerOpts = {}): Promi
   if (!nsRes.reachable) return { ok: false, live: false, action: 'noop', name, host: spec.host, url: null, phase: 'offline', detail: UNREACHABLE };
   if (!nsRes.ok) return { ok: false, live: true, action: 'noop', name, host: spec.host, url: null, phase: 'failed', detail: `Could not ensure runner namespace ${o.namespace}.` };
 
-  const dep = await applyObject(o.k8s, c.deployments, name, buildDeploymentManifest(spec, o.namespace));
+  // Stamp this deploy so the pod template CHANGES → Kubernetes rolls the pods and
+  // (with imagePullPolicy Always) re-pulls the current `:latest` the CI published.
+  const dep = await applyObject(o.k8s, c.deployments, name, buildDeploymentManifest(spec, o.namespace, new Date().toISOString()));
   if (!dep.reachable) return { ok: false, live: false, action: 'noop', name, host: spec.host, url: null, phase: 'offline', detail: UNREACHABLE };
   const svc = await applyObject(o.k8s, c.services, name, buildServiceManifest(spec, o.namespace));
   const ing = await applyObject(o.k8s, c.ingresses, name, buildIngressManifest(spec, o.namespace, o));

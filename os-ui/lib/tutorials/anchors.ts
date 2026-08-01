@@ -11,10 +11,11 @@
  * `${path}.${name}` and must stay stable across refactors (rename here + in the
  * tab together). The id convention is enforced at module load (see assertions).
  *
- * Coverage note (kind): for the gate we wire the Data and Agents tabs fully and
- * stub the rest. The engine degrades gracefully when an anchor is absent (it
- * shows a "open this tab to follow along" fallback rather than crashing), so the
- * remaining eight reconcile cleanly at consolidation without engine changes.
+ * Coverage note: Data, Agents, Files, Monitoring, Strategy, Governance,
+ * Dashboards and Software are wired; the remaining tabs declare their anchors
+ * here but do not spread them yet. The engine degrades gracefully when an anchor is absent (it shows an
+ * "open this tab to follow along" fallback rather than crashing), so those tabs
+ * reconcile cleanly at consolidation without engine changes.
  */
 
 /** The HTML attribute name carrying a tutorial anchor id. */
@@ -44,6 +45,8 @@ export const ANCHORS = {
     load: 'data.load',
     clean: 'data.clean',
     document: 'data.document',
+    harmonize: 'data.harmonize',
+    validate: 'data.validate',
     publish: 'data.publish',
     query: 'data.query',
   },
@@ -75,17 +78,20 @@ export const ANCHORS = {
   },
   software: {
     sandbox: 'software.sandbox',
-    describe: 'software.describe',
+    define: 'software.define',
+    design: 'software.design',
     build: 'software.build',
-    run: 'software.run',
-    deploy: 'software.deploy',
+    // Test replaces the old Preview stage; Publish replaces Operate. The anchor
+    // STRING values stay stable ('software.preview'/'software.operate') so existing
+    // tutorial content keeps resolving — only the key (the stage vocabulary) changed.
+    test: 'software.preview',
+    publish: 'software.operate',
   },
   science: {
     sandbox: 'science.sandbox',
-    features: 'science.features',
-    train: 'science.train',
-    register: 'science.register',
-    deploy: 'science.deploy',
+    define: 'science.define',
+    predict: 'science.predict',
+    promote: 'science.promote',
   },
   metrics: {
     sandbox: 'metrics.sandbox',
@@ -95,9 +101,11 @@ export const ANCHORS = {
   },
   dashboards: {
     sandbox: 'dashboards.sandbox',
-    pick: 'dashboards.pick',
-    compose: 'dashboards.compose',
-    share: 'dashboards.share',
+    define: 'dashboards.define',
+    design: 'dashboards.design',
+    build: 'dashboards.build',
+    view: 'dashboards.view',
+    govern: 'dashboards.govern',
   },
   'big-bets': {
     sandbox: 'big-bets.sandbox',
@@ -128,8 +136,8 @@ export const ANCHORS = {
   monitoring: {
     sandbox: 'monitoring.sandbox',
     scope: 'monitoring.scope',
-    attention: 'monitoring.attention',
-    lenses: 'monitoring.lenses',
+    agents: 'monitoring.agents',
+    data: 'monitoring.data',
   },
 } as const;
 

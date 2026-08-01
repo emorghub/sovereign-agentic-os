@@ -13,7 +13,917 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
-_Nothing yet._
+## [os-ui 0.6.34] — 2026-07-31
+
+### Changed
+- **Dashboards read via governed SQL — Cube is off EVERY read path now.** A native
+  ECharts panel resolves its numbers through the **same compiled-SQL metrics path**
+  the Metrics tab uses (`exploreMetric`), not Cube: each panel measure is resolved
+  to its governed metric (RLS-scoped registry) and served as one governed `SELECT`
+  over the physical Gold mart, run **as the viewer** (Trino/OPA row & column
+  security). A chart's number is therefore **the explorer's number by
+  construction** — same measure member, same slice, same viewer identity, same
+  honesty gate — so the BI layer and the Metrics tab can never disagree. The panel
+  API response shape is unchanged (rows / mode / pending / warning / missingMembers
+  / securityContext / sql), so the UI is untouched — a pure backend resolution swap.
+- **Alerts evaluate via governed SQL, as the rule's owner.** An alert now resolves
+  its metric value through `exploreMetric` (Cube off the read path) evaluated **as
+  the rule's OWNER** — an owner-delegated token minted from the governed user
+  directory (never a service account, never the cron-triggerer's identity) — so the
+  threshold fires on exactly the number the owner sees under their own RLS. This
+  also fixes the prior broken lookup that assumed a member's prefix was the dataset
+  id (it is the cube view name); the member is now resolved through the metrics
+  registry, the same way dashboards resolve it.
+- **Window metrics are served as SQL.** Rolling-window and running-total measures —
+  which used to return "pending, serves via Cube after Publish" — now compile to a
+  faithful Trino window query: the base measure is aggregated per time bucket, then
+  a window accumulator runs over the bucketed series (`SUM(…) OVER (ORDER BY bucket
+  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` for a running total; a trailing
+  `ROWS BETWEEN n-1 PRECEDING AND CURRENT ROW` frame for a last-n window; a group-by
+  dimension `PARTITION`s the series). A window measure **requires a time dimension +
+  granularity**; without one (or when the trailing unit doesn't match the
+  granularity) it returns the honest pending/unusable answer with a clear reason —
+  never a wrong number. The frame counts existing buckets, not calendar units
+  (documented), and the executed SQL carries no comments.
+
+### Fixed
+- **Alert honesty: an unreachable lakehouse SKIPS, never fires.** When Trino is
+  unreachable, alert evaluation returns status **`unavailable`** and is skipped —
+  never a fabricated value and never a false alarm; an un-computable/empty metric is
+  **`pending`** (skipped, retried next tick). Only a genuinely computed number is
+  compared to the threshold.
+
+## [os-ui 0.6.33] — 2026-07-31
+
+### Fixed
+- **Builds ALWAYS run in the owner's personal lane — the promoted-dataset rebuild
+  hole is closed.** Rebuilding a promoted dataset's Silver targeted the domain
+  schema, whose Bronze never physically exists (promotion copies only the top
+  built layer) → TABLE_NOT_FOUND. The personal lane is now the build workspace
+  for every tier; the governed domain copy is written exclusively by the
+  publish/re-materialize CTAS. A Builder+'s Silver rebuild auto-refreshes the
+  domain copy when Silver is the published layer; with a Gold on top it stays
+  honestly STALE until the Gold rebuild republishes. Seeded governed datasets
+  whose only physical table is the domain copy are still adopted honestly.
+- **A disabled Silver Build button always says why** ("Can't build yet — …") —
+  the reason used to hide inside the collapsed "Show the code" section.
+- **Client preview FQNs match the server exactly** (hyphenated domains map to
+  underscored physical schemas; personal-lane rule mirrored client-side).
+- AI Clean-it-up renames are sanitized to identifier-safe names on apply.
+- The Silver type dropdown's no-op reads **text** (Bronze is all-text) instead
+  of the opaque "keep".
+
+## [os-ui 0.6.32] — 2026-07-31
+
+### Added
+- **Silver stage: type autodetect with approval.** The Silver panel reads the
+  governed 50-row Bronze preview and deterministically infers each column's
+  likely type from the ACTUAL values (integer/bigint/double/date/timestamp/
+  boolean — including yes/no → boolean, the original Bronze-honesty case). A
+  calm banner shows the detections; **Apply suggested types** fills the type
+  dropdowns — the user approves, then builds. Never auto-applied; columns the
+  user already typed are left alone.
+
+### Fixed
+- **Boolean cast accepts yes/no.** The Silver cast op maps yes/y/no/n
+  explicitly; other values still fall through to the strict Trino cast, so
+  genuine garbage keeps failing loudly.
+- **avg/sum on text-typed numeric columns.** Metric aggregations cast their
+  operand to double explicitly — a Gold column that skipped a Silver cast now
+  aggregates instead of failing with FUNCTION_NOT_FOUND; non-numeric values
+  still fail loudly naming themselves.
+
+## [os-ui 0.6.31] — 2026-07-31
+
+### Changed
+- **Metrics are served by direct governed Trino SQL — Cube is off the metric read
+  path.** A metric is now a **virtual declaration** compiled to one governed
+  `SELECT` over the physical Gold mart, run **as the viewer** (Trino/OPA row &
+  column security applies — the same governed path the working "live (sql)"
+  preview already used). Both saved metrics (`/api/metrics/explore`) and unsaved
+  drafts (`/api/metrics/preview`) resolve through this SQL path; every result is
+  honestly labelled `live (sql)`. The **honesty gate is preserved**: if the query
+  backend is unreachable on a real deployment, the metric returns the honest
+  *unavailable* answer — never a fabricated number. Cube stays running for
+  **dashboards only** (Phase 2 migrates those; dashboard/Cube-registration code is
+  untouched — this is a dual-run).
+
+### Added
+- **Metrics on PERSONAL datasets.** Defining, previewing and exploring a metric now
+  require only a **built Gold of any tier** — no promotion. A personal dataset's
+  metric reads the owner's private lane (`iceberg.personal_<owner>.gold_<slug>`) as
+  the owner (OPA `is_owned_personal`); a governed dataset reads the domain mart as
+  before. The gate is split into **`metricSqlReady`** (built Gold, any tier — the
+  define/serve rule) and **`metricCubeReady`** (built Gold **and** a governed tier
+  — the Cube-registration rule); `metricGoldReady` remains a back-compat alias for
+  the Cube rule, so no broken cube is ever registered on personal Gold.
+- **MetricFlow-style semantic declarations.** Defining a metric now emits a
+  portable dbt-MetricFlow YAML (`semantic/<slug>.yml`: `semantic_models:` with the
+  Gold-mart `ref`, primary-key entity, join-aware dimensions with time grains, and
+  measures + `metrics:`) alongside the (Cube-only) cube artifact. It is the
+  tool-agnostic contract our compiler serves as Trino SQL. Rolling-window / running-
+  total measures stay honest: no SQL form yet — they serve via Cube post-Publish
+  (Phase 2).
+
+## [os-ui 0.6.30] — 2026-07-31
+
+### Changed
+- **Gold stage (Data tab): no more Measures section.** Measures are defined once,
+  in the **Publish** stage (and the Metrics tab) — Gold is now a pure row-level
+  projection/join. A Gold rebuild **never wipes** measures already defined in
+  Publish (guarded in the store + regression-tested).
+- **Gold "Keep columns" starts full.** All columns are kept by default — remove
+  the ones you don't want, or **Remove all** and hand-pick. **Add all columns**
+  fills every column of the base *and* any joined datasets in one click.
+- **One clear build flow on Bronze, Silver and Gold.** Each build stage now has
+  exactly one main action (upload / **Build Silver version** / **Build Gold
+  version**); the result and a big **Continue →** appear only after the work
+  actually succeeded. The always-visible bottom "next stage →" shortcut on those
+  three stages — which looked primary but built nothing — is gone. Stages remain
+  voluntarily skippable via the stage rail on top.
+
+## [os-ui 0.6.29] — 2026-07-31
+
+### Security
+- **Gold "JOIN TO" picker leaked datasets across domains.** The join picker was
+  gated only on `canView`, which passes for an owner's assets in their *other*
+  domains and for every certified product tenant-wide — so e.g. Kiekert datasets
+  were offered while operating in agentic-leader. The picker now applies the same
+  active-domain narrowing as the main Data list (My/Domain/Company of the
+  operating domain only; the Marketplace catalog stays the only cross-domain
+  surface). Covered by a regression test that fails on both bypasses.
+
+### Changed
+- **Friendlier duplicate dataset names.** Creating a dataset whose name is taken
+  in this domain no longer just refuses: an inline note explains the clash and
+  offers a one-click **Open** of the existing dataset, or suggests picking a
+  distinguishing name (e.g. "Sales (EMEA)").
+
+## [os-ui 0.6.28] — 2026-07-31
+
+### Changed
+- **Data tab: AI is built into each stage's natural flow — the bottom "Assistant"
+  box is gone.** Every stage now carries big, clear ✨ actions at the top instead
+  of a collapsible helper at the bottom:
+  · **Define (Silver):** "✨ Draft documentation" (fills the description, column
+    notes and quality rules) and "✨ Clean it up" — a NEW structured assistant
+    stage that proposes casts/trim/rename/primary-key/drop/dedupe constrained to
+    the real columns and **fills the guided Silver cleaning controls directly**
+    (the user reviews, then builds — the AI never builds on its own).
+  · **Ingest:** "✨ Explain this error" — appears only when an ingest/preview
+    error actually exists, right next to it.
+  · **Harmonize:** "✨ Propose a clean/join" in the section-title row.
+  · **Validate:** "✨ Explain suggested checks" (with profile suggestions) or
+    "✨ Suggest quality rules".
+  · **Publish:** "✨ Suggest measures" before the Sharing section.
+  Same governed, audited, cost-capped assistant model underneath — only the UX
+  moved into the flow.
+
+### Added
+- **Two-path dataset creation.** "+ New dataset" now opens a calm chooser first:
+  **📥 Ingest new data** (bring a file/extract in — raw Bronze) or **🔗 Create a
+  curated dataset** (combine existing governed datasets you can read into one new
+  joined dataset — names it, then guides you to the Harmonize join builder). The
+  long-planned split, finally first-class; `origin: 'curated'` is recorded
+  nil-safely (no migration, byte-stable yaml for existing records).
+- **Dataset rename is now discoverable** — the bare ✎ pencil glyph next to the
+  name is a labelled "✎ Rename" button (the physical table slug stays stable, as
+  before).
+
+## [os-ui 0.6.27] — 2026-07-31
+
+### Added
+- **Business Processes: link Data & Metrics to a process.** The workflow detail
+  gains a "Data & Metrics" tab (count badge): link governed datasets and metrics
+  as calm chips (name + My/Domain/Company scope badge) that deep-link to the
+  artifact (`?focus=<id>`), with a viewer-scoped picker; owner/editor manages,
+  viewers read. Ids are re-resolved through the same canView guards as the
+  Data/Metrics tabs (non-visible ids silently dropped — no existence leak);
+  stored nil-safe (`links: {datasets, metrics}`, no migration) and included in
+  the PDF export (fail-soft name resolution).
+
+### Changed
+- **Business Processes renames (display only):** "Tacit" → **"Expert
+  Knowledge"** and "Rules" → **"Business Rules"** across the tab (detail tabs,
+  panels, step inspector, empty states, PDF export). Internal enums/fields/MCP
+  params (`tacit`, `rules`) stay stable per the OS display-rename convention.
+
+### Fixed
+- **Metric Preview no longer fails with "SQL comments are not allowed on the
+  query path".** The pre-save preview (`previewTrinoSql`) prepended a two-line
+  `--` comment header to the generated SQL, which the governed query guard
+  rightly rejects — so every pre-save preview (even a plain count) failed. The
+  executed SQL is now comment-free; the guard is untouched; the "Drop to SQL"
+  display keeps its explanatory comment. Test-pinned (the preview SQL must
+  contain no `--`/`/*` and equal the SQL that actually ran).
+
+## [chart+ops] — 2026-07-31 (afternoon)
+
+### Fixed
+- **Cube memory revert closed for good:** Helm v4 SSA upgrades conflicted with
+  the live kubectl hot-fixes and one upgrade reverted Cube to 768Mi (OOM
+  crash-loop again). Cube's 1Gi/4Gi is now pinned in the RELEASE's user values
+  (`--set`, persisted) as well as the chart, and PVC sizes match live reality.
+- **Forgejo cleanup cron actually live:** Helm v4 `--reuse-values` did not
+  surface the new chart-default `cron.cleanup_packages` into the release;
+  applied explicitly via `deploy/forgejo-cron.values.yaml` (`-f`, persisted) —
+  verified in the running pod's `app.ini` (reclaim on boot + nightly, >7d).
+- Re-materialized cohort dataset gold repair path documented: a Builder+ opens
+  the dataset → Edit data stages → Harmonize → Rebuild (auto-refreshes the
+  domain table); the MCP `rematerializeOnly` arg needs a fresh MCP connection
+  (stale-manifest landmine).
+
+## [os-ui 0.6.26] — 2026-07-31
+
+### Added
+- **App-build registry prune — the Forgejo registry stays near-flat instead of
+  growing forever.** Every generated CI workflow (both the `apps.ts` template
+  seeder and the vite-os/sovereign-app scaffolds) now ends with a FAIL-OPEN
+  "Prune old registry versions" step: after a successful image push it lists the
+  app's container versions via Forgejo's packages REST API (same host + same
+  `REGISTRY_PASS` as the push) and deletes everything older than the **newest 2
+  immutable SHA tags**, never touching the protected `latest` the runner pulls.
+  JSON is parsed with `node` (the ci-builder job image is node:20 — jq is not
+  installed there), and any failure only warns — a prune failure can never fail
+  a green build. The pure policy (`containerVersionsToPrune`, keep-N=2) is
+  unit-tested, and both generated steps are executed end-to-end in tests against
+  a stubbed registry. This is the app-side half of the fix for the Forgejo
+  volume filling up (the accumulated `/data/packages` images that broke all
+  Software-tab builds); the chart-side half is the `cron.cleanup_packages`
+  below. Existing app repos keep their old workflow until their next scaffold;
+  the Forgejo cron covers them.
+
+### Verified
+- **Domain isolation re-audited across Agents · Software · Dashboards ·
+  Science:** all four tabs already narrow My + Domain tiers to the ACTIVE domain
+  (`session.domains` via `resolveDomainScope`) for every role including admin,
+  with Company/Marketplace intentionally tenant-wide; 17/17 domain-scope tests +
+  737/737 tab tests pass. No leak found; no code change needed.
+
+## [chart] — 2026-07-31
+
+### Added
+- **Forgejo package-cleanup cron** (`[cron.cleanup_packages]`: daily @midnight +
+  at start, reclaim blobs unreferenced >7 days) so the in-cluster registry
+  self-manages — the durable chart-side fix for the registry filling
+  `gitea-shared-storage` (95% full → docker-push 500s → every app build red).
+  Takes effect on the next Forgejo pod restart.
+- **Forgejo disk-usage alert CronJob** (`forgejoDiskAlert.*`, default off):
+  hourly read-only `df` on the Forgejo pod's `/data`; ≥80% → WARN log + email
+  via the in-cluster mail smarthost (log-only when no mail host). Turns the
+  silent disk-full failure mode into a heads-up.
+- PVCs expanded live (recorded here for ops history): `gitea-shared-storage`
+  2→20Gi, `ci-runner-data` 1→5Gi.
+
+## [chart] — 2026-07-30
+
+### Fixed
+- **Cube memory raised 768Mi → 4Gi (limit) / 1Gi (request) — the real cause of the
+  "wrong metric numbers".** On the live cluster the Cube pod was `OOMKilled` in a
+  CrashLoopBackOff (884 restarts over 3.5 days) at the old 768Mi limit, so
+  `/cubejs-api/v1/meta` never came up and EVERY metric silently fell back to the
+  fabricated offline-mock (the ~286,936 hash noise). Cube.js (Node) holds the whole
+  schema + query plans in-heap, so 768Mi is far too small for a real cohort schema;
+  the node has ~107 GiB allocatable. Patched live and persisted in
+  `charts/sovereign-agentic-os/values.yaml` so a future `helm upgrade` can't
+  re-introduce the OOM. After recovery a Northpeak metric resolved to a real number
+  with `mode:"live"`. (Pairs with the os-ui 0.6.24 honesty gate, which independently
+  guarantees an unreachable Cube can never again show a fabricated number.)
+
+## [os-ui 0.6.25] — 2026-07-30
+
+### Changed
+- **Data stages are now voluntarily skippable, each clearly described, with a data
+  preview on every stage.** (1) No stage hard-gates navigation any more — you can jump
+  straight from Bronze to Publish without building Silver/Gold first (a single-table or
+  pass-through Gold is legitimate; not every dataset needs cleaning or a join). The ✓
+  stays honest: `completed()` still reads real layer state, so a skipped stage is simply
+  left unchecked, never faked. (2) Each stage's description says plainly what it does and
+  flags the refinement stages as optional. (3) The governed 50-row **Data preview**
+  (the one that was only on Bronze/Silver) now appears on **Gold, Validate and Publish**
+  too — one reusable block reading the highest built layer through the governed Trino
+  path. (`lib/data/stages.ts`, `components/data/DataBuilder.tsx`; stages test updated.)
+- **A published dataset opens in a calm PREVIEW + TALK-TO-DATA landing**, not the
+  builder. A dataset shared to the Domain (asset) or certified to the Company (product)
+  now lands on a preview + Talk-to-Data view (with its connected metrics/dashboards/agents)
+  — because most people want to USE it, not rebuild it — behind a prominent **"✎ Edit
+  data stages"** button (top-right) that opens the full 5-stage builder, with a "← Done
+  editing" way back. Personal/unpublished datasets open in the builder as before.
+
+## [os-ui 0.6.24] — 2026-07-30
+
+### Fixed
+- **Metrics never fabricate a number again — an unreachable Cube is an honest
+  outage, not a made-up KPI.** Diagnosed from the "metrics return absurd values"
+  report (a count on a 40-row Product table returned ~286,936). Root cause: it was
+  NOT a join fan-out — the generated Cube schema is correct (`COUNT(*)` over one
+  table, no joins) and real Trino counts 40. The metric explorer's resolver
+  (`exploreMetric`, `lib/metrics/build/explore-server.ts`) probes Cube via
+  `liveMetricsReachable()`, and when Cube is unreachable it fell back to an
+  **offline-mock that fabricates the value by hashing** the member+region
+  (`hash % 90000 + 10000` per region, summed over DE/FR/US → the ~287k figure).
+  On the live cluster Cube was unreachable, so every metric showed hash noise
+  presented as real. Now, on a real deployment (`OS_PROFILE ≠ local`), an
+  unreachable Cube returns `mode: 'unavailable'` with **no number** (rows: []) and
+  a clear "metric temporarily unavailable — the semantic layer is unreachable"
+  notice, wired through the client `ExploreResult` type and the explorer UI. The
+  offline-mock stays ONLY on the local/laptop teaching flow (no cluster), where a
+  demo value is legitimate and clearly labelled. (The separate infra task — why
+  Cube is unreachable on the cluster — is tracked apart; this change guarantees a
+  fabricated number can never be shown as a KPI regardless.)
+
+## [data-runner] — 2026-07-30
+
+### Changed
+- **DuckDB removed from the ingest service — one query engine (Trino) for the whole
+  sovereign stack.** The data-runner was the last place DuckDB lingered (it read the
+  uploaded file to infer the Bronze schema). The reader is now **PyArrow** (already a
+  PyIceberg dependency), and `duckdb` is dropped from `requirements.txt` and the image.
+
+### Fixed
+- **Bronze is now truly RAW — no automatic type coercion on CSV upload.** A CSV
+  column of `yes`/`no` was being auto-converted to boolean `true`/`false` in the
+  Bronze Iceberg table (also `40`→bigint, `2024-01-01`→date), silently rewriting the
+  user's data — DuckDB `read_csv_auto()` inferred types from the text. The PyArrow
+  reader forces **every delimited-text (CSV/TSV/TXT) column to string** (raw landing;
+  values preserved literally), while Parquet/JSON keep their real embedded types
+  (typed source formats). Type conversion becomes an explicit, opt-in step in Silver,
+  never guessed in Bronze. (`images/data-runner/app.py` `_read_to_arrow`;
+  `test_bronze_raw.py` proves yes/no stays string and DuckDB is absent, against the
+  real PyArrow engine.)
+
+## [os-ui 0.6.23] — 2026-07-28
+
+### Fixed
+- **A failing CI is now loud in Test + Publish — no more "looks complete" while the
+  app is frozen on an old release.** The honest-pipeline derivation force-greened
+  EVERY stage for a live app (a fix for stale/cached CI status) — but it also
+  force-greened a genuinely `failing` "Build image (CI)" stage, so an app whose
+  latest build broke still showed "Build & deploy complete," all green, in both
+  stages (the exact "looks good until I open the app" trap). Now a live app's
+  stages are still shown complete when the CI status is merely pending/stalled
+  (benign reconcile-lag), but a genuinely **failing** stage stays red and both
+  Test and Publish show: "The latest build FAILED — the app is live on an EARLIER
+  release, so your recent changes are NOT deployed. Fix the build error and
+  re-commit: Build image (CI)." Shared derivation, so the two surfaces still agree.
+
+## [os-ui 0.6.22] — 2026-07-28
+
+### Changed
+- **A built story page can no longer be left unwired — the section registry is now
+  auto-generated.** A `sovereign-app`'s nav is driven by `src/template/sections.tsx`;
+  previously the build agent had to hand-edit that central file per story and did so
+  unreliably, so a written-but-unregistered page was invisible ("builds fine, no
+  feature shows"). Now, on every commit, the OS deterministically regenerates
+  `sections.tsx` from the committed page files under `src/epics/<epic>/<story>/`
+  (`lib/software/sections-registry.ts`, wired into `commitToApp`) — one top-level
+  PascalCase page component per story folder becomes one nav section. Sovereign-app
+  only; a no-op for other templates; fail-open (never blocks a commit). The build
+  directive now tells the agent to just write the page (registration is automatic;
+  don't hand-edit the generated file).
+
+## [os-ui 0.6.21] — 2026-07-28
+
+### Fixed
+- **The intermittent "commit → App not found" (and the same class of false
+  not-found across every durable-mirror-backed store) is fixed.** The mirror's
+  by-id read (`osMirror.getDoc`, `lib/infra/os-mirror.ts`) treated a TRANSIENT
+  OpenSearch failure (5xx / auth blip / timeout-with-response) the same as a
+  genuine 404 — so a momentary hiccup on an app lookup surfaced as "App not
+  found," blocking a real `commit` mid-build (seen in the Software build log).
+  `getDoc` now distinguishes: a genuine 404 or an unreachable cluster returns
+  null immediately (offline-degrade, unchanged), but a transient non-404 error is
+  retried a few times before giving up. Still never throws — the module's
+  graceful contract is preserved. Benefits apps, data, connections, bigbets, and
+  every other store on the shared mirror.
+
+### Fixed
+- **Generated apps no longer fail to build when the agent uses common UI
+  components.** Diagnosed on a live app whose Forgejo CI was silently failing —
+  the build had written a story page importing `Alert` and `Spinner` from
+  `@sovereign-os/ui`, but the vendored package didn't export them, so the app
+  never compiled and the live URL stayed frozen on an old release (the app looked
+  "live" but showed no stories). Fixes:
+  - **Ship `Alert` + `Spinner` in the vendored `@sovereign-os/ui`** (`lib/app-ui/`,
+    now vendored into every generated app) so agent-written pages that use them
+    compile. Added the `sb-spin` keyframe to the theme.
+  - **The build directive now enumerates the EXACT `@sovereign-os/ui` exports**
+    and forbids importing anything else (Modal/Dialog/Tabs/… → a compile break),
+    with the correct patterns for Alert/Spinner/Textarea/Select — so the agent
+    stops inventing components.
+  - **The build directive now requires registering each new story page in
+    `src/template/sections.tsx` in the SAME build run** — an unregistered page is
+    invisible ("builds fine but no feature shows"), which was the other half of
+    the "no user stories in the UI" report.
+
+## [os-ui 0.6.19] — 2026-07-28
+
+### Fixed
+- **Agent graph: supervise arrows between agents can now be removed.** The graph
+  canvas let you delete explicit handoff/supervise edges, but a *derived* supervise
+  arrow (auto-drawn from a supervisor's `members`) had no remove control and ignored
+  the Delete key, so there was no way to un-wire a supervisor from a member on the
+  canvas. Editable graphs now show the `×` on every arrow (and honor Delete) —
+  removing a derived supervise arrow drops that membership (the `edges[]` entry AND
+  the `members[]` entry, via the existing `removeEdge`). View-only graphs are
+  unchanged (no remove control).
+
+## [os-ui 0.6.18] — 2026-07-28
+
+### Fixed
+- **Generated-app SSO to the OS now actually completes** (was still failing with
+  "The OS could not be reached … Load failed"). Root cause: the OS middleware
+  applied credentialed CORS to `/api/*` — but `/api/auth/me`, the endpoint the app
+  SDK's `os.whoami()` hits FIRST, sits in the always-public early-return that ran
+  BEFORE the CORS block, so that one response carried no `Access-Control-Allow-Origin`
+  and the browser blocked the cross-origin whoami. CORS is now computed first and
+  applied to every governed surface including the public auth routes (preflight
+  answered uniformly). Server-side fix — existing deployed apps start working after
+  this rolls out, no rebuild required.
+
+### Changed
+- **#146 — governed datasets now enroll in the analytics-as-code mono-repo on
+  promotion.** Promoting a dataset (Personal→Domain) marks it `gitBacked`, so the
+  existing promote hook records its **dbt model + `schema.yml`** in the `analytics`
+  Forgejo repo alongside the Cube model + dbt exposures it already wrote. The runtime
+  governed CTAS is unchanged — these are the version-controlled, review-able mirror
+  (the source OpenMetadata ingests for lineage).
+
+## [os-ui 0.6.17] — 2026-07-28
+
+### Added
+- **Delete controls across the Software Design stage**, each behind the OS-standard
+  confirm dialog (matching the archive/delete UX everywhere else):
+  - **Delete EPIC** — a whole epic (cascading its user stories + specs) was
+    previously impossible to remove in the one-epic detail view; now a danger
+    button in the epic's Edit mode, gated by a confirmation.
+  - **Delete user story** — the existing remove now confirms first (names the
+    story + warns its spec goes with it).
+  - **Delete feature / requirement / rule** — each spec item's remove now confirms
+    (names the item) instead of deleting on a single click.
+
+## [os-ui 0.6.16] — 2026-07-28
+
+### Fixed
+- **Design-stage assistant now creates EPICs & user stories again** (was returning
+  a wall of "poorly formatted markdown" with no suggestion cards). Root cause: the
+  Design/Test assistant runs on the reasoning model, which routinely wraps its JSON
+  in a sentence of preamble or a trailing note; the route's parser only stripped a
+  code fence then did a naive `JSON.parse`, so any surrounding prose failed the
+  parse and the whole reply fell back to the raw blob with zero structured
+  suggestions. Added a tolerant `parseJsonReply` (shared `lib/assistant/json-reply.ts`)
+  that recovers the first balanced `{…}` object from within prose — the "Create
+  EPICs" / "Add stories" / spec cards fire again and the visible message is the
+  model's own clean markdown.
+
+### Changed
+- **App context grants now default to Read (read-only)** — a newly granted
+  connection/data/knowledge/file/metric starts read-only (the safe default); the
+  user raises an individual item to Read+propose / Read+write when it actually
+  needs write access. The write ceiling is unchanged (builders may still grant
+  writes), only the starting value is safer.
+
+## [os-ui 0.6.15] — 2026-07-28
+
+### Fixed
+- **Archiving or deleting a software app now tears down its MCP/API connection**
+  — no more orphaned connection lingering in the Connections tab (e.g. "KIEKERT
+  NACHVERHANDLUNGS-COCKPIT MCP" surviving its app). The cascade already dropped
+  the grant on `archiveApp`/`deleteApp`, but two gaps kept the connection alive:
+  (1) the boot **re-hydrate re-registered every app's connection without checking
+  status**, so an archived app's MCP (and its OPA grant) came back on the next pod
+  restart — `rehydrateConnection` is now the single authoritative guard and never
+  resurrects an archived app; (2) `/api/connections/apps` **listed archived apps'
+  connections**, now filtered out. Restore is symmetric: `unarchiveApp`
+  re-registers the connection so it reappears immediately (not only after a
+  restart). Deleted apps already drop out of the list. Security-relevant: an
+  archived app is no longer silently callable again after a restart.
+
+## [os-ui 0.6.14] — 2026-07-28
+
+### Fixed
+- **Generated-app SSO to the OS now works** (was failing with "The OS could not
+  be reached: JSON Parse error: Unrecognized token '<'"). Root cause: nothing
+  baked the OS URL into app builds, so the app's `whoami` hit its own origin and
+  got HTML. End-to-end fix: (1) the app image build now receives
+  `--build-arg OS_API_URL=<OS_PUBLIC_URL>` (injected server-side into the seeded
+  CI at scaffold time); (2) the OS **session cookie is scoped to the shared
+  parent domain** so app subdomains carry it (host-only fallback when there's no
+  safe shared parent — never a bare TLD, OS login unaffected); (3) **CORS** now
+  allows the OS origin + `*.<appsDomain>` with credentials (never `*`); (4) the
+  app SDK **fails honestly** on a non-JSON/HTML response (clear "sign in to the
+  OS" instead of a `JSON.parse` crash), with a runtime OS-origin fallback derived
+  from the app host. **Existing apps must be rebuilt** to bake the URL; until
+  then they fail honestly rather than crash.
+
+## [os-ui 0.6.13] — 2026-07-28
+
+### Fixed
+- **Strict domain isolation across every tab.** Each artifact tab now groups by
+  visibility (Personal→My, Shared→Domain, Certified→Company) and narrows ALL
+  three tiers to the domain you're acting in — for every role including owner
+  and admin (previously `canView`/ownership and some admin special-cases
+  bypassed the narrowing, leaking agentic-leader datasets/metrics/big-bets into
+  kiekert, and grouping an owned Shared agent under "My" instead of "Domain").
+  A domainless/unassigned artifact still shows (assign it via the domain-move
+  tool). The **Marketplace catalog stays cross-domain** — it is the single
+  adoption surface: publish to Company → it lists in the Marketplace → another
+  domain adopts it → it appears under that domain's Company tier. Fixes span
+  agents, data, metrics, dashboards, files, knowledge (workflows + personal),
+  science, connections, big bets, and software.
+
+### Added
+- **Metrics tab: multi-select + bulk archive.** Per-row checkboxes + a bulk
+  action bar to archive the selected metrics (confirm-gated, honest per-item
+  result). Bulk cross-domain move is intentionally not offered — a metric
+  inherits its dataset's domain (move the dataset in Data).
+- Test coverage for the Operating Model MCP write tools (`update_operating_manual`
+  et al. already shipped; a stale MCP connection is why they weren't visible —
+  reconnect the connector to pick them up).
+
+## [os-ui 0.6.12] — 2026-07-28
+
+### Added
+- **Superadmin cross-domain artifact move** (Admin only, audited). Platform
+  admins can reassign an artifact's domain and bulk-assign every UNASSIGNED
+  artifact to a chosen domain, from the Domains admin page (type-to-confirm on
+  the bulk op). Covers all primary artifact kinds — datasets, dashboards,
+  files, workflows, personal knowledge, agents, science models, pillars, big
+  bets, connections, apps, and the base artifact store — persisting through each
+  store's durable mirror (datasets/files also update the yaml-embedded domain
+  and repoint the domain read-grant). Metrics move transitively with their
+  dataset. Creator/builder/domain_admin are denied (403); every move is written
+  to the OS audit log.
+
+## [os-ui 0.6.11] — 2026-07-28
+
+### Changed
+- **Software tab — refinement lifecycle across Test · Design · Build.** A Test
+  "Verify & Improve" finding is now a tracked refinement with a visible
+  **Proposed → Designed → Built** state, shown as the SAME list in all three
+  stages (dimension-tagged). Per-item **Design** (reasoning drafts the spec and
+  shows it), then **Build** (standard) → Built (stays visible), with the
+  design-before-build gate; plus **Design all** / **Build all** (8-cap) and a
+  **Design & Build** accelerator. Fixes the old dead-end where refinements never
+  reached Design.
+- **Generated apps are structured by epic/story.** Scaffolds emit
+  `src/template/` (fixed), `src/core/` (shared), `src/epics/<epic>/<story>/`
+  (per-story code), with thin entrypoints; the build writes each story's code
+  into its folder. Build now injects **5 build principles** (aligned to the Test
+  dimensions), and **Test verifies across 5 dimensions** — Functionality · User
+  Experience · Code Structure · Security · Documentation.
+- **Build/Deploy show live progress** via the core `ProgressStepper` (Plan →
+  Generate → Commit → Preview for build; Scaffold → … → Live for deploy), so a
+  running build/go-live is visible, not a silent flip. Developer view moves the
+  BUILD/DEPLOY console to the top full-width, code below.
+- **"Connect your AI Tool via MCP" button** is now a prominent gold pill in the
+  topbar (was near-invisible).
+
+### Added
+- **Software MCP mirrors the five governed stages** — `create_software`
+  (Define) · `design_software` (Design) · `build_software` (Build, enforces the
+  design-before-build gate + standard tier + epic/story folders) ·
+  `verify_software` (Test, 5-dimension) · `request_deploy`/`decide_deploy`/
+  `promote` (Publish). Every tool wraps the same governed server function the UI
+  uses. Raw `commit` becomes a **developer-mode escape hatch, role-gated to
+  builder+** and labeled as bypassing the staged governance.
+
+### Fixed
+- **Domain-scoping is now universal.** "My" (and Shared) artifacts narrow to the
+  domain you're acting in across dashboards, science, agents, Strategic Pillars,
+  Big Bets, Connections, the base artifacts store, and software; Company/
+  Marketplace stays tenant-wide; "All Domains" shows everything. (Folders +
+  data/files/metrics already did; Operating Manual + Workflows were already
+  correct.) Display/scoping only — no artifact ever crossed a domain boundary.
+
+## [os-ui 0.6.10] — 2026-07-28
+
+### Fixed
+- **Folders are now domain-scoped.** Switching the active domain diverges the
+  folder tree across every tab (files · knowledge · data · metrics). The
+  personal read path now honours the existing `FolderNode.domain` (list, path
+  lookup, and cascade key on `(owner, domain)`); new folders are stamped with
+  the domain you're operating in; "All" (no active domain) shows everything, as
+  the artifact lists do. Knowledge's personal "mine"/"domain" lists are narrowed
+  the same way (Marketplace stays tenant-wide). This was a display-only issue —
+  artifact CONTENTS were already correctly domain-filtered, so no data crossed a
+  domain boundary. Migration-free: existing folders keep their stamped domain.
+- **Consistent, honest pipeline status across Test and Publish.** Both stages now
+  read ONE shared derivation (`derivePipelineView`): a live, serving app (deploy
+  state `live` + a shipped release) shows every upstream stage complete in BOTH
+  surfaces — a running pod provably built, published and deployed — so a live app
+  no longer shows "Build image (CI) did not complete" in Test while Publish is
+  green. A genuine failure now surfaces the SAME marked, named stage in both
+  (Publish no longer hides a real failure behind a green badge). Non-live apps are
+  never force-greened.
+
+## [os-ui 0.6.9] — 2026-07-28
+
+### Changed
+- **Software tab redesigned into five single-purpose stages** — Define ·
+  Design · Build · Test · Publish, each owning exactly ONE function and ONE
+  assistant. Define carries a 4-template picker (Sovereign **Application** —
+  OS-session sign-in + Admin section + user directory — as the default).
+  Design is the reasoning-tier home of ALL planning: one epic at a time
+  (prev/next), read-first with an Edit toggle, assistant-left / epic-right,
+  each user story expanding to its Features · NFRs · Rules spec.
+- **Build is standard-model execution only.** A hierarchical Epics › Stories ›
+  Features tree with capped batch selection (8 features), a selection checkbox
+  distinct from a green done-✓ status, an always-visible spec with an honest
+  built-vs-pending detail (an item is built only once its story commit lands —
+  never fake-ticked), and a design-before-build gate (unspecced features are
+  not buildable). Full Define context grounds every generation.
+- **Test replaces Preview**: one "Verify & Improve" action (reasoning tier)
+  verifies each built story against its spec and turns shortfalls into pending
+  Build to-dos (missed-spec → rebuild; scope change → routed back to Design),
+  while keeping the live-pod preview. **Publish replaces Operate** (deploy,
+  review card, promote/demote, MCP surface, lifecycle).
+- **Per-stage model tiers**: reasoning for Design and Test, standard for Build
+  code generation (never auto-escalated). Honest tier badge per stage.
+
+### Added
+- **Agents tab — in-tab Trigger for API-mode systems.** Systems whose trigger
+  mode is `event` get a first-class "Trigger now" affordance (optional input +
+  result), available to in-domain consumers of a Shared system — driven by a
+  server-computed `canRun` so authorization stays server-authoritative.
+- **Connect your AI tool — Codex is now a first-class path** (above ChatGPT):
+  short copy-paste setup (`launchctl setenv` + `codex mcp add
+  --bearer-token-env-var`) with the full setup, verification and
+  troubleshooting in an expandable detail. Token stays out of the config and
+  out of any Codex chat.
+
+## [os-ui 0.6.8] — 2026-07-27
+
+### Changed
+- Software tab is now one coherent conversational product: the StageConversation
+  primitive (context header · structure twin · scoped thread · outcome sink)
+  now composes Define, Design, Preview, and Operate — each stage owns exactly
+  ONE scoped assistant, redundant shell-level assistants removed. Completes the
+  "the assistant is the flow, not a stapled-on addon" recomposition begun in
+  the Build stage.
+
+## [os-ui 0.6.7] — 2026-07-27
+
+### Added
+- Agents: writes whose target is the owner's own "My" scope now execute
+  DIRECTLY (no approval) under both read+write and Write-approval — approval is
+  reserved for Domain/Company targets; another user's personal space stays
+  unreachable by construction. Metrics is now an agent-grantable write
+  capability (define_metric). Run reports state write outcomes prominently
+  ("wrote N to My Data" / "N awaiting approval → Governance → Inbox").
+- Standard-first cost routing: validated LLM surfaces (suggest_metrics, DQ
+  propose, NL→SQL, structured stage assistants) run the standard tier first and
+  escalate to reasoning only on validation failure — one admin toggle; traces
+  attribute to the model that answered.
+- Admin Models & Providers: catalog split into "Managed AI (STACKIT)"
+  (not removable) and "Added by administrators" (removable, with reference
+  safety listing role-pin/fallback usages before deletion). Master key never
+  leaves the server.
+### Changed
+- Software Build stage recomposed as a one-epic-at-a-time journey: an ordered
+  epic checklist with honest per-epic state, a single conversational surface
+  (new reusable StageConversation primitive) replacing three stapled-on
+  assistant boxes, epic-scoped and human-readable (markdown) chat, visible
+  build outcomes, and the real deployed-pod preview (esbuild-wasm InstantPreview
+  removed).
+### Fixed
+- LiteLLM now has a fallback chain (sovereign-default/mock → premium, reasoning
+  → reasoning-fast) so a provider rate limit fails over instead of failing a
+  student's agent run.
+
+## [os-ui 0.6.6] — 2026-07-27
+
+### Added
+- Repair mode for materialization drift: `rematerializeOnly: true` on the gold
+  build (route + build_gold_join MCP tool) re-runs just the publish CTAS for an
+  already-promoted dataset — heals missing/stale domain tables without
+  re-specifying the gold spec. Builder+ only.
+
+## [os-ui 0.6.5] — 2026-07-27
+
+### Fixed
+- Promotion materialization (the "single-column dashboard" bug): approving a
+  promotion now ALWAYS materializes the physical domain table, and rebuilding
+  a promoted dataset's gold re-materializes the domain copy automatically
+  (Builder+; creators get an honest "stale" state instead). Pre-existing
+  promotions whose CTAS never landed can be healed by re-running the gold
+  build. New domainTableStale flag tracks drift honestly.
+- Silent dimension loss is gone everywhere: panels whose group-by dimension is
+  missing from the served Cube model now show an inline warning naming the
+  member and remedy (never a silently un-grouped single bar); chart creation
+  with unknown members creates-with-flag or reports rejection (never silent
+  discard); the Design assistant can propose dimensions; the dashboard palette
+  falls back to the dataset's real gold dimensions when Cube isn't serving the
+  view yet; metrics explorer surfaces dropped slice members.
+
+## [os-ui 0.6.4] — 2026-07-27
+
+### Added
+- Data Validate stage: run all defined quality checks directly, see per-rule
+  pass/fail with sampled failing rows, and get AI-PROPOSED REMEDIATIONS —
+  batch fixes (one previewed transformation for a whole failure class) or
+  per-row fixes, in a table with per-row Accept / manual edit / Skip plus
+  "Apply AI recommendations" and "Apply N accepted changes". Fixes apply via
+  governed MERGE under the caller's identity with a remediation batch id and
+  pre-apply snapshot recorded; the rule re-runs after apply and stays red if
+  the fix didn't fix. LLM-generated expressions pass a strict scalar-expression
+  validator — never raw SQL. MCP parity: propose_quality_fixes /
+  apply_quality_fixes. Per-row fixes require a documented key column (never a
+  guessed one).
+- Metrics Define: a real free-text goal input (the assistant previously
+  received a hardcoded goal), a grouped dataset picker with layer badges and
+  deliverability warnings, an assistant that finally sees column types + docs,
+  and "Suggest metrics" — candidates grounded in Strategic Pillars, the
+  Operating Model, and Business Processes, each pre-filling the editor with
+  the narrowest right dataset. Honest grounding banner when pillars/OM are
+  undefined. MCP parity: suggest_metrics.
+- Row/column statistics now shown identically on raw, silver, AND gold data
+  previews (one shared implementation).
+- MCP discoverability: approved synonym aliases on every tool family's primary
+  verbs (KPI/measure→metric, BI/report→dashboard, SOP/business workflow→
+  business process, project→big bet, north star→pillar, Google/Microsoft/AWS/
+  Snowflake/Databricks→connection, ETL/refresh→sync, …) + a collision lint
+  test guarding alias uniqueness across families.
+### Changed
+- "Workflows" is now displayed as "Business Processes" everywhere user-facing
+  (nav, pages, guides, tutorials, PDF export, MCP descriptions). Internal
+  routes, ids, and MCP tool names unchanged.
+
+## [os-ui 0.6.3] — 2026-07-27
+
+### Added
+- MCP parity for the scheduled-sync engine: `set_dataset_sync` (configure
+  "keep in sync" with the same per-source mode/cursor locking the panel
+  enforces — Kajabi/Salesforce cursors auto-locked, cursorless resources
+  honestly refuse incremental), `sync_dataset_now` (manual/reset trigger,
+  verbatim run record, honest lease-skip), and `get_sync_status` (config,
+  run history, watermark, quarantine, next scheduled run) — all through the
+  same governed store gates as the HTTP routes. Data tab MCP context/guide
+  now teach the keep-in-sync path.
+
+## [os-ui 0.6.2] — 2026-07-26
+
+### Fixed
+- Metric Preview (#142 close-out): the live diagnosis proved the metric→Cube
+  sidecar sync WORKS (~10s end-to-end); the real gap was the pre-save Preview
+  querying Cube for a member that cannot exist yet. Unsaved drafts now preview
+  via a governed Trino SQL query under the viewer's own identity (honestly
+  labelled "live (sql)"); the Cube-served value takes over after Publish.
+  Rolling-window shapes state honestly that they have no pre-save preview.
+- Metric build `reload()` no longer pings /meta and calls it done — it awaits
+  actual schema delivery (bounded ~12s) so builds report delivered vs syncing
+  truthfully.
+- Cube schema refresh (`schemaVersion`) no longer silently disappears when the
+  SQL API is disabled; the model-sync sidecar now prunes models for deleted
+  datasets (after successful fetches only) and logs a heartbeat.
+- Views for measure-less datasets expose the promised `count` fallback.
+
+## [os-ui 0.6.1] — 2026-07-26
+
+Deferred-hardening release: everything the 0.6.0 audit consciously postponed,
+plus same-day fixes for user-reported issues.
+
+### Security
+- query-tool and data-runner accept an optional shared service-bearer token
+  (chart-generated Secret, constant-time check, opt-in `serviceBearer.enabled`,
+  health endpoints open) — network reach alone no longer equals identity.
+- User-app pod manifests now assert `runAsNonRoot`; scaffolds emit numeric
+  image UIDs (kubelet can't verify names); the live app was rebuilt through
+  the governed pipeline and the apps namespace targets Pod Security
+  `restricted`.
+### Changed
+- ~276 API route handlers migrated onto one `withRoute()` wrapper (auth →
+  parse → error envelope; per-route status defaults preserved byte-identically;
+  ~2,900 lines of hand-rolled boilerplate removed). The security tripwire now
+  sweeps the whole route tree: every route must be guarded or on an explicit
+  unauthenticated-by-design list. Streaming/OAuth/auth-boundary/protocol routes
+  deliberately stay hand-rolled.
+- `globals.css` (6,629 lines) split into `app/styles/*` with byte-identical
+  emitted CSS (proven by build-output diff).
+- Science tab now honors the domain's Science layer (hidden when explicitly
+  off; fail-open on unknown); "ML layer" renamed to "Science layer" in the UI
+  (internal keys unchanged).
+### Fixed
+- LLM Gateway "Budget (weekly)" no longer shows a fake $0: it reports real
+  7-day EUR spend from the same traces and prices as Monitoring, with honest
+  states for unpriced models, unreachable telemetry, and unset budgets.
+- Embedded tools: consoles whose SPAs load root-absolute assets (Langfuse and
+  Dagster are Next.js apps whose `/_next/*` chunks collided with os-ui's own
+  `/_next` behind the `/tools/<key>` prefix and 404'd → blank iframe under the
+  overlay header) no longer render an empty frame. The tool registry now carries
+  per-tool `ownTab` metadata; such tools (Langfuse, Superset, Dagster,
+  Featureform, and WebSocket-bound JupyterHub — previously raw 501 JSON) show
+  the Tier-2 "opens in its own tab" card with the tool's own console link.
+  Verified-working embeds (MLflow, Cube — relative asset URLs — plus Forgejo and
+  LiteLLM) are untouched. New `GET /api/tools/[tool]` reports the embed mode,
+  guarded identically to the proxy route (session + per-tool role gate).
+
+## [os-ui 0.6.0] — 2026-07-26
+
+Whole-codebase audit + refactor release (six parallel audits: architecture, security,
+dependencies, dead code, docs, tests). No feature changes; structure, security and honesty.
+
+### Security
+- Connector egress is deny-by-default for in-cluster targets (bare hostnames, `*.svc`,
+  `*.cluster.local`, `localhost`, `::1`, `fe80::/10`) — closes a server-side request
+  forgery path from user-supplied connector endpoints; internal hosts now require an
+  explicit allowlist entry.
+- User-deployed app pods hardened (caps-drop, no privilege escalation, seccomp) and the
+  apps namespace gets Pod Security `baseline` + default-deny NetworkPolicies; app scaffolds
+  now build non-root images (`nginx-unprivileged`, `USER node`).
+- query-tool and data-runner accept ingress only from os-ui; query-tool `/query` enforces
+  read-only single statements.
+- Client-supplied `viewerRegion` is honored only for admin view-as; live RLS context
+  otherwise derives from the session.
+- Removed a stale tracked script copy that carried a hardcoded exercise credential
+  (credential rotated).
+### Changed
+- Shared auth boundary (`requirePrincipal`/`errorResponse`), `edit-scope`, and `cron-util`
+  lifted to `lib/core` (re-export shims keep all imports working); dataset-schema consumed
+  via the `lib/data` index; the two 2k-line MCP tool files split into 19 per-domain modules;
+  `app/` pages organized into route groups mirroring the sidebar (URLs unchanged);
+  scope/tier/folder helpers consolidated into `lib/core`.
+- ARCHITECTURE.md rewritten to the four-ring model (core · infra · tabs · shared services)
+  with a verified module and API-directory map.
+### Removed
+- ~3,700 lines of dead code: 30 unreferenced files (old monitoring drawer, pre-redesign
+  panels, retired workbench/tool-embed surfaces), 26 dead exports, the orphaned
+  workbench-session route and its config keys, unreferenced brand bitmaps, dead Helm values
+  keys, unused pip/npm dependencies.
+### Fixed
+- dbt-ingestion S3 endpoint pointed at removed SeaweedFS; now MinIO.
+- `ML_TRAINER_IMAGE` is actually wired from Helm values into the os-ui deployment.
+- The `/agents` route no longer eagerly ships a 298 KB font payload (lazy-loaded on PDF export).
+### CI / tests
+- GitHub CI now runs the full TypeScript suite, all Python image test suites and the
+  license gate (previously build-only). +43 targeted tests: session-crypto verification,
+  governance approvals route, role floors, sync tenant scoping, connector error paths
+  (401/malformed/429 mid-pagination), web-fetch's first tests, data-runner failure modes.
+- Broker images get committed lockfiles (`npm ci`); Docker build context slimmed ~50 MB.
+
+## [os-ui 0.5.99] — 2026-07-26
+
+### Added
+- **Kajabi connector with scheduled sync** — a new `kajabi-api` connection template (Supported
+  Connectors gallery, own vendor stack, install guide) over Kajabi's public API
+  (`api.kajabi.com/v1`, OAuth client-credentials from **Settings → Public API**; the ONE vaulted
+  credential is `client_id:client_secret`, never on the record). Mirrors the Salesforce shape:
+  hand-built never-throw typed client (`os-ui/lib/connections/kajabi.ts`), real health probe
+  (token grant + `GET /v1/sites`), resource discovery (curated documented-resource map — the API
+  has no describe endpoint), and the **api-batch sync strategy**: JSON:API pages stream to the
+  data-runner `/ingest-rows` with `_loaded_at`/`_batch_id` lineage; first load replaces (creates
+  Bronze), incrementals delete-by-batch-id + append with deterministic retry windows. HONEST
+  per-resource cursors (`os-ui/lib/connections/kajabi-resources.ts`, enforced in SyncPanel + the
+  slice runner): only `purchases` has a true update cursor (`updated_at`);
+  contacts/customers/orders/form_submissions are created-at-only (new records; edits need a full
+  refresh); transactions/offers/products/courses/forms/tags are full-refresh only; deletes never
+  detected; Kajabi publishes no rate-limit contract (429s surface honestly). `api.kajabi.com`
+  added to the egress allowlists (lib, chart, connector overlay).
+
+## [os-ui 0.5.98] — 2026-07-26
+
+### Fixed
+- **CI status now reads the real run outcome.** Software CI badges read the most-recent run result
+  from the Forgejo Checks API; a re-run updates the badge without a pod restart.
+- **Repo-secret self-heal.** If a required repo secret is missing it is written on the next build,
+  removing a class of silent build failures that required manual operator intervention.
+
+## [os-ui 0.5.97] — 2026-07-26
+
+### Fixed
+- **Software commits were silent no-ops.** The Forgejo contents-API `PUT` requires the blob's
+  current sha for updates; previous writes omitted it, so every commit after the first returned
+  422 and nothing was persisted. Writes are now sha-aware (fetch current sha, pass it on update);
+  the pipeline surface is honest about the outcome; and a self-heal pass reconciles any apps left
+  in a stale state.
+
+## [os-ui 0.5.88–0.5.96] — 2026-07-25
+
+Batch of features shipped across merge commits `fb9b8ae`, `baf0636`, `1a2e54c`, `83f97fb`, `56c4549`
+(see individual commit messages for detail).
+
+### Added
+- **Native ECharts dashboards (Tier-1).** Replaces the Superset iframe embed with server-rendered
+  ECharts panels queried directly from Cube via the governed SQL API (per-user RLS, no `<iframe>`).
+  Tier-2 keeps Power BI / Tableau / Superset as external "open in own tab" links. Dashboard build is
+  a 5-stage flow (Define · Design · Build · View · Govern) with a per-stage AI assistant.
+- **Monitoring truth.** Agent-run token/cost accounting is now hydrated from the live Langfuse trace
+  on read (not a cached estimate); detail expands in the main window with rich agent diagnosis;
+  per-model EUR/1M pricing is admin-editable in Models & Providers; real STACKIT pricing wired for
+  cost display.
+- **FiveTran-style scheduled incremental sync (Wave 1 + Wave 2).** Connectors support full-refresh,
+  append (`_loaded_at`/`_batch_id` lineage), and cursor-based incremental modes. A durable sync-runs
+  store tracks cursor watermarks and quarantines after 10 consecutive failures. Per-dataset CronJob
+  provisioning; sync history and stale-downstream hints in the UI; data-runner append mode. Wave 2
+  adds query-tool concurrency guards (schema-gated INSERT-SELECT / MERGE / DELETE-by-batch-id /
+  expire_snapshots / optimize).
+- **Sovereign app template** — the default scaffold for new Software apps: `AppShell` +
+  OS-delegated identity + multi-domain scoping + admin/user-directory + MCP link +
+  `build-contract` README. Four template options in the Define picker: Application / Website /
+  APIs only / Empty.
+- **Software Build-stage epic/story tree.** Epics panel left, build chat right, a General
+  super-epic; Design · Build · Test · Review actions per story; honest preview shapes
+  (no fake "deployed" state); deployed-rollout fix.
 
 ## [os-ui 0.5.46] — 2026-07-19
 

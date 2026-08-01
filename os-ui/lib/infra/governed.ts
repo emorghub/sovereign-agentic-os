@@ -3,6 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
+import { serviceBearerHeader } from '@/lib/infra/service-bearer';
 import type { Role } from '@/lib/core/session';
 
 /**
@@ -189,6 +190,46 @@ async function cubeDimensionsFor(query: CubeQuery): Promise<Set<string>> {
   return out;
 }
 
+/** One cube/view as Cube's /meta reports it — the fields the native dashboard panel
+ *  builder needs to offer measures/dimensions/time dimensions for a governed view. */
+export type CubeMetaView = {
+  name: string;
+  measures: string[];
+  dimensions: string[];
+  timeDimensions: string[];
+};
+
+/**
+ * Read Cube's /meta (measures + dimensions + time dimensions per cube/view), used by the
+ * dashboards panel builder to offer the members of a governed view. Returns an empty list
+ * when Cube is unreachable (offline teaching flow) so callers degrade gracefully — the
+ * builder falls back to the members it already knows from the metric registry.
+ */
+export async function cubeMeta(): Promise<CubeMetaView[]> {
+  const res = await withTimeout(
+    `${config.cubeUrl}/cubejs-api/v1/meta`,
+    { method: 'GET', headers: { accept: 'application/json' } },
+    2500,
+  );
+  if (!res || !res.ok) return [];
+  try {
+    const data = (await res.json()) as {
+      cubes?: { name?: string; measures?: { name?: string }[]; dimensions?: { name?: string; type?: string }[] }[];
+    };
+    return (data?.cubes ?? []).map((c) => {
+      const dims = (c.dimensions ?? []).filter((d) => typeof d?.name === 'string');
+      return {
+        name: String(c.name ?? ''),
+        measures: (c.measures ?? []).map((m) => m?.name).filter((n): n is string => typeof n === 'string'),
+        dimensions: dims.filter((d) => d.type !== 'time').map((d) => d.name as string),
+        timeDimensions: dims.filter((d) => d.type === 'time').map((d) => d.name as string),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 export async function cubeLoad(
   query: CubeQuery,
   opts: { securityContext?: Record<string, unknown> } = {},
@@ -254,7 +295,7 @@ export async function queryRun(sql: string, principal?: string, schema?: string)
     `${config.queryToolUrl}/query`,
     {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      headers: { 'content-type': 'application/json', accept: 'application/json', ...serviceBearerHeader() },
       body: JSON.stringify(body),
     },
     8000,
@@ -310,6 +351,9 @@ export async function executeRun(
   sql: string,
   identity: ExecuteIdentity,
   schema?: string,
+  // Interactive default stays 15s; long-running callers (the scheduled-sync
+  // executor — config.syncStatementTimeoutMs) pass their own budget explicitly.
+  timeoutMs = 15000,
 ): Promise<ExecuteResult> {
   const body: Record<string, unknown> = {
     sql,
@@ -323,10 +367,10 @@ export async function executeRun(
     `${config.queryToolUrl}/execute`,
     {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      headers: { 'content-type': 'application/json', accept: 'application/json', ...serviceBearerHeader() },
       body: JSON.stringify(body),
     },
-    15000,
+    timeoutMs,
   );
   if (!res) throw new Error('Could not reach query-tool');
   const text = await res.text();
