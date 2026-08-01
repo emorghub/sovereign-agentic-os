@@ -296,7 +296,7 @@ osUI:
     # 0.1.11 = Agents-tab builder rebuild: globalThis store fix (AGENT.md/MEMORY.md
     # now load), single Auto/Reasoning/Execution model toggle (real sovereign-*
     # ids), React Flow drag-and-drop graph builder, master-detail rail + templates.
-    tag: "0.5.66"   # EM: pinned to DMC/upstream current (chart ships a stale 0.3.1 here)
+    tag: "0.6.34"   # EM: pinned to upstream current (chart ships a stale dev default here)
   # CANONICAL PUBLIC URL — the apex host. OS_PUBLIC_URL derives from this (os-ui.yaml
   # reads `.Values.osUI.publicUrl` first, only falling back to the `os.<zone>` ingress
   # host). Pinning it here makes the apex authoritative so a `helm upgrade` can NEVER
@@ -360,7 +360,7 @@ agentRuntime:
     # 0.1.1 = plan(reasoning tier)->execute(27B tier) two-tier hand-off in the IR
     # interpreter. MUST be rebuilt + pushed (scripts/build-images.sh / make
     # stackit-images ARGS=--push) before the helm upgrade or the pod ImagePullErrors.
-    tag: "0.1.1"
+    tag: "0.1.2"
 
 # Bundled local mock model is the LiteLLM backend in self-hosted mode (enabled by
 # the chart default + values.selfcontained.yaml) — pull its image from ghcr too.
@@ -414,12 +414,12 @@ softwareRunner:
 queryTool:
   image:
     repository: ghcr.io/jashwanthv07/sovereign-os/query-tool
-    tag: "0.4.1"   # 0.4.1 = execute_guard sanitize_ident(domain) — hyphenated-domain mart write fix
+    tag: "0.6.1"   # 0.4.1 = execute_guard sanitize_ident(domain) — hyphenated-domain mart write fix
 
 dataRunner:
   image:
     repository: ghcr.io/jashwanthv07/sovereign-os/data-runner
-    tag: "0.1.1"
+    tag: "0.2.1"
 
 superset:
   image:
