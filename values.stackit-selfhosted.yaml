@@ -303,7 +303,20 @@ osUI:
   # revert OS_PUBLIC_URL back to os.<zone> and re-break the MCP endpoint URL / OAuth
   # issuer / email links (resolves the TODO in the ingress block below). The apex is
   # already served by the `osUIApex` Ingress. Matches the live `kubectl set env`.
-  publicUrl: "https://agentic.datamasterclass.com"
+  # EM 2026-08-01: was "https://agentic.datamasterclass.com" — that is DATA MASTERCLASS's
+  # host, inherited from upstream's overlay; emagos is NOT served on it and has no public
+  # DNS (access is `kubectl port-forward svc/os-ui 8080:3000`).
+  # Harmless until 0.6.34, which added `sessionCookieDomain()` (os-ui/lib/core/session.ts:83).
+  # It derives the session-cookie `Domain` from this value, so login started setting
+  # `Domain=.datamasterclass.com` — which a browser on 127.0.0.1 DISCARDS. Result: correct
+  # credentials returned 200 but no session stuck, bouncing straight back to /signin.
+  # NOTE: leaving this EMPTY does NOT help — os-ui.yaml then falls back to the `os.<zone>`
+  # ingress host, which is still a datamasterclass.com name. Point it at how emagos is
+  # ACTUALLY reached instead: sessionCookieDomain() short-circuits to null for `localhost`
+  # and bare IPs (session.ts:91), so this yields a host-only cookie EXPLICITLY rather than
+  # by accident. It also makes the MCP endpoint URL / email links resolve for us.
+  # Set this to our real apex ONLY when emagos actually has public DNS on that name.
+  publicUrl: "http://localhost:8080"
   # ---- Mailer: the OS sends its OWN mail via the in-cluster maddy MTA. --------
   # os-ui's SMTP transport is pointed at the in-cluster `mail` Service (587,
   # STARTTLS); maddy DKIM-signs and delivers as noreply@sovereign-agentic.com.
@@ -407,7 +420,11 @@ webFetch:
 softwareRunner:
   enabled: true
   namespace: agentic-apps
-  appsDomain: "apps.agentic.datamasterclass.com"
+  # EM 2026-08-01: was "apps.agentic.datamasterclass.com" (DMC's host, not ours). Feeds
+  # OS_APPS_DOMAIN, which 0.6.34 also uses for session-cookie scoping — see osUI.publicUrl
+  # above. We have no `*.apps.*` wildcard DNS, so per-app URLs were never reachable anyway.
+  # Back to the chart default; both values must be non-domain for a host-only cookie.
+  appsDomain: "apps.local"
   runnerImage: "traefik/whoami:latest"   # teaching default; a built app overrides via runImage
   # ingressClass / tlsIssuer fall back to the ingress.* values (nginx / letsencrypt-prod).
 
