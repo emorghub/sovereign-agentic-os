@@ -13,6 +13,1376 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+## [os-ui 0.6.81] — 2026-08-06
+
+### Fixed
+- **Connections integrity wave — the functional-audit CRITICAL/MAJOR fixes.** Security-
+  and honesty-critical corrections to the Connections tab's governed action surface:
+  - **Delete/archive full teardown (C1).** Deleting a connection now tears down everything
+    it GRANTED before forgetting the record: its exposure sets are revoked + propagated
+    (freeze/notify/trace + OPA withdraw), the action adoptions bound to them are revoked,
+    and a live-registered warehouse connection has its Trino catalog key + its
+    `trino-ext-<catalog>` credential-copy Secret removed and Trino rolled — each outcome
+    appended honestly to the delete report (the report previously falsely implied the
+    credential copy was purged). Called from both delete paths + the folder-cascade delete.
+  - **Labelled offline-mock results + legacy SF preset removed (C2).** Every `executeMock`
+    envelope is now stamped `mode:'offline-mock'` + an honest note, carried through the
+    tool-result UI and the agent tool-result path. The legacy per-object Salesforce preset
+    (`read_account`/`read_opportunity`/`update_opportunity_amount` — the last auto-allowed
+    mocked write) is deleted; the entity-generic `sf_*` tools replace it. SAP-OData/OData-V4
+    and Workday RaaS reads now run through REAL thin executors; Kajabi `tag_contact` defaults
+    Off (no live writer wired).
+  - **Inbox approvals execute the held write (C3).** Approving a held `connection_write` in
+    Policies & Approvals now EXECUTES it through the governed `approveOnce` path AS the
+    approver (profile re-checked server-side, so the payload can't smuggle a wider write) and
+    returns the executor's honest `{ok, reason}` — never "applied (mock)".
+  - **Cross-domain action adoption fixed (C4).** The four-layer intersection now keys the
+    exposure-grant + adoption layers on the CALLER's domains (`e.domains ∩ callerDomains`),
+    not the connection's — so a Sales connection exposed to Commerce actually arms a Commerce
+    caller (the flagship consent flow was dead). A Sales caller / un-adopted domain is denied.
+  - **Slug uniqueness (C5).** Two same-named connections no longer share a slug → principal →
+    vault secret name (credential clobber / OPA cross-talk / cross-delete); the record-id
+    suffix de-dupes on create.
+  - **Archive disables tools (M3); approveOnce handles `sf_*` (M6); action arming only where
+    tools exist (M9); action-adoptions route DLS (M10); registry-driven discover (M11); honest
+    approval previews (M12).** An archived connection denies every tool call and its exposures
+    drop to the OPA floor; approveOnce re-checks `sf_*` via the four-layer intersection; the
+    expose panel offers action toggles only for templates with a registered action-tool set;
+    the action-adoptions GET is DLS-scoped and verifies the exposure belongs to the connection;
+    discover dispatches through the operational registry (SAP/Workday no longer mis-routed to
+    Salesforce); and the Write-approval preview shows a REAL read where one exists, else an
+    explicit "unavailable" — never a fabricated before-state.
+
+## [os-ui 0.6.79] — 2026-08-06
+
+### Added
+- **OKF v0.2 compatibility — Knowledge + Marketplace interchange.** Knowledge artifacts,
+  domain operating manuals, and certified Marketplace knowledge products export to and import
+  from Open Knowledge Format (OKF v0.2, Apache-2.0; `github.com/GoogleCloudPlatform/knowledge-catalog`).
+  Boundary interchange only — the OpenSearch hybrid retrieval engine is untouched.
+  - **Export** — an artifact/manual/product becomes an OKF bundle (directory of `.md` + YAML
+    frontmatter, spec-correct `index.md`, internal links rewritten relative, zipped). Our five
+    kinds ride OKF's open `type` field; owner/domain/tier/workflow structure travels in a
+    namespaced `sovereign_os:` extension block; certification maps to `verified` events and tier
+    to `status`. Round-trip is lossless for our own artifacts (workflow steps/actors/rules/tacit
+    survive). Certified Marketplace products carry a bundle **frozen at certify time**.
+  - **Import** — a bundle is validated (the three OKF conformance rules; unknown fields/types are
+    accepted per spec, not rejected) then lands as **Personal-tier** artifacts owned by the
+    importer, through the normal author→index→publish ladder — never a governance bypass. Foreign
+    frontmatter preserved; re-import matches on the `resource` URI to create a version, not a
+    duplicate. Extraction is **zip-slip-safe** with size/file-count caps.
+  - **Link navigation** — markdown links between Knowledge artifacts resolve to first-class refs
+    (`get_knowledge` returns them) so an agent can deterministically walk a certified bundle
+    (workflow → rule → term) as the governed alternative to probabilistic retrieval.
+  - **MCP twins** — `export_okf_bundle` (writes a Files artifact, returns its ref) and
+    `import_okf_bundle`, both OPA-gated as the signed-in user. A vendored Google sample bundle
+    imports successfully in CI.
+
+## [os-ui 0.6.80] — 2026-08-05
+
+### Changed
+- **Connections tab — visual redesign (presentation-only, zero behavior change).**
+  The crown-jewel connectors feature reads like one now: business-power-user first,
+  jargon demoted (never deleted). Every action, gate, role floor and flag behaves
+  byte-identically — routes, stores and payload shapes are untouched.
+  - **Create doors.** The two-path "New connection" chooser (formerly the plain "Door A /
+    Door B" cards) is now two generous, distinct choice cards — **Bring a connector**
+    (gold cast) and **Wire up your own** (teal cast) — each with a monogram mark, a
+    plain-language headline and a one-line business-value subline, real hover/focus
+    affordance, and accessible focus rings. Copy killed the techy framing ("Use a
+    connector" → "Bring a connector", "Build a custom connector" → "Wire up your own").
+  - **Connector gallery as a showcase.** Tiles now lead with a refined **monogram mark**
+    (per-service accent hue, consistent geometry — *no trademarked logos*) and the
+    connector's business value; protocol/auth detail is demoted to a quiet mono meta line.
+    Polished search field, scannable vendor-stack headers (accent bar + count, collapsible),
+    a calm "ready" signal, and a density tuned for scanning 30–50 connectors. New shared
+    identity vocabulary (`lib/connections/connector-identity.ts`: curated monograms/accents/
+    value lines with an honest label-derived + hashed fallback) and a token-driven stylesheet
+    (`app/styles/connections.css`, `.conn-*`). The list tiles and the detail header adopt the
+    same monogram so the whole tab is one visual voice — still one elevation, no cards-in-cards.
+  - **Copy pass.** List lead, tile meta ("personal OAuth" → "signs in as you", "service creds"
+    → "service account"), gallery card meta and the wizard endpoint step now read business-first.
+    Terminology contracts (My/Domain/Company, Certified, promote/propose, health vocabulary)
+    are unchanged.
+
+### Fixed
+- **Connector wizard — paste-the-key footgun (live incident).** Adding a connector whose
+  endpoint is a known fixed host (Kajabi, GitHub, Slack, …) now **prefills** that endpoint
+  from the template's hint (editable) instead of showing an empty box — so a credential can't
+  be pasted into the address field. Generic/placeholder templates stay empty as before. Both
+  create paths (the wizard and the custom-connector door) now run a **client-side URL-shape
+  check** before submit: an obviously-non-URL value is stopped with the plain message *"That
+  doesn't look like a URL — did you paste a credential here? The API key goes in the next
+  step."* — never shipped to the egress path where the error could echo it back.
+  (`lib/connections/connector-identity.ts`, `components/connections/shared.ts`,
+  `ConnectorWizard.tsx`, `ConnectionBuilder.tsx`; server-side redaction handled separately.)
+
+## [os-ui 0.6.78] — 2026-08-05
+
+### Changed
+- **Docs truth-sync — the guide + tutorials caught up to 0.6.63–0.6.77.** The end-user manual
+  (`docs/Sovereign-Agentic-OS-Guide.md`, regenerated to `.pdf` via `scripts/build-docs.sh`) and
+  the in-product tutorials now describe what actually shipped, not the pre-redesign product:
+  - **Science redesign.** The guide's Science surface is now **Design · Launch · Monitor**
+    (was "Define · Train · Deploy · Predict · Monitor"): chat-first, granted-dataset-grounded
+    Design; one fused **"Train & launch"**; a Monitor that scores real rows with honest health,
+    usage and score-distribution (no fabricated metrics/drift). Honest capability statement
+    (classification + regression on CPU; algorithm/metric/split chosen automatically; no
+    forecasting/clustering). The Science tutorial is rewritten to the same three-stage journey
+    (the stale "model-as-a-service — define · predict · promote" framing removed).
+  - **Lakehouse import & exposure.** New guide chapter *Lakehouse — bringing external tables in,
+    governed*: the admin **Connect → Snapshot → Organize → Expose** flow (Catalog · Organize ·
+    Assign · Review, the four-way taxonomy seed chooser, AI "suggested, not verified") and the
+    domain-admin **Adopt** via **＋ New → 🔗 From a connection** (curated Domain-tier, live/sync,
+    fail-closed floor, honest frozen-copy revocation, MCP parity). "Pull from a product" is gone
+    from the Data narrative (ingest = upload). The Data + Connections tutorials cover the
+    "From a connection" adopt path and the expose→adopt journey (honestly flagged where it needs
+    an admin-registered warehouse).
+  - **Operational systems.** New guide chapter *Operational systems — Salesforce, SAP, Workday as
+    a source and a surface*: sync-only expose→adopt, per-entity cursor honesty, and the action
+    surface (four-layer fail-closed intersection, two-layer write approvals, service-account
+    labels, `OPERATIONAL_ACTIONS_ENABLED` **off by default**; SAP/OData/Workday data-only this
+    wave, with their honest v1 caveats).
+  - **Apps least-privilege.** The Software chapter now documents the app-origin data plane —
+    reads capped at (user ∩ app grants), the honest **Granted context** panel + members directory
+    in the Admin section, grant-scoped "ask", the `os.records` write surface, and the **Refresh
+    SDK** action.
+  - **Simplified domains.** The Science/ML layer is described as a plain per-domain toggle
+    (domain templates were retired in 0.6.68 and were never documented, so no stale claim
+    remained to remove).
+
+## [os-ui 0.6.77] — 2026-08-05
+
+### Added
+- **Operational system connections — Phases 4–6 (final wave)**
+  (operational-system-connections.md). SAP (generic OData core), Workday RaaS, and
+  the MCP/assistant/quota parity that finishes the operational journey.
+  - **Generic OData core** (`lib/connections/odata/`) — a pure, heavily-tested EDMX
+    `$metadata` parser (V2 + V4: entity sets, entity types, properties with
+    name/type/nullable/keys, and SAP annotations `sap:label`/`sap:creatable`/
+    `sap:updatable`/`sap:pageable` where present; nav properties, complex/enum types,
+    functions and non-Nullable facets deliberately ignored — a catalog reader, not a
+    full CSDL); V2/V4 dialect objects (`$inlinecount=allpages`/`__next` vs
+    `$count=true`/`@odata.nextLink`, date literals); a server-only client (Basic
+    communication-user or OAuth2 client-credentials, `fetchMetadata`, dialect-honoring
+    `pullPage`, all through `fetchWithBackoff`); and a page-streaming slice runner that
+    lands to `/ingest-rows` with timestamp-cursor support ONLY where a change-timestamp
+    property is detected in `$metadata` (never guessed), else full-refresh-only.
+  - **Two OData templates** — branded `sap-odata` (S/4HANA Cloud communication
+    arrangement; honest v1 caveat: cloud-reachable only, on-prem behind the SAP Cloud
+    Connector NOT supported) and unbranded `odata-v4` (Dynamics 365 / Business
+    Central) — both registered in the operational registry (discover from `$metadata`
+    with `sap:label` labels, cursorFor from detection), with a real `$metadata`
+    health probe, install guides, and egress-allowlist hosts. NO action tools this
+    wave (SAP actions are a later decision).
+  - **Workday RaaS** (`lib/connections/workday-raas.ts` + `workday-raas` template) —
+    reports-as-entities (the admin registers report URLs; there is no cheap global
+    describe, said plainly), fields inferred from a sampled first page and labeled
+    "inferred from a sample", record counts omitted; full-refresh-only by default with
+    an optional incremental window on an admin-configured report date prompt; ISU Basic
+    auth. Install guide states the SOAP WWS punt (true incremental = v2) plainly.
+  - **MCP action-adoption parity** — `adopt_entity_actions { exposureId, entities[] }`
+    + `list_adoptable_actions` (domain_admin; thin delegates over `action-adoptions.ts`,
+    governance re-resolved server-side); exposure CRUD tools (`create_exposure_set` /
+    `update_exposure_set`) gain the `actions` arg validated exactly like the routes
+    (write actions trigger the same `exposure_action_enable` approval).
+  - **ExposeChat** grounding gains operational-source + action-scope + cursor honesty,
+    a new starter ("Expose Accounts and Opportunities to Commerce, with read actions
+    for agents"), and exposure cards may carry `actions` (validated server-side; write
+    actions render with "requires admin approval to enable").
+  - **Salesforce quota surfacing** — a `/limits` (DailyApiRequests) pre-flight in the
+    sync path: near quota, the run skips honestly ("throttled — resuming next window")
+    with the real numbers in the Developer view and the cursor unadvanced — never a
+    hard 429 mid-slice. Nil-safe: absent `/limits` data changes nothing.
+
+## [os-ui 0.6.76] — 2026-08-05
+
+### Added
+- **Operational system connections — Phase 3, the action surface**
+  (operational-system-connections.md). Salesforce operational connections gain
+  real, entity-generic action tools behind a four-layer fail-closed intersection,
+  two-layer write approvals, and domain action adoption — all inert behind
+  `OPERATIONAL_ACTIONS_ENABLED` (default OFF, nil-safe).
+  - **Entity-generic Salesforce tools** (`lib/connections/salesforce-tools.ts`)
+    replace the hardcoded per-object preset: `sf_get_record` /
+    `sf_search` (Read; `sf_search` bounded to LIMIT ≤ 200 with a `truncated`
+    flag), `sf_create_record` / `sf_update_record` (Write-approval; bounded
+    variant via the connection's `argConstraints`), `sf_delete_record` (Blocked).
+    SOQL is built server-side from validated parts only (`buildSearchSoql` +
+    `safeSObjectName` + record-id validation) — raw user input is never
+    interpolated into SOQL (single-quoted, escaped, control-char-stripped).
+  - **Real executor** in `CONNECTION_EXECUTORS['salesforce-api']` (was the
+    `executeMock` gap): never throws (`{ ok:false, reason }`), secret injected
+    server-side, `fetchWithBackoff` for honest 429/503, and every result envelope
+    carries the service-account identity label ("as the integration account —
+    records it cannot see are absent").
+  - **The four-layer intersection**, recomputed FRESH per call (no cache outlives
+    a revoke): capability profile ∩ non-revoked exposure actions (write needs
+    admin approval) ∩ non-revoked domain adoption ∩ agent/app grant. No exposure /
+    no adoption / flag off ⇒ the tool is invisible AND uncallable (fail closed).
+  - **Two-layer write approval.** Enable-time: create/update on an exposure's
+    `actions` enqueue an admin `exposure_action_enable` approval; write scopes stay
+    compiled-out (`writeApproved`) until approved; read/search activate
+    immediately; a broadening edit re-triggers approval. Runtime: writes flow
+    through the existing held-with-preview `Write-approval` gate.
+  - **Domain action adoption** (`lib/connections/action-adoptions.ts`,
+    `os-action-adoptions` mirror + `POST /api/connections/[id]/action-adoptions`):
+    a `domain_admin` adopts an exposure's entity actions into their domain — the
+    consent step that keeps an exposure from silently arming another domain's
+    agents; audit `entity_actions_adopted`; soft revoke kills the tools at once.
+  - **UI**: the Expose "Assign" stage gains a collapsed "Agent actions (optional)"
+    section (per-entity read/search/create/update, all off by default; Developer
+    shows the compiled tool names); the Review impact card states the action grant
+    plainly; the Adopt panel gains an "Adopt actions" affordance; agent run results
+    render the service-account label.
+
+## [os-ui 0.6.75] — 2026-08-05
+
+### Added
+- **Operational system connections — Phases 0–2** (operational-system-connections.md):
+  operational (Salesforce/Kajabi) API connections become a snapshot/expose/adopt data source
+  alongside warehouses.
+  - **Registries (Phase 0, no behavior change).** New `lib/connections/operational-registry.ts`
+    (with pure, client-safe `operational-platform.ts` + `operational-cursor.ts`) replaces the
+    two hardcoded seams: the `liveApiPlatform` `salesforce|kajabi` switch in
+    `sync-run-server.ts` (now `platformForTemplate` + `pullOperationalSlice`) and the
+    warehouse-only discovery in `buildCatalogSnapshot` (now dispatched per template). Existing
+    warehouse/Salesforce/Kajabi syncs + snapshots stay byte-identical.
+  - **Salesforce entity catalog (Phase 1).** A `salesforce-api` connection gets a real catalog
+    snapshot through the registry (honest "snapshot from <takenAt>"; unreachable never
+    fabricated). The `describe` route dispatches per template — Salesforce returns
+    `{name, type, label}` per field (business label alongside the API name); a new on-demand
+    `count` route surfaces a REAL `SELECT COUNT()` only on row expand (absent, never estimated).
+    Browse rows carry a cursor-honesty chip ("Incremental (SystemModstamp)" / "Full refresh
+    only") derived from the registry, never guessed. Smart-seed already defaults to Starter for
+    a single-schema source.
+  - **Operational expose + adopt (Phase 2).** `exposed-tables.ts` widens past warehouse to
+    operational templates (`catalog:null`, `operational` flag, per-entity cursor honesty); an
+    operational exposure is forced to sync and an explicit `live` is refused ("Operational
+    sources sync; there is no live mode"). The staged ExposePanel + adopt dialog work for a
+    `salesforce-api` connection with Sync locked on; adopt records `connected.source` with the
+    platform pseudo-catalog (byte-consistent with the snapshot + api-batch sync source) and
+    locks cursor options to what the registry says the entity supports (full-refresh-only
+    entities refuse an incremental mode honestly; merge is unavailable). Landing/schedule/
+    quarantine/freshness/revocation reuse the existing sync engine verbatim.
+
+## [os-ui 0.6.74] — 2026-08-05
+
+### Added
+- **Lakehouse finale — Expose Phase C+D + lakehouse Phase 4** (lakehouse-expose-experience.md,
+  lakehouse-import-exposure.md): the AI assistant across the Expose flow, MCP parity for the
+  whole expose/adopt journey, and the shared classified folder tree on the adopt side.
+  - **ExposeChat** (`components/connections/expose/ExposeChat.tsx`) — ONE persistent, governed,
+    multi-turn assistant mounted across all four Expose stages (Catalog · Organize · Assign ·
+    Review), following the ScienceChat `.sac-*` pattern. Its one-turn route
+    (`app/api/connections/[id]/expose-assistant`, on the shared model — honest 503/402
+    passthrough, admin-gated like the mutations) grounds each turn in the REAL snapshot summary
+    (schema/table counts, takenAt, drift), the classification state (category counts +
+    lastRunDetail), the current selection, the REAL domain list, and the existing exposure sets.
+    Suggestion cards are VALIDATED SERVER-SIDE before an Apply renders: `classify` runs the
+    classifier; `selection {tables[]}` merges real tables into the selection Set and jumps to
+    Organize; `exposure {name, domains[], mode, tier, tables[]}` prefills Assign and jumps to
+    Review — the admin still clicks Create. A hallucinated table/domain is refused with the
+    honest reason and no card (only the prose stands). Starters: "Organize this catalog with
+    AI", "Expose everything in Customer and Orders to Commerce as gold, live", "What changed
+    since the last snapshot?".
+  - **MCP parity** (`lib/mcp/exposure-write-tools.ts`) — the expose/adopt journey through the
+    front door, each tool a thin adapter over the EXACT lib the UI calls: exposure CRUD
+    (`list_exposure_sets`, `create_exposure_set`, `update_exposure_set`, `revoke_exposure_set`
+    — admin); catalog (`get_catalog_snapshot`, `refresh_connection_catalog` — admin,
+    `get_catalog_classification`, `classify_catalog` — admin, returning honest counts +
+    lastRunDetail); adopt (`list_exposed_tables` — domain-scoped read, `adopt_exposed_table` —
+    roleAtLeast domain_admin, live and sync). `get_dataset` gains a `connected` block (mode,
+    tier, status, source, real freshness — null for live, last successful sync landing else).
+    `import_warehouse_table` stays; its description now points at expose→adopt.
+  - **Shared seams (front-door invariant)** — the revoke propagation (recompile OPA → freeze
+    bound datasets → tear down each sync CronJob → notify each owner → trace per dataset) is
+    factored into `lib/connections/exposure-propagation.ts` and the adopt validation/creation
+    into `lib/data/adopt-connected.ts`, so the UI routes (`/exposures/[exposureId]` DELETE/PATCH,
+    `/api/data/adopt`) and the MCP tools run byte-identical logic instead of duplicating it.
+  - **Adopt browser shares the classified tree** — `AdoptConnectionPanel` now mounts the shared
+    `CatalogBrowser` with `readOnlyCategories` + the classification GET, so a domain admin sees
+    the same AI folders/labels as the platform admin (corrections stay admin-side). All adopt
+    behaviour (gating, sync config, required description) is unchanged.
+- **Docs truth-sync** — `lib/tabs/connections.context.md` + `connections.guide.md` document the
+  full journey (connect → snapshot → organize → expose per domain → adopt → live/sync → honest
+  revocation); `lib/tabs/data.context.md` documents the from-a-connection ingestion path
+  (pull-from-product retired); `lib/mcp/prompts.ts` points the connect pathway at expose→adopt.
+
+## [os-ui 0.6.73] — 2026-08-05
+
+### Added
+- **Lakehouse Expose experience — Phase B** (lakehouse-expose-experience.md): AI catalog
+  classification + the Organize category tree. The Organize stage now groups the same
+  selection by an admin-owned folder taxonomy the AI fills — never a fabricated placement.
+  - **Taxonomy seed chooser** (owner-designed) — on first entering Organize, a "How should
+    folders be organized?" chooser with four sources: **mirror the source structure** (folders
+    from the snapshot's schemas), **mirror the OS domains** (folders from the tenant's real
+    non-archived domains), **starter set** (the 10 categories), or **empty** (admin builds
+    folders, AI classifies only into them). Smart default: ≥3 meaningfully-named source schemas
+    → pre-select "source", else "starter". Invariants regardless of seed: taxonomy stays
+    admin-extensible (add/rename via a taxonomy PATCH); the AI only ever places into the CURRENT
+    taxonomy (never invents a folder); a human move is stored as an override that permanently
+    wins; Unsorted always exists.
+  - **Classification engine** (`lib/connections/warehouse/catalog-classification.ts`) — Pass 1
+    names-only, batched 100 tables/call at concurrency 2, run standard-first with one reasoning
+    escalation per malformed batch (`completeWithEscalation`; models via the role resolver,
+    never hardcoded). A validator drops hallucinated table keys (counted), degrades unknown
+    category ids to Unsorted (never invented), and rejects out-of-range confidence; a table no
+    batch answered is retried once, then lands in Unsorted `not-classified`. Pass 2 (capped 50
+    lazy column DESCRIBEs + one enrichment call) re-places sub-threshold tables (threshold 0.7).
+    `run-new` classifies only added/missing tables; overrides are never touched by any run.
+  - **Honest degradation** — a 503/402/gateway failure stops the run and is reported in the
+    run detail ("132 classified, 12 unsorted, 3 of 8 batches escalated, stopped early after 144
+    of 200 (Cost cap reached)"); the Organize UI falls back to the schema view with a plain
+    notice and never blocks exposure. Every AI placement carries an "AI" chip + hover-why; a
+    moved table shows no chip (a human fact). Header: "Organized by AI — suggested, not verified".
+  - **`GET/POST/PATCH /api/connections/[id]/classification`** — merged read (override ?? AI ??
+    Unsorted) under the same visibility gate as the snapshot route; POST actions
+    `run | run-new | override | seed` and the taxonomy PATCH are admin-only and audit-traced
+    (`catalog_classified`). The run executes server-side; progress is the polled run detail.
+  - **Organize category tree** — one folder level, count-sorted with Unsorted last, tri-state
+    folder checkboxes feeding the shared selection Set, per-row "⋯ → Move to" and bulk
+    "Move N selected to", search matching names + folder names + why text, and Simple/Developer
+    (Developer surfaces confidence, model id, and re-run controls).
+
+## [os-ui 0.6.72] — 2026-08-05
+
+### Added
+- **Lakehouse Expose experience — Phase A** (lakehouse-expose-experience.md). The admin-only
+  Expose surface on a warehouse connection is now a staged flow on the OS-wide StageShell:
+  **Catalog → Organize → Assign → Review**. The exposure-set list stays the landing
+  collection above the rail — New enters at Catalog, Edit loads the set and enters at Review
+  (all gated stages reachable to walk back), Revoke keeps its confirm. Selection is one
+  `Set<'schema.table'>` shared across Catalog + Organize with a persistent "N tables selected"
+  badge in the rail aside.
+  - **Shared `CatalogBrowser`** — one browse component (schema mode fully implemented:
+    schema-grouped, tri-state schema checkboxes, instant client-side search over ≤ ~1k rows;
+    category mode falls back to schema grouping with a quiet "AI organization arrives with the
+    next release" note in Phase A). Row click expands → **lazy governed column DESCRIBE** with
+    honest loading/error states (an unreachable catalog shows the real error — never fabricated
+    columns).
+  - **`GET /api/connections/[id]/describe`** — wraps the governed `describeTable` (same
+    auth/visibility gate as the sibling snapshot route). `describeTable` now returns Trino's
+    per-column **Comment** additively (empty when the metastore carries none) for the Phase-B
+    classifier.
+  - Catalog stage: snapshot health line, Refresh / "Take a snapshot", a drift chip that filters
+    to added/removed tables, honest refreshing/unreachable/empty states. Assign stage: name
+    auto-suggested from the selection (editable), domain chips, Live/Sync (default Live), tier,
+    note — Simple hides cron with a one-line hourly note; Developer shows cron + full-refresh.
+    Review stage: a human-impact card, a grouped read-only list, drift warnings for selected
+    tables removed since the last snapshot, and (Developer) the compiled governance preview.
+  - No AI in this phase (Organize's AI classification + the ExposeChat assistant ship in
+    Phases B–C).
+## [os-ui 0.6.71] — 2026-08-05
+
+### Added
+- **Adopt "From a connection" — Sync mode** (lakehouse import & exposure, Phase 3).
+  Sync-mode exposures are now adoptable: scheduled incremental replication of an exposed
+  table into the adopting domain's schema at the curated tier
+  (`iceberg.<domain>.<tier>_<slug>`), running as the domain principal (entitled by the
+  Trino-OPA write floor). The proven sync engine — watermark-before-write, `_batch_id`
+  idempotency, quarantine, Iceberg maintenance — is retargeted verbatim from the personal
+  bronze lane to the domain copy; the tier version lights (earned) only after the first
+  successful landing verifies. Preview / profile / DQ / Talk / metrics read the local copy
+  through the one FQN seam with no special-casing.
+- **Metrics on synced copies.** The Phase 2 metric-source exclusion now applies only to
+  LIVE connected datasets; a synced copy with a built Gold defines metrics like any native
+  gold dataset (Cube handover via the normal governed registration path).
+- **Adopt dialog sync setup.** When the exposure is sync-mode, the adopt dialog shows sync
+  configuration prefilled from the exposure's `syncDefaults` (mode, cursor, schedule) in the
+  SyncPanel vocabulary — Simple keeps it minimal (defaults + schedule), Developer exposes
+  the full config. Full-refresh of a large table is warned honestly (15 s governed-statement
+  ceiling) and steered to a cursor.
+- **Source stage for synced datasets.** The connected Source card gains a Sync face:
+  mode badge, freshness = last successful sync run (real, from sync-runs), next-run schedule,
+  run-history summary, and drift flags — with the SyncPanel available to adjust cadence /
+  "Sync now".
+
+### Changed
+- **Frozen-copy revocation.** Revoking an exposure now freezes bound SYNC datasets instead
+  of blanking them: sync is disabled, the per-dataset CronJob is removed
+  (`reconcileSyncCron(id, null)`), but the last-landed copy is KEPT (sovereign data) and
+  stays fully queryable — the Source stage banners "copy frozen as of <last successful run>".
+  Live datasets keep the Phase 2 behavior (no data shown until re-adopted).
+
+## [os-ui 0.6.70] — 2026-08-05
+
+### Added
+- **Adopt "From a connection" — Live/federated datasets** (lakehouse import & exposure,
+  Phase 2). A domain admin can now adopt a table a platform admin exposed to their
+  domain into a governed dataset. `+ New dataset` gains a third card ("From a
+  connection", `components/data/AdoptConnectionPanel.tsx`) — visible only when
+  `EXTERNAL_CONNECTORS_ENABLED` and the caller is `roleAtLeast domain_admin` and a table
+  is actually exposed. A new server helper (`lib/connections/exposed-tables.ts`) resolves
+  the exposures whose domains intersect the caller's, grouped connection → exposure set,
+  served by `GET /api/data/exposed-tables`; adoption (`POST /api/data/adopt`) re-resolves
+  governance server-side, requires a short description, and creates the dataset at
+  **Domain tier** with `origin:'connected'`.
+- **Connected datasets read live through one FQN seam.** The `connected` block on the
+  dataset schema (`{ connectionId, exposureId, source:{catalog,schema,table}, mode, tier,
+  status }`, byte-stable/back-compat) drives `versionTarget`/`builtLayerFqn`: a live
+  connected dataset resolves to the verbatim `<catalog>.<schema>.<table>` read as the
+  viewer's domain principal (never a personal lane); only `versions[tier].built` is true
+  and bronze never exists. Preview/profile/DQ/Talk/`query_data` inherit through that seam.
+- **Source stage** (`components/data/ConnectedSourcePanel.tsx`) replaces Ingest/Refine for
+  connected datasets in `DataBuilder`: connection link, source FQN, Live/tier badges,
+  snapshot freshness ("snapshot from <takenAt>"), drift flag, and the honest guardrail
+  notes (preview LIMIT; profile sampled).
+- **Honest sampling labels.** A live profile computes stats/top-values over a bounded
+  sample subquery (`lib/data/profile.ts sampledSource`) and the payload is labeled
+  "sampled, approximate — computed on ~N rows"; executable DQ on a live table now asks for
+  explicit confirmation and recommends a synced copy.
+- **Revocation & drift propagate honestly.** Revoking an exposure flips every bound
+  dataset to `connected.status='source-revoked'` (no data shown, preview/Talk disabled with
+  an explicit banner), notifies each owner, and traces `dataset_source_revoked`; a catalog
+  snapshot that removes a bound table flags the dataset `drifted` and notifies its owner.
+- **Metrics are excluded on live connected datasets** (v1): `metricSqlReady` and the metric
+  source picker steer to "define metrics on a synced copy".
+
+## [os-ui 0.6.69] — 2026-08-05
+
+### Changed
+- **Data ingestion is upload-only** (lakehouse import & exposure, Phase 0). Retired
+  the Data tab's "Pull from a product" free-SQL Trino extract from the Ingestion
+  stage (`components/data/BronzePanel.tsx`) and its tutorial copy
+  (`lib/tutorials/content/data.ts`): the section now only uploads a file, and the
+  guidance says external lakehouse data arrives governed, via a connection. The
+  governed `pull-extract` server action (`/api/data/sandbox`) is unchanged and stays
+  for Developer/personal-lane use.
+
+### Added
+- **Exposure sets + catalog snapshot + fail-closed external-catalog policy floor**
+  (lakehouse import & exposure, Phase 1 — security-critical, shipped as one unit).
+  - **Fail-closed floor** (`charts/sovereign-agentic-os/policies/trino.rego`): a table
+    in a NON-internal catalog (not `iceberg`/`system`) with no `data.governance.tables`
+    entry now reads zero rows for everyone and cannot be written — closing the gap
+    where a live-registered external warehouse catalog was readable by every
+    authenticated principal. Additive; iceberg/internal access unchanged. Rego-bundle
+    tests in `tests/policies/trino_test.rego`.
+  - **Exposure sets** (`lib/connections/exposures.ts`): admin-only CRUD
+    (`roleAtLeast 'admin'`), persisted via the registry mirror (`os-exposures`),
+    audit-traced (`exposure_set_created/updated/revoked`). Each non-revoked set
+    compiles to a `data.governance.tables` shared-with entry per table
+    (`compileExposures` in `lib/data/policy/compiler.ts`), pushed per-key to OPA
+    (`lib/connections/exposure-policy.ts`) so it is additive to dataset governance and
+    durable across a pod roll; create/update/revoke recompile immediately.
+  - **Catalog snapshot** (`lib/connections/warehouse/catalog-snapshot.ts`): per-connection
+    cached listing built by looping the governed `discoverWarehouse`
+    (`SHOW SCHEMAS` + per-schema `SHOW TABLES`) as the connection's domain; columns
+    served lazily via a governed `DESCRIBE`; consecutive-snapshot drift diff; honest
+    `live`/`stale`/`unreachable` status; never fabricated freshness.
+  - **API + UI**: `GET/POST /api/connections/[id]/exposures`, `PATCH/DELETE
+    …/exposures/[exposureId]`, `GET/POST …/snapshot`, and a service
+    `POST /api/connections/catalog-refresh` sweep. Admin-only Expose section on the
+    warehouse connection detail (`components/connections/ExposePanel.tsx`): snapshot
+    browser (search, group-by-schema, multi-select, select-whole-schema, Refresh) +
+    exposure form (name, domains, mode Live/Sync, tier silver/gold, note) + existing
+    sets with Edit/Revoke and a Developer view of the compiled governance entries.
+  - **Chart**: optional `connections.catalogRefresh` CronJob
+    (`templates/connections/catalog-refresh-cronjob.yaml`) — nil-safe under
+    `--reuse-values`, default OFF.
+
+## [os-ui 0.6.68] — 2026-08-05
+
+### Removed
+- **Domain templates.** Dropped the create-domain template dropdown
+  (Blank / Analytics / Data Science / Big Data) and all its plumbing: the
+  `DomainTemplate` type + `TEMPLATES` array, the `template` provenance field on
+  the `Domain` type, and the `template` param on `createDomain` /
+  `hydrateDomains` and the `POST /api/platform-admin/domains` route
+  (`lib/platform-admin/domains.ts`, `app/(govern)/platform/domains/page.tsx`,
+  `app/api/platform-admin/domains/route.ts`). The concept was dead — a template
+  only ever preset one flag (`layers.ml`), which is already an independent
+  per-domain Science-layer toggle. A new domain now starts with the Science
+  layer off; enable it per domain in Admin → Domains as before. The per-domain
+  Science gate (`layers.ml`, `requiresLayer: 'ml'`, policy-compiler `ml` grant)
+  is unchanged. Legacy persisted domain records that still carry `template` load
+  silently — the stale field is ignored, never migrated.
+
+## [os-ui 0.6.67] — 2026-08-05
+
+### Added
+- **Science Phase D — MCP parity for the full model journey.** Three new governed write tools
+  (`lib/mcp/science-write-tools.ts`, `minRole: 'creator'`, same edit-scope + Langfuse tracing as
+  every sibling write tool) let an external agent carry a model from data to live predictions
+  WITHOUT the UI: `create_model { name, goal?, dataset, target, features?, taskType? }` applies the
+  Simple defaults and VALIDATES the dataset/target/features against the caller's real, RLS-scoped
+  data (a hallucinated dataset/column is refused by name via `validateDefinition`, never invented);
+  `train_model { model }` is the fused "Train & launch" (submits training, auto-deploys on success)
+  returning a run handle + the read→train→publish `LaunchStatus`; `get_model_status { model }` is
+  the poll that ADVANCES the same state machine the UI does (training→trained→deploying→deployed),
+  returning the phase, a plain-language reason and the real trained metric once produced. Honest:
+  all 404 when `ml.enabled=false`; a metric is stated only once a run actually produced it; an
+  unreachable cluster is a real error, never a fake success.
+
+### Changed
+- **Richer `get_model` card** (MCP): now includes `buildState`, real `usage` (count/denied/
+  lastCalledAt), `lastErrors` (training/deploy), and the headline metric NAME + value (auc/rmse,
+  never a mislabeled AUC) — previously omitted.
+- **Science guide + context truth-sync** (`lib/tabs/guides/science.guide.md`,
+  `lib/tabs/science.context.md`, `lib/mcp/prompts.ts`): rewritten from score-and-wire only to the
+  full Simple-first journey (goal → create_model → train_model → get_model_status → science_predict
+  → promote), with the honest capability statement (classification + regression on CPU; algorithm,
+  metric and split chosen automatically; no forecasting/clustering).
+- **Shared MLflow metric reader** (`readMlflowMetric` extracted to `lib/science/training.ts`): the
+  train route and the new MCP status poll now read the real trained metric through ONE function, so
+  both front doors record the same honest (or honestly-untracked) value.
+
+### Monitoring
+- No new Monitoring wiring: model health is ALREADY surfaced there via the real `model_train` /
+  `model_deploy` / `predict` Langfuse traces the science paths emit (which `list_runs` /
+  `get_run_trace` read). The Monitoring overview spine reads traces, not the `ModelUsage` histogram,
+  so feeding that histogram in would be a new signal source rather than a thin, real fit — skipped.
+
+## [os-ui 0.6.66] — 2026-08-05
+
+### Changed
+- **Science Phases B+C — Design·Launch·Monitor Simple UI + a persistent, grounded assistant.**
+  The Science tab's 5-stage builder (Define·Train·Deploy·Predict·Monitor) collapses to three
+  plain-language stages a business user reads: **Design** (a prompt-first chat is the primary
+  surface; the manual form — dataset browser + target/features as COLUMN PICKERS from the real
+  dataset profile — is progressive disclosure; the free-text FQN override / algorithm / metric /
+  split are gone from Simple, and forecast/clustering are dropped), **Launch** (one "Train &
+  launch" button rendering the fused `LaunchStatus` timeline verbatim; the real trained metric is
+  phrased in business language — auc → "ranked positives above negatives NN%", rmse → "typical
+  error ±NN" — computed only from the real value and hidden when absent; `deploy_failed` retries
+  the deploy route; the plain-language failure explanation auto-fetches), and **Monitor** (a
+  governed-preview ROW PICKER to try the model on a real example → plain verdict; live health;
+  the real `ModelUsage` count/denied/last-called + a score-distribution chart from `buckets`
+  (honest empty state when nothing has been scored; no fabricated drift badges); Govern
+  unchanged). Developer mode re-exposes everything that exists today (algorithm/metric/split, the
+  raw feature-vector predict + JSON + traceId, job/ISVC/MLflow handles, the spec+policy JSON).
+- **AI-first Science assistant.** ONE persistent, governed, multi-turn chat (`ScienceChat`)
+  replaces the five one-shot StageAssistant buttons, mounted across all three stages. Each turn
+  is grounded in the model's real state, the caller's VISIBLE datasets + the selected dataset's
+  real column profile, and the honest capability statement. Structured **one-click Apply**
+  suggestion cards (Design → create a draft; Launch → start training & launch; Monitor → score a
+  real example) — the assistant only proposes; every mutation runs through the existing governed
+  routes on explicit click. A Design suggestion naming a dataset/column is VALIDATED server-side
+  against the real feed (`validateDefinition`) and refused-with-reason if hallucinated, so no
+  Apply card can reference a dataset/column the user can't see or that doesn't exist. Honest
+  503/402 surfacing preserved. Removed the Science DevConsole's Featureform tile (not wired) and
+  the "model-as-a-service" jargon crumb.
+- **`parseJsonReply` fix for ALL stage assistants.** `lib/assistant/stage-route.ts`'s
+  `parseStageJson` now delegates to the tolerant `parseJsonReply` (object stages) and a new
+  `extractJsonArray`/`parseJsonArrayReply` (array stages), so a reasoning model that wraps its
+  JSON in preamble prose or a ```json fence still yields structured suggestions instead of an
+  empty result across Data · Metrics · Dashboards · Science · Software. The object/array shape
+  guard contract is unchanged.
+
+### Removed
+- **The inert `monitored` build state.** Dropped the `monitored` `ModelBuildState` union member
+  (types + UI mirror) and every `=== 'monitored'` comparison (`computeLaunchStatus`, the stages,
+  the predict/launch surfaces) — `deployed` is terminal-live and monitoring rides on the deployed
+  model. Deleted the old `builder/TrainStep`, `builder/DeployStep` (absorbed by `LaunchStep`) and
+  the one-shot `StageAssistant` (replaced by `ScienceChat`).
+
+## [os-ui 0.6.65] — 2026-08-05
+
+### Changed
+- **Science Phase A — fused "Train & launch" orchestration (server).** On a successful
+  training run the train poll route now auto-submits the deploy (`trained → deploying`),
+  so "Train & launch" is ONE action (auto-deploy is the Simple default). The deploy poll
+  carries `deploying → deployed` honestly. Both train and deploy routes expose ONE coherent
+  `launch` status a timeline renders: ordered steps (reading data → training → publishing),
+  each with a coarse `state` plus the real underlying `detail` (job name / ISVC phase+reason)
+  for the Developer view (`computeLaunchStatus`, `LaunchStatus`/`LaunchStep` in
+  `lib/science/types.ts`). The standalone two-step Deploy route + `deploy_failed` retry path
+  are unchanged. If the cluster refuses the fused deploy submit, training's success stands and
+  the model rests at `trained` with the deploy error recorded — never a faked deploy.
+- **Science Simple-mode server defaults + honest algorithm refusal.** `algorithm`,
+  `optimizeMetric` and `trainTestSplit` are now OPTIONAL in the create/spec input
+  (`ModelSpecInput`); when omitted the server fills task defaults (classification: the real
+  default learner + auc; regression: linear/rmse; split 0.8) via `normalizeSpec`. An algorithm
+  the runtime cannot actually train is REFUSED (400) naming the supported set — fixing the old
+  lie where typing "xgboost" silently trained logistic.
+- **Metric-name-correct model versions.** `ModelVersion` now carries `metric` + `metricName`
+  (e.g. `rmse 12.3`), so a regression version is no longer mislabeled "AUC". The old `auc`
+  field is retained as a deprecated back-compat mirror of the value (Phase B removes it).
+
+### Added
+- **Real per-model prediction usage.** `servePredict` records usage on EVERY predict (allow
+  AND deny): `count`, `denied`, `lastCalledAt`, and a day×band score histogram (score deciles
+  for classification, coarse value bands for regression) — enough for a
+  score-distribution-over-time chart later. Persisted on the model registry record through the
+  existing durable mirror; exposed on each model in `GET /api/science/model`. Cheap and real,
+  no new infra (`recordUsage`, `ModelUsage`).
+
+### Removed
+- **Science fabrications removed (honesty).** Deleted the churn SEED model that planted invented
+  facts a fresh tenant never earned (`auc 0.871`, `runId 'mlf-run-2a9c'`, `kserveService
+  'churn_model'`) — fresh tenants start EMPTY; existing persisted seed records are left alone
+  (no migration). Removed `monitoringAdapter.triggerRetrain()` (it fabricated a
+  `dagster-retrain-<ts>` runId without ever calling Dagster) and the `op:'retrain'` route path
+  (now an honest 410 "not wired"). Removed the placeholder `drift()`/`DriftPoint`/`driftSeed`
+  plumbing and the dead `drift` payload on the model GET (no UI consumed it; the Monitor stage
+  already renders an honest "not yet monitored" placeholder from `model.metrics`). Removed the
+  orphan `lib/science/agent-control.ts` (exported but unconsumed) + its barrel export + tests.
+  Gutted the dead-in-Science `featuresAdapter` to an honest `probe(): false` stub (Featureform
+  is not wired — training reads Gold through Trino; the DevConsole tile is Phase B's deletion).
+
+## [os-ui 0.6.64] — 2026-08-05
+
+### Security
+- **Grant-scoped "ask your data" for app origins (replaces the 0.6.63 blanket deny).**
+  0.6.63 denied the free-form NL→SQL surface (`/api/data/ask`) to any app origin outright,
+  because it scoped to every dataset the user could see with no way to cap it. It now
+  NARROWS the askable set to (user access ∩ the app's `grants.data` ids) instead: the same
+  filtered list is used for BOTH the model's prompt context AND — since the only tables the
+  model is shown are the ones it can target — the executable SQL scope. An app origin with
+  ZERO dataset grants gets an honest 403 ("no dataset grants — grant one in the OS Software
+  tab → <app> → Context"); an unknown slug fails closed (empty grant set → the same 403);
+  non-app (OS UI) requests are completely unchanged (`appSlugFromRequest` → null, no I/O).
+  This fixes the live incident where a Software-tab BUILD-generated app Search page hit the
+  deny when querying its single granted dataset via the ask surface.
+
+### Changed
+- **BUILD assistant grounded in granted-dataset schemas + a spec-vs-schema rule.** The
+  build directive already injects each granted dataset's REAL columns via the grants-context
+  block; 0.6.64 adds explicit SDK ground rules to the data-plane contract: the dataset schema
+  is AUTHORITATIVE over story-spec field names (do NOT invent `status`/`tenant`/`SKU` fields
+  the schema lacks — build with the real columns and note the gap); read granted datasets via
+  `os.datasets.query('<id>', { limit })` (returns `{ columns, rows }` where rows are ARRAYS in
+  column order — zip before use); `os.datasets.query(id, { nl })` is scoped to THIS app's
+  granted datasets only; and the app can only reach artifacts in its grants (never list the
+  user's full catalog). This closes the other half of the incident, where the generated page
+  re-invented columns the dataset (`northpeak-products`) does not have because the spec text
+  mentioned them.
+
+## [os-ui 0.6.63] — 2026-08-04
+
+### Security
+- **Least-privilege data plane for app origins (governed reads).** Generated apps run
+  under the user's ambient `soa_session`, so an app could read ANY dataset / knowledge /
+  file / metric the USER can see — regardless of what the app was granted. A new helper
+  (`lib/software/app-origin.ts`) attributes a request to an app by its `Origin`/`Referer`
+  (`<slug>.<domain>.<appsBaseDomain>`, reusing the SAME `isAllowedAppOrigin` source of
+  truth as CORS) — and, for the same-origin runtime serve mode, by the
+  `/api/apps/runtime/<slug>` referer path. When a governed read comes from an app origin
+  it is capped at (user access ∩ app grants):
+  - list routes (`/api/data/datasets`, `/api/metrics`, `/api/knowledge/docs`,
+    `/api/files`) FILTER to the app's granted ids (the `total` count follows suit);
+  - single-artifact routes (`/api/data/datasets/[id]`, `…/preview`,
+    `/api/metrics/explore`, `/api/files/[id]`) return **403** with an honest, actionable
+    reason naming the app + artifact and pointing at the Software tab grant flow;
+  - the free-form NL→SQL surface (`/api/data/ask`) spans every dataset the user can see
+    with no dataset-id to scope it, so it is **denied outright for app origins** (the
+    simplest safe behavior) — apps query a specific granted dataset via
+    `os.datasets.query` instead;
+  - an unknown slug from an app origin fails **closed** (denied). Requests with NO app
+    origin (the OS UI itself) are COMPLETELY unaffected — the helper does no I/O on the
+    non-app path.
+
+### Fixed
+- **Honest app "Granted context".** The scaffold surfaced `os.context()`, whose SDK
+  composed from `/api/context/available` — which returns everything the SIGNED-IN USER
+  can see, not what the APP was granted; labelling that "Granted context" was a lie. New
+  app-scoped route `GET /api/apps/by-slug/{slug}/context` returns ONLY the app's actual
+  grants (`app.grants`) resolved to display names from the same canView/RLS-scoped stores
+  the grant picker uses (an artifact that no longer resolves is kept honestly as
+  `name: id`, never dropped). The vendored SDK's `context()` now hits this endpoint when
+  an `appSlug` is set (the scaffold sets it), and keeps its legacy five-feed behavior when
+  it is not (the OS UI). The `OsClient` interface is unchanged (its closed-interface
+  regression stays green).
+- **Scaffold nginx cache bug — stale bundle after every deploy.** The Vite scaffold's
+  `nginx.conf` set no cache headers, so browsers heuristically cached `index.html` and
+  users kept running an old bundle after a deploy. It now sends `Cache-Control: no-cache`
+  for `/index.html` (via the `= /index.html` location the SPA `try_files` redirects into)
+  and `public, max-age=31536000, immutable` for the content-hashed `/assets/`.
+
+### Changed
+- **Granted context moved from Overview → Admin (scaffold).** The starter Overview page
+  is now a plain honest landing (app name + the OS-delegated signed-in user); the
+  app-scoped "Granted context" panel now lives in the Admin section below "App members"
+  (zero grants → "No context granted yet — grant datasets, knowledge or metrics to this
+  app in the OS Software tab.").
+- **"Refresh SDK" action in the Software tab.** The `POST /api/apps/{id}/refresh-sdk`
+  route (re-vendors `@sovereign-os/app-sdk` into an existing app) had no UI. A small
+  owner/in-domain-admin "Refresh SDK" button now sits in the app-detail header with honest
+  result feedback (re-vendored / no-op for a non-frontend template / gate rejection).
+
+## [os-ui 0.6.62] — 2026-08-04
+
+### Added
+- **Generated-app WRITE SDK — `os.records.*` (the bridge, not an invention).**
+  The vendored app SDK (`lib/app-sdk`) was read-only, so the build assistant kept
+  hallucinating `os.datasets.update` / `os.files.create` — methods that never
+  existed. It now has the real write door: `os.records.list/get/add/export`, the
+  SECOND door onto the SAME governed store the app's MCP tools already reach.
+  New governed routes `GET/POST /api/apps/by-slug/{slug}/records`,
+  `GET …/records/{id}`, `POST …/records/export` run AS the signed-in user, gated on
+  (a) the app's visibility/entry rule (404 when not visible) and (b) the app's
+  Builder-APPROVED deploy envelope's `writeTools` (403 with an honest, governance-
+  naming reason when a write is not approved; reads are always-on). Both the MCP
+  tool route and these routes call ONE shared executor (`executeAppTool`,
+  `app-records.ts`) — one store, two doors. Datasets/metrics/knowledge/files stay
+  read-only; the `OsClient` interface is closed, so a hallucinated `os.datasets.update`
+  is a TS2339 the compile gate catches. Existing apps pick up the new SDK via
+  `refreshVendoredSdk` (`POST /api/apps/{id}/refresh-sdk`) or the next re-scaffold;
+  new scaffolds get it automatically. The BUILD directive now names the true surface.
+
+### Fixed
+- **The compile gate no longer fails OPEN on a missing esbuild wasm.** The
+  `esbuild-wasm` binary is loaded at runtime (never require()'d), so standalone
+  packaging dropped it — the bundle pass threw and the WHOLE gate skipped
+  ("gate error — skipped, fail-open") on real commits, letting bad trees through.
+  The image now ships `esbuild.wasm`; when it is ever missing again, the
+  authoritative **tsc** pass STILL gates (catching hallucinated members / import
+  depth) and only the bundle net is skipped, honestly ("bundle check skipped —
+  asset missing"), instead of the whole gate failing open.
+
+## [os-ui 0.6.61] — 2026-08-04
+
+### Added
+- **Direct build service + digest-pinned runners (redesign Phase B).** The
+  serving image comes off the Forgejo-Actions critical path. After a gated live
+  commit, os-ui submits an in-cluster **Kaniko** `batch/v1` Job (daemonless —
+  no DIND, passes the apps namespace's `baseline` PSS) that builds the app's
+  committed Dockerfile straight from its Forgejo git tree at the exact commit
+  SHA (Kaniko's native git context — no tarball, no ConfigMap size limit),
+  pushes an immutable `:sha12` tag to the in-cluster registry, and writes the
+  pushed **digest** to the pod's termination message, where os-ui captures it
+  with plain pod reads. The runner Deployment then serves that app
+  **digest-pinned**: a new digest IS the pod-template change, so Kubernetes
+  rolls honestly — the `deployed-at` roll-on-same-tag hack and the
+  `imagePullPolicy: Always` reliance are deleted for pinned images (`:latest`
+  fallback keeps both, unchanged). The pipeline's `harbor` (image-build) stage
+  now narrates WHICH system built, truthfully: "OS build service" submit /
+  build / digest-pin notes vs the Forgejo-Actions notes, and
+  `get_software_status` reports `builtBy` + an `osBuildNote`. Feature-flagged
+  end-to-end: chart `softwareBuild.enabled` grants the build-Job RBAC
+  (namespaced batch Jobs + pod/log reads, nil-safe under `--reuse-values`) and
+  sets `SOFTWARE_BUILD_SERVICE`; when OFF — or when the submit hits missing
+  RBAC/namespace — the pipeline says so specifically and Forgejo Actions keeps
+  building exactly as before. `ci.yml` stays in every scaffold as the
+  export/CI-confirmation path (demoted, not deleted), and the Phase C repair
+  loop keeps riding its unchanged Actions detection.
+
+### Fixed
+- **The compile gate no longer false-rejects in production.** The deployed
+  standalone image was missing the TypeScript lib .d.ts files and @types/react
+  (never require()'d, so packaging dropped them) — every tree looked like
+  hundreds of errors and GOOD commits were rejected ("342 compile errors" on a
+  one-page change). The image now ships the type assets, and the gate
+  self-checks its environment first — if the assets ever go missing again it
+  skips honestly ("compile check skipped, CI will verify") instead of
+  fabricating diagnostics.
+
+### Added
+- **Runtime serving (beta, redesign Phase D — opt-in per app).** Flip
+  "Runtime serving" on a Vite-shaped app and the OS serves it directly from
+  the committed tree in a sandboxed, strict-CSP iframe — no image build, no
+  CI, no pod. Only compile-green trees serve; a red tree shows its
+  diagnostics honestly. The status card says "OS runtime serving — no image
+  build required" with image stages marked n/a. Image serving stays the
+  default.
+
+## [os-ui 0.6.60] — 2026-08-03
+
+### Added
+- **Bounded CI auto-repair (redesign Phase C).** The compile gate (Phase A)
+  stops compile errors pre-commit, but a build can still go red in CI for a
+  build-env-only reason (a missing asset, a dependency that won't install, an
+  imported-repo dep the gate honestly skips). Those failures used to just sit
+  there — honest but inert. Now, when the pipeline records a FAILED run, the OS
+  fetches the failing run's log tail (timestamps + docker layer noise stripped,
+  error-dense tail capped) plus the failing commit's changed-file list, and
+  opens exactly ONE bounded REPAIR build turn (reasoning model) instructed to
+  fix ONLY what the log names, then commit — the compile gate still applies and
+  the commit is prefixed `repair(ci):`. Bounds are strict: at most one
+  auto-repair per failed run, and if the repaired commit fails CI again it does
+  NOT loop — the surface says so plainly ("auto-repair attempted, CI still
+  failing — needs a human/build turn"). Every surface labels the spend
+  honestly ("auto-repair turn (reasoning model)"); an app-level opt-out
+  (default on) turns it off. Detection rides the existing status refresh (any
+  app view) plus a best-effort in-process one-shot check ~2.5 min after a build
+  commit — no cron, so a pod restart simply defers to the next on-load refresh.
+
+## [os-ui 0.6.59] — 2026-08-03
+
+### Added
+- **Verify-before-commit (redesign Phase A).** Every build commit is compiled
+  IN-PROCESS before anything is written: TypeScript against the real vendored
+  @sovereign-os/ui + app-sdk types, then an esbuild bundle pass — ~0.4-0.7s.
+  A red check rejects the commit with exact file:line diagnostics fed back
+  into the same build turn (and counts toward the bounded reasoning
+  escalation). Non-compiling app code can no longer be committed, from the UI
+  or MCP. CI becomes confirmation, not discovery.
+- **App membership (least-privilege).** The generated app's Admin page listed
+  the entire domain directory as if it belonged to the app. Apps now carry
+  explicit membership: the creator is the sole implicit admin; app admins add
+  users by name (admin | member) through a governed route. Entry to deployed
+  apps remains domain-wide by design — now stated honestly.
+
+## [os-ui 0.6.58] — 2026-08-03
+
+### Fixed
+- **"Repository missing" banner clears after a recovery.** The pipeline's
+  forgejo flag downgraded honestly on a 404 but nothing upgraded it back when
+  the repo answered again — Publish kept claiming the repo was missing while
+  commits, CI and the live app were all green. The status refresh now flips
+  the flag symmetrically.
+
+## [os-ui 0.6.57] — 2026-08-03
+
+### Added
+- **Suggested quality checks arrive documented.** Accepting an AI-suggested
+  rule persists a plain-language description derived deterministically from
+  the profile evidence ("Every row must have a value in <col> — the profile
+  found no missing values."). No model call, no extra step; the ✨ describe
+  stage remains for custom rules.
+- **Datasets document themselves after ingestion.** On the first successful
+  Bronze, an AI draft (grounded in the real landed schema + preview) fills the
+  EMPTY description and column notes in the background — never overwriting
+  human words, marked "✨ AI-drafted from the data — review to confirm" until
+  a human save clears it; an unreachable model skips silently.
+
+### Fixed
+- **Heal adopts orphaned repositories.** When a repo's files exist on
+  Forgejo's disk but its database record is gone (disk/DB desync), Heal now
+  ADOPTS the repo — preserving every commit — instead of failing to create
+  over the existing files; re-scaffold only when truly absent; specific
+  errors for credential or unadoptable states. Auto-heal-on-commit and the
+  durable file mirror inherit this.
+
+### Changed
+- **Build progress lives under the button.** The live stepper (Plan →
+  Generate → Commit → Preview), current-step line and STOP moved to a fixed
+  panel under the Build button — no longer scrolling away with the chat; the
+  transcript keeps the messages, plan and activity feed.
+
+## [os-ui 0.6.56] — 2026-08-03
+
+### Added
+- **Context grants are now real.** Granting data, knowledge, files, metrics or
+  connections to a software app finally does what the panel implies: the
+  Design assistant and every Build agent receive a "Granted context" block
+  with the ACTUAL content — dataset schemas and measures, knowledge text,
+  file bodies, metric definitions, connection descriptors (never secrets) —
+  resolved as you, DLS-scoped, token-budgeted with loud truncation, and the
+  directive to build against the real names instead of inventing fields. At
+  deploy, grants compile into the app's OPA tool access (read-only data-plane
+  tools added to the template baseline; recompiled the moment grants change;
+  fail-closed with no grants).
+
+### Fixed
+- **App source code is now durably mirrored — a lost repo is fully recoverable.**
+  Previously an app's file tree lived only in Forgejo plus an in-process
+  `globalThis` snapshot that died on every pod restart; the app record stored
+  file NAMES only, so a vanished repo meant unrecoverable source (two built
+  stories were lost live on northpeak-products). Every verified commit now
+  write-throughs the app's FULL current tree (path + content) to a durable
+  OpenSearch mirror (`os-app-files`, one doc per app), on the SAME best-effort
+  mirror infrastructure the app record uses. The offline `read_app_files` tree,
+  the deploy security scan's offline fallback, the instant preview and
+  `healAppRepo`'s restore source all hydrate from this mirror, so a pod restart
+  no longer loses the tree. `healAppRepo` now restores every mirrored file on top
+  of the scaffold — a lost repo comes back with its real code, even after the
+  process that built it is gone. Legacy apps with no mirror doc are lazily
+  backfilled from the next successful live-tree read or commit; an app whose repo
+  AND mirror are both gone stays honestly template-only (no fabrication). Respects
+  the honest-commit contract: a rejected commit persists no mirror doc.
+
+## [os-ui 0.6.55] — 2026-08-03
+
+### Fixed
+- **A commit into a vanished repository heals itself.** Per-file write failures
+  are now classified (sha-conflict / unreachable / backend); only when the
+  whole changeset failed on plain backend errors is the repo probed — a
+  repo-level 404 triggers one audited re-provision (full scaffold incl. the CI
+  workflow, even with an empty snapshot) and one retry. Sha conflicts and
+  outages can never be papered over by a heal. Errors now name the cause per
+  file instead of a bare FAILED list.
+- **"Heal repository" button** on the Publish surface when the pipeline
+  reports the repo missing — the manual fallback for the same governed heal.
+
+## [os-ui 0.6.54] — 2026-08-03
+
+### Fixed
+- **Story "built" status is now EARNED, never self-reported.** A story flips to
+  done only on an app with real committed code; a backend-rejected commit
+  throws instead of phantom-persisting; a reconcile demotes existing
+  phantom-built stories to their true state on load. The disabled Test button
+  was the honest signal all along — the badges now match it.
+- **Build turns can no longer end as an apology essay.** A file-less commit
+  gets a corrective error carrying the exact call template; the BUILD directive
+  shows the commit signature and forbids the "here's a plan you can copy"
+  wrap-up — if the agent cannot commit, the turn fails plainly with Retry.
+
+### Added
+- **Bounded reasoning escalation in Build.** If the standard model keeps
+  shape-erroring on tools or exhausts its step budget, the turn retries ONCE
+  on the reasoning model — labelled honestly in the activity feed, never
+  silent, never on the happy path.
+
+## [os-ui 0.6.53] — 2026-08-03
+
+### Fixed
+- **Orphaned deploy-approval cards self-clear.** "Approve & go live" on a card
+  whose app no longer exists (deleted/re-created across sessions) returned a
+  bare "App not found" — it now answers with an actionable message and retires
+  the stale card and its governance approval.
+- **Pipeline status can't claim "ok" on a missing repo.** A 404 repo downgrades
+  both the Forgejo and Actions stages to failing (the note said 404 while the
+  stage stayed green).
+
+### Added
+- **Repo heal + delete guard.** `POST /api/apps/[id]/deploy?action=heal-repo`
+  re-provisions a vanished Forgejo repo from scaffold + snapshot (edit-gated,
+  audited, idempotent); repo deletion now refuses to remove a repo that is
+  still the home of another active app record.
+
+## [os-ui 0.6.52] — 2026-08-03
+
+### Fixed
+- **Orphaned app runners self-heal.** If `deployApp` ran while the cluster was
+  transiently unreachable, the app stayed image-built + approved but WITHOUT a
+  runner forever ("runner unreachable"). The status reconcile now re-applies
+  the deployment idempotently when the runner is absent and the cluster is
+  reachable — never touching a running/deploying/failed runner, and never
+  "healing" what is actually offline.
+
+## [os-ui 0.6.51] — 2026-08-03
+
+### Fixed
+- **Build-stage tool ergonomics (three live failures, one root class).**
+  (1) `commit({})` no longer answers "App not found": the run's app id is now
+  BOUND server-side into every build tool call (empty → filled, mismatched →
+  rejected loudly), and a commit without files gets a corrective error the
+  agent can act on. Cross-replica ruled out (single replica + durable-mirror
+  re-hydration). (2) `read_app_files` on a directory returns the directory
+  listing (files + subdirs) instead of a dead-end rejection; empty path lists
+  the root. (3) The app's Repo link is now always built from the external
+  Forgejo URL — the API's `html_url` carried the cluster-internal host, which
+  404s in a browser; persisted apps heal on load. The repos were always there.
+- **Publish surface says why there is no app link.** The "open app" link is
+  gated on a served preview; when the app's image/runner isn't serving yet the
+  surface now states that honestly instead of showing nothing.
+
+## [os-ui 0.6.50] — 2026-08-03
+
+### Changed
+- **Creating a software app shows honest progress.** The create form now mounts
+  the core BusyProgress the moment you click — one live step naming the real
+  work (Forgejo repo provisioning, scaffold seeding, MCP profile compile) with
+  an elapsed counter — instead of a silently disabled button. The request stays
+  a single round-trip, so no fabricated checkmarks; streamed per-file
+  milestones would need an SSE create route (noted, not done).
+
+## [os-ui 0.6.49] — 2026-08-03
+
+### Added
+- **Demote everywhere.** Metrics, Dashboards and Science models gained the way
+  back down the governance ladder (every other tab already had it): "Unshare"
+  on Domain artifacts (owner / in-domain Domain admin) and "Revoke from
+  Company" on certified ones (Admin). A metric shares its tier with its
+  dataset, so demoting a metric moves the dataset and every metric on it — the
+  confirm dialog says so explicitly.
+- **Metric creation type chooser.** ＋ Metric first asks "Simple metric or
+  Complex metric?" on the same two-card picker the Data tab uses. The complex
+  path is a first-class formula editor: the dataset's existing metrics as
+  clickable [name] chips, live validation, honest empty state. The formula
+  option left the aggregation dropdown (it was buried third and undiscoverable).
+- **Dashboard panels expand.** Every panel opens full-screen (title or ⤢) —
+  the chart large, and below it the same rows as a table with ⬇ CSV. The table
+  appears only for graph panels; a table panel renders once, large.
+- **Notification bell.** In-app notifications now have a real surface: a bell
+  with an unread badge in the sidebar foot, newest-first panel, mark-read.
+  This is the single delivery surface for metric alerts, DQ alerts and
+  scheduled reports.
+
+### Changed
+- **Alerts and scheduled reports deliver in-app only.** Email and Slack options
+  removed — Slack never had a delivery path (the checkbox was fiction) and
+  email silently depended on a mailer. Legacy rules/configs coerce safely.
+  "Trigger a governed agent on breach" renamed to "Trigger an Agent".
+- **Talk-to always on top of View, never in Edit.** Metric View's duplicate
+  Talk-to removed; every context-tab View leads with its Talk-to; Edit keeps
+  only stage-assist AI.
+- **Lifecycle from View.** Promote/Demote/Archive/Version history are reachable
+  from an artifact's View (like Knowledge) — Data no longer hides them in Edit.
+- **Context tabs de-cluttered.** ~40 explanatory paragraphs removed and ~40
+  compressed to one clause across Data, Metrics, Files, Knowledge and
+  Connections; headings normalized to short sentence-case.
+
+### Fixed
+- **Raw Trino errors translated.** "Cannot apply operator: varchar * integer"
+  now reads "This calculation mixes text and numbers — cast the column or fix
+  its type in Transformation", raw error behind Show details; wired at every
+  Data-tab query-error site. Derived fields state "Numeric columns only" upfront.
+- **Curated quality suggestions: silence explained.** The DQ pipeline was
+  correct (live repro produced 9 suggestions on the curated dataset) — but a
+  failed/unbuilt Gold returned an empty list with the reason swallowed. The
+  route now reports why and the Checks section says it honestly.
+- **Outdated metric hint corrected.** A metric serves from any dataset with
+  built Gold — even personal, no promotion needed; the old "promote to Shared
+  first" hint misdescribed the system.
+
+## [os-ui 0.6.48] — 2026-08-02
+
+### Added
+- **Metric descriptions.** Every metric can carry a plain-language "what does
+  this metric mean?" sentence — written right under the name when creating,
+  proposed by ✨ Suggest-with-AI, editable any time, shown as the lead line in
+  the metric's View and as a quiet line on its tile.
+- **Human-readable data-quality rule descriptions.** Each rule has an editable
+  description; one "✨ Describe checks with AI" drafts descriptions for every
+  rule missing one (always a draft you review — never auto-saved). The View
+  quality scorecard leads with them.
+- **Dataset demote is back**: "Demote to My" on Domain datasets (edit-scoped)
+  and "Demote to Domain" on certified products (admin) — with confirmation;
+  the store's protection gates (named grants, domain imports) still apply.
+
+### Changed
+- **Dataset detail's technical strip moved to a bottom "About this dataset"
+  footer** — owner, ids, table name, and status chips; the top keeps just the
+  name, tier badge and the ✎ Edit dataset button.
+- **Tile polish**: metric names truncate before the domain/tier badges;
+  the dataset select-checkbox no longer overlays the title.
+
+### Fixed
+- **Composite metrics no longer lose their formula on reload** — the source
+  formula now round-trips through the store (the Edit box re-hydrated empty
+  before; the compiled SQL was never affected).
+
+## [os-ui 0.6.47] — 2026-08-02
+
+### Changed
+- **Dataset Edit speaks plain language: Ingestion → Documentation →
+  Transformation → Checks** (curated: Composition → Documentation → Checks),
+  each section closing with its own action — Save Data, Save Documentation,
+  Save Transformations, Save Data Quality Checks, Save Composition. No
+  Bronze/Silver/Gold words in Edit; no layer previews or stats (View owns
+  those); no "Continue to …" remnants. Lineage moves to the Developer view.
+  Keep-columns + derived fields live only in curated Composition; legacy
+  datasets with stored joins keep their join editor.
+- **Gold materializes automatically for ingested datasets** — after every
+  successful ingest or transformation build, the governed pass-through runs
+  behind the scenes ("…served for metrics automatically"); the manual button
+  is gone. Failures surface loudly.
+- **Checks unifies Default checks** (freshness/volume/schema monitors) **and
+  Custom checks** (authored rules + AI suggest + Run) in one section.
+- **Opening a file is a full-page reading surface** — the half-screen overlay
+  with its own scrollbar is gone; long text flows with the page (CSV keeps
+  horizontal scroll only). Knowledge and Connections verified already correct.
+- **Tile lists group by kind**: "Ingested Data" / "Curated Data" and
+  "Simple Metrics" / "Complex Metrics" (headers only when both kinds exist).
+- **Nav order**: Context = Data, Metrics, Files, Knowledge, Connections;
+  Build = Agents, Dashboards, Software, Science, Console.
+- **MCP guides, tutorials and the user guide are truth-synced** to the whole
+  0.6.40→0.6.47 redesign — golden paths describe ingested-vs-curated with
+  auto-gold, tutorials anchor only to UI that exists, the guide's journeys
+  use the same vocabulary as the screens.
+
+## [os-ui 0.6.46] — 2026-08-02
+
+### Changed
+- **Dataset View reads in usage order: Talk to Data → data preview →
+  statistics → data quality → configuration.** The Talk box drops its example
+  chips; the bronze·silver·gold layer toggle moves into the preview heading
+  (Gold default).
+- **The data-quality section is a scorecard**: pass-rate hero + colored bar +
+  one bordered card per rule with ✓/✗ and real violation counts — unrun rules
+  show as unrun, never as passing.
+- **Dataset View header is calm: one big "✎ Edit dataset" button.** The
+  promote/certify, archive and version-history controls move to the EDIT
+  header — governance itself is unchanged, it just lives where changing
+  things is the point.
+- **The dataset header chip "not published" is renamed "not certified"** — it
+  reports certification (the Company-tier trust badge), not whether the data
+  is built or shared; the tooltip now says so.
+
+## [os-ui 0.6.45] — 2026-08-02
+
+### Changed
+- **Dataset Edit is calm: layer previews are opt-in.** The Bronze/Silver/Gold
+  statistics and previews no longer render inline in Edit — each stage shows a
+  "👁 Preview …" button that fetches the governed rows on demand.
+- **Dataset View shows Gold by default** (the highest built layer) with a
+  bronze · silver · gold toggle at the top of the data preview; only built
+  layers are offered.
+
+### Fixed
+- **Domain datasets/metrics no longer appear under "My folders".** The folder
+  tree renders any item without an explicit scope under BOTH roots; Data and
+  Metrics were the last two tabs passing unpinned items (the same leak fixed
+  for the other tabs in 0.6.40). Every item is now pinned to its own root.
+
+## [os-ui 0.6.44] — 2026-08-02
+
+### Changed
+- **Every context tab now speaks ONE artifact language: create with a type →
+  land in Edit; tiles in folders; click a tile → View; ✎ Edit to change.**
+  Metrics and Dashboards already worked this way — Knowledge, Files,
+  Connections and Data now join them.
+- **Knowledge**: ＋ New offers *General knowledge* (opens the markdown editor)
+  or *Workflow* (routes to the Business Processes editor). A tile opens the
+  RENDERED markdown in View; ✎ Edit (edit-scope gated) opens the editor.
+  Promote/demote, Move and lifecycle live in the detail header.
+- **Files**: ＋ New offers *Upload a file* or *New note (markdown)*. A tile
+  opens the inline preview (text/markdown/CSV/media rendered; honest
+  "no inline preview" + Download for binaries); ✎ Edit gives a real text
+  editor for text files (saving a proper new version) or Replace/rename/move
+  for binaries.
+- **Connections**: ＋ New offers the two doors — *Use a connector* (the
+  grouped, searchable template gallery) or *Build a custom connector*. A tile
+  opens View: live health, Test connection, what it connects to and the
+  capabilities it exposes; ✎ Edit opens configuration (secrets stay
+  write-only).
+- **Data — the ingested vs curated split lands.** An INGESTED dataset's Edit
+  is the full journey in one surface: ingest → clean into Silver → bring to
+  Gold as a single-table projection (columns + derived fields) → quality
+  rules — the "Join to" section is gone; combining datasets is now
+  exclusively a curated-dataset capability. A CURATED dataset's Edit picks an
+  EXPLICIT base dataset and composes: joins, kept/renamed columns, derived
+  fields, then documentation and quality. Both open in View (talk ·
+  statistics · preview · quality). Legacy datasets with stored joins keep
+  their join editor — nothing breaks. The staged walk retires for Data.
+
+### Fixed
+- **File text edits no longer leave stale bytes behind.** Editing a text file
+  previously updated the reader but left `/raw` and `/download` serving the
+  old content; a version rewrite now keeps bytes, extracted text and the
+  search index consistent.
+
+## [os-ui 0.6.43] — 2026-08-02
+
+### Changed
+- **Curated datasets walk their own path: Compose (Gold) · Document · Validate ·
+  View.** A dataset born curated (composed from existing governed datasets) no
+  longer shows the Ingest stage or the Silver cleaning tooling — there is
+  nothing to ingest, and cleaning belongs to the source datasets. It opens
+  straight in Compose (the join builder, now billed as the curated build
+  itself), then Document (describe the composed output — still required for
+  promotion), quality checks, View. Ingested datasets keep the full 5-stage
+  medallion path unchanged.
+- **Composite metrics are findable.** *Formula — combine other metrics* moves
+  up to third in the aggregation dropdown, and the metric-name step carries a
+  one-line signpost to it.
+
+### Added
+- **Derived fields in the Gold builder.** Define new row-level columns computed
+  from the joined data — `margin = price − cost`, `total = price × quantity`
+  (column-op-column or column-op-constant; division is null-safe). Compiled
+  through the same guarded SQL compiler as everything else (no free-text SQL),
+  persisted with the dataset spec, re-editable on reopen, and the new columns
+  flow into the metric builder and dashboard palettes automatically.
+- **Transparency badges on tiles**: curated datasets show a quiet *curated*
+  badge; composite metrics show *formula* instead of the opaque "number" type.
+
+## [os-ui 0.6.42] — 2026-08-02
+
+### Added
+- **Viewer-side time drilling.** Any panel that trends over time gets a quiet
+  day · week · month · quarter · year switcher in its header — drill the time
+  hierarchy up and down without editing the dashboard; every re-query runs
+  under your row-level security.
+- **Panel sizes.** Each panel can be ⅓, ½ or full width (12-column grid) —
+  a KPI tile can sit beside a full-width trend, the Power BI/Tableau layout
+  feel without a drag canvas. Dashboards saved before this keep their layout
+  until a panel size is touched.
+- **Default filters that survive reload.** Saving a dashboard with active
+  filter chips persists them as its defaults; View opens with them applied.
+- **Filter chips in the Metrics explorer** (same vocabulary as dashboards) and
+  an **"Open in Metrics ↗"** link from the drill drawer.
+- **Live formula validation.** The composite-metric editor validates as you
+  type: position-anchored errors inline, resolved `[metric] ✓` chips when
+  valid. The server stays authoritative.
+- **⬇ CSV on every table panel** — downloads exactly the rendered rows (your
+  governed, row-level-secured result), including the drill drawer's table.
+- **BusyProgress — the OS-wide progress surface for long saves.** The ~30 s
+  metric save and the dashboard save now show the shared progress bar with a
+  plain-language sentence naming what the server is doing and a live elapsed
+  counter — never a silently disabled button, never fabricated step progress.
+
+### Changed
+- **Viz dropdown order: pie · bar · table first.**
+- **Panel queries are resilient**: a panel's measures now query the governed
+  engine in parallel, and a query that exceeds 30 s shows an honest
+  "engine may be busy — Retry" state instead of an infinite spinner (never a
+  stale or mock fallback).
+
+### Removed
+- **Connected tools (dashboards View) and Connect Power BI (metric View)** are
+  unmounted until each connection is verified working; the components stay in
+  the tree for one-line restoration.
+
+### Fixed
+- **Talk-to-Data cited datasets from every domain while one domain was
+  active.** Its dataset enumeration applied only the entitlement gate (which
+  the owner passes for their other domains' datasets, and certified products
+  pass tenant-wide); it now applies the same active-domain narrowing as the
+  catalog and JOIN picker, with regression tests across all three tiers.
+
+## [os-ui 0.6.41] — 2026-08-02
+
+### Added
+- **Cross-filtering (the Power BI page interaction).** Clicking a bar, pie
+  slice or table row filters the WHOLE dashboard: a chip bar appears above the
+  grid (`region = DE ×`) and every panel re-queries with the filter pushed into
+  its governed SQL `WHERE` — same viewer identity, same row-level security.
+  One value per member (slicer behavior); click the same value again to clear;
+  `▸` on a chip opens the drill drawer for that slice; a KPI click opens its
+  breakdown directly.
+- **Metrics ⇄ Dashboards are one system now.** Every panel's measure label
+  links to the metric's definition (`/metrics?focus=`), and a metric's View
+  gains **"On dashboards"** — tiles of every visible dashboard charting this
+  metric's view, plus **＋ Add to a dashboard**, which opens the builder with
+  the metric pre-selected. Dashboards now supports the `?focus=<id>` deep-link.
+
+### Fixed
+- **Two panels charting the same metrics DIFFERENT ways no longer silently
+  collapse into one on save.** The panel identity key now includes dimensions,
+  time grain and filters — "revenue by region" and "revenue by product" are
+  two panels, as designed.
+- **The dashboard's live/mock badge is honest about mixed states.** It now
+  aggregates every panel's resolution mode and shows a loud
+  `mixed · N live / M mock` instead of whichever panel happened to resolve last.
+
+## [os-ui 0.6.40] — 2026-08-02
+
+### Changed
+- **Metrics builder is now a plain View/Edit surface too — the 5-stage flow is
+  gone.** A NEW metric opens in **Edit** (source dataset → name → AI-fillable
+  form → Save); an EXISTING metric opens in **View**: the definition in plain
+  terms, the governed Trino SQL it compiles to, the data underneath, the
+  dimensions it can slice by, the live explorer preview, Talk to Metrics and
+  Alerts. Promote moves into the detail header left of Archive, with a
+  View⇄Edit toggle. Editing an existing metric hydrates the saved definition
+  (new tested `formFromMeasure` inverse) and re-saves **onto the same member**
+  — dashboards and alerts keep working.
+- **Data tab: the Publish stage becomes View.** Talk to Data on top, then
+  statistics, the (layer-named) data preview, and a data-quality dashboard
+  built from the dataset's rules; Promote moves to the header. Stage previews
+  are framed per layer (Bronze/Silver/Gold Data Preview) and Harmonize no
+  longer shows the preview twice.
+- **Metrics Define reads naturally: pick the dataset first, then the name;
+  ✨ Suggest with AI moves to the form it fills** (it needs the dataset's
+  columns, so its old placement was always disabled).
+
+### Added
+- **Composite metrics — formulas over other metrics (the Power BI
+  "measures reference measures" pattern).** A new *Formula (other metrics)*
+  option defines e.g. `([revenue] - [cost]) / [orders]` over the dataset's
+  existing basic metrics, with click-to-insert metric chips. Compiled to the
+  same governed serve path as every metric; division is null-safe
+  (÷0 → empty, DAX-DIVIDE style) and integer counts divide correctly. The
+  grammar is a strict DAX subset, so a future one-way Power BI export can
+  compile these metrics to DAX measures.
+- **Dashboards drill-down.** Click a bar, pie slice or table row to drill into
+  that category — the same governed metrics narrowed to the clicked value
+  (pushed into the SQL `WHERE`, under your row-level security) and broken down
+  by another dimension of your choice; click a KPI number for its breakdown.
+  A filter on a member the governed view doesn't expose is dropped LOUDLY,
+  never a silently unnarrowed number.
+
+### Fixed
+- **Dashboard charts no longer overlap themselves.** Multi-measure legends get
+  their own scrolling band above the plot, the pie sits clear of a one-line
+  scrolling bottom legend with overlap-hiding slice labels, and long bar
+  category labels rotate + truncate instead of colliding.
+
+### Changed
+- **Dashboards builder is now a plain View/Edit surface — the 5-stage flow is
+  gone.** A NEW dashboard opens in **Edit** (name + panel builder + Save); an
+  EXISTING dashboard opens in **View** — the native ECharts grid — with a clear
+  **✎ Edit** button that switches to Edit, and Save returns to View. Save stays
+  an **upsert under the existing id** (editing updates in place, never
+  duplicates). The `StageShell`/`DASH_STAGES` machinery (and its unit tests) is
+  deleted; the per-stage assistant slot is removed with it.
+- **The Govern stage is dropped.** Its two real actions move to sensible homes:
+  **Promote** now sits in the detail **header** next to the Archive/lifecycle
+  controls (mirrors the Metrics builder), and **Reports** + **Connected tools**
+  (Power BI / Tableau / Superset) fold into a calm section **below the grid** in
+  View — reachable, but no longer a whole stage.
+
+### Removed
+- **The "View as" viewer-region dropdown (DE/FR/US) is gone from the dashboard
+  view.** It was a Cube-era per-viewer-region RLS demo affordance; on the
+  governed-SQL path RLS comes from OPA identity, so the dropdown was misleading.
+  The panel-query request no longer sends `viewerRegion` (the server stays
+  tolerant of the field).
+
+### Added
+- **Existing panels are editable, not just deletable.** In Edit, each panel has
+  an **Edit** button that loads its spec (metric, viz, group-by, time) back into
+  the panel builder — the add button reads **"Update panel"** — and replaces the
+  panel in place on confirm.
+- **Table panels can group by a dimension (and optionally time).** The panel
+  builder's group-by/time controls now apply to `table` too; the governed-SQL
+  resolution path already handled a dimensioned slice and the table renders the
+  dimension column.
+
+### Fixed
+- **Folder-tree scope leak on the new foldered tabs.** `FolderTreeItem.scope` is
+  optional; when omitted an item rendered under BOTH "My folders" and "Domain
+  folders" roots. Every nav list rail now pins each item to its own root:
+  Dashboards, Agents, Connections and Science (models → domain-only) pass an
+  explicit `scope`, so a root-level item shows in exactly one tree.
+
+## [os-ui 0.6.39] — 2026-08-01
+
+### Added
+- **Folders + rename across EVERY artifact tab (parity rollout).** Dashboards,
+  Science, Agents, Software, Connections, Big Bets, Pillars and Business
+  Processes/Workflows now have the same governed folders Files and Data already
+  had — a per-domain My/Domain folder tree in the list header, a "Move to
+  folder…" picker on each artifact, and the folder surviving serialization —
+  all through the ONE shared `ArtifactAdapter` registry (`lib/folders`), so the
+  move/archive/restore/delete cascade is written once and can't drift per tab.
+  Folders stay **domain-scoped**: a folder in domain A never shows in domain B.
+- **Rename for Metrics, Dashboards, Science, Agents, Software, Connections, Big
+  Bets, Pillars and Business Processes.** Each artifact's detail header gains a
+  labelled **✎ Rename** button (inline input, Enter/blur to commit, error shown
+  inline) — the same affordance the Data tab has. Rename is **display-name only**
+  and edit-scoped to the same authority as editing the artifact; every rename is
+  snapshotted to the artifact's version log where it has one.
+
+### Changed
+- **Physical identity is frozen across every rename.** Renaming never moves an
+  artifact's derived/physical identity: a dataset's slug, a dashboard's Cube
+  view, a software app's image/repo slug, a connection's Trino catalog + K8s
+  secret name, a science model's serving key, and an agent/bet/pillar/workflow's
+  stable id all stay pinned — so no live table, image, secret or member is ever
+  orphaned by a rename. A **metric** is `dataset.measure`, so renaming writes a
+  new measure **`label`** and freezes the Cube member `${View}.${name}` (the
+  honest analogue of the dataset slug-freeze), keeping its sql/member identity
+  stable everywhere the metric is served.
+
+## [os-ui 0.6.37] — 2026-08-01
+
+### Changed
+- **Metrics builder: AI in the natural flow (the Data-tab pattern).** Define opens
+  with **Metric name** on top and a ✨ **Suggest metric** button right beside it —
+  the name doubles as the goal, and the AI fills aggregation/column/dimensions for
+  review. The separate "Suggest metrics" box, the goal textarea and the boxed
+  Define/Refine assistants are gone; Refine carries one big ✨ **Refine with AI**
+  action at the top instead.
+- **Dashboards: the false "Cube is not serving …" warning is gone.** Panels serve
+  as governed SQL resolved through the registry (Phase 2), so the design-time Cube
+  probe was checking something that no longer decides anything. The panel palette
+  is now registry-only — what it offers is exactly what the executor computes —
+  and the two dashboard meta routes no longer call Cube at all.
+
+## [os-ui 0.6.36] — 2026-08-01
+
+### Added
+- **Central build-result popup (Data tab).** Silver/Gold build outcomes announce
+  as a centered modal with a big **Continue to next stage →** confirmation —
+  replacing the easy-to-miss bottom-right toasts. Failures show the honest error
+  large and central.
+
+### Changed
+- **Pass through Gold** is a top action in the Harmonize stage, same style and
+  left of ✨ **Propose a clean/join** (the bottom pass-through box is gone).
+
+### Fixed
+- **Store writes can no longer vanish across a deploy.** The durability mirror
+  silently dropped writes while marked unhealthy — a freshly defined metric was
+  lost on the next pod rollout. Writes now queue during unhealthy windows and
+  replay on recovery (bounded; overflow drops oldest loudly).
+
 ## [os-ui 0.6.34] — 2026-07-31
 
 ### Changed

@@ -115,6 +115,13 @@ export const PROMOTE_FIRST_MESSAGE =
  * (never throws — callers decide 400 vs skip).
  */
 export function metricSqlReady(d: Dataset): { ok: boolean; message?: string } {
+  // Metrics are NOT offered on a LIVE connected dataset (lakehouse-import-exposure.md,
+  // Phase 2 v1): a live-federated external table has no governed gold mart to bind a Cube
+  // to, and honest sampling makes an aggregate approximate. Steer to a synced copy — the
+  // ONE message the picker + define route both surface.
+  if (d.connected && d.connected.mode === 'live') {
+    return { ok: false, message: 'Define metrics on a synced copy — not a live connected dataset.' };
+  }
   if (!d.versions.gold.built) {
     return { ok: false, message: 'Define a metric only on a built Gold version.' };
   }
@@ -156,7 +163,10 @@ export const metricGoldReady = metricCubeReady;
  */
 export function goldOutputColumns(d: Dataset): ColumnDoc[] {
   const dims = d.goldSpec?.dimensions ?? [];
-  if (!d.versions.gold.built || dims.length === 0) return d.columns;
+  const derived = d.goldSpec?.derived ?? [];
+  // A projection exists once the Gold spec names ANY dimension or derived column; only
+  // then does the output shape differ from the base/Silver schema (`d.columns`).
+  if (!d.versions.gold.built || (dims.length === 0 && derived.length === 0)) return d.columns;
   const docOf = new Map(d.columns.map((c) => [c.name, c.description]));
   const out: ColumnDoc[] = [];
   const seen = new Set<string>();
@@ -167,6 +177,13 @@ export function goldOutputColumns(d: Dataset): ColumnDoc[] {
     if (!name || seen.has(name)) continue;
     seen.add(name);
     out.push({ name, description: docOf.get(name) ?? docOf.get(src) ?? '' });
+  }
+  // Derived columns are new row-level outputs — their `name` IS the output column.
+  for (const der of derived) {
+    const name = der.name?.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, description: docOf.get(name) ?? '' });
   }
   return out.length ? out : d.columns;
 }

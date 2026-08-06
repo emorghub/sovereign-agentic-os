@@ -80,6 +80,31 @@ test('goldOutputColumns: pass-through / spec-less gold falls back to the documen
   assert.deepEqual(goldOutputColumns(d).map((c) => c.name), ['order_id', 'order_date', 'region', 'net_amount']);
 });
 
+test('goldOutputColumns: derived field names appear in the output set (dims + derived)', () => {
+  const d = gold({
+    goldSpec: {
+      joins: [],
+      dimensions: [{ source: '0::order_id' }],
+      derived: [{ name: 'margin', left: '0::net_amount', op: '-', right: '0::region' }],
+      measures: [],
+    },
+  });
+  assert.deepEqual(goldOutputColumns(d).map((c) => c.name), ['order_id', 'margin']);
+  // …and the Cube scaffold binds a dimension to the derived output column.
+  assert.match(scaffoldCubeYaml(d), /- name: margin/);
+});
+
+test('goldOutputColumns: a derived-only spec (no dims) still surfaces the derived column', () => {
+  const d = gold({
+    goldSpec: {
+      joins: [], dimensions: [],
+      derived: [{ name: 'margin', left: '0::net_amount', op: '*', rightValue: 2 }],
+      measures: [],
+    },
+  });
+  assert.deepEqual(goldOutputColumns(d).map((c) => c.name), ['margin']);
+});
+
 test('dim types are inferred cube_dbt-style from the column names', () => {
   assert.equal(inferDimType('order_date'), 'time');
   assert.equal(inferDimType('created_at'), 'time');
@@ -171,6 +196,18 @@ test('metricSqlReady: still requires a built Gold (no gold → honest reject)', 
   noGold.versions.gold.built = false;
   assert.equal(metricSqlReady(noGold).ok, false);
   assert.match(metricSqlReady(noGold).message!, /built Gold/);
+});
+
+test('metricSqlReady: a LIVE connected dataset is EXCLUDED as a metric source (synced-copy steer)', () => {
+  // Even with a "built" gold layer, a live-federated external table has no governed gold
+  // mart to bind a metric to — the picker + define route both surface this steer.
+  const live = gold({
+    origin: 'connected',
+    connected: { connectionId: 'c', exposureId: 'e', source: { catalog: 'g', schema: 's', table: 't' }, mode: 'live', tier: 'gold', status: 'ok' },
+  });
+  const r = metricSqlReady(live);
+  assert.equal(r.ok, false);
+  assert.match(r.message!, /synced copy/i);
 });
 
 test('metricCubeReady: the Cube-registration promote-first rule is PRESERVED for personal gold', () => {

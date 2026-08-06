@@ -19,6 +19,7 @@ import {
   type GoldSpec,
   type DataCheck,
   type DatasetSync,
+  type ConnectedSource,
   DATASET_SYNC_MODES,
   DatasetError,
   canTransition,
@@ -97,6 +98,13 @@ export type DatasetSummary = {
   /** VISIBLE STALE STATE (Northpeak fix): the promoted domain table holds a prior
    *  snapshot (source rebuilt, publish CTAS not yet re-run). Absent = in sync. */
   domainTableStale?: boolean;
+  /** Born curated (composed from existing datasets) — drives the tile's transparency
+   *  badge. Absent = ingested. */
+  curated?: boolean;
+  /** Adopted from a warehouse connection (origin:'connected'). Present ⇒ the tile shows a
+   *  "connected" badge and its live status; drives the metric-source exclusion. Absent =
+   *  not a connected dataset. */
+  connected?: { mode: 'live' | 'sync'; status: 'ok' | 'drifted' | 'source-revoked' };
 };
 
 type DataStoreState = {
@@ -384,6 +392,10 @@ function summarise(d: Dataset, archived = false): DatasetSummary {
     storage: storageFor(d.tier),
     archived,
     ...(d.domainTableStale ? { domainTableStale: true } : {}),
+    ...(d.origin === 'curated' ? { curated: true } : {}),
+    ...(d.origin === 'connected' && d.connected
+      ? { connected: { mode: d.connected.mode, status: d.connected.status } }
+      : {}),
   };
 }
 
@@ -459,6 +471,32 @@ export function builtLayerFqn(
   user: Principal,
   layer?: Layer,
 ): { layer: Layer; fqn: string; principal: string } | null {
+  // CONNECTED · LIVE branch FIRST (lakehouse-import-exposure.md, Phase 2). An adopted live
+  // dataset federates its ONE declared tier straight to the external `catalog.schema.table`;
+  // there is no bronze and no domain/personal copy. A revoked source resolves to NO fqn
+  // (null) so preview/profile/Talk answer a calm "source revoked" instead of a doomed read.
+  // The principal is ALWAYS the viewer's domain principal — the personal lane never applies.
+  if (d.connected && d.connected.mode === 'live') {
+    if (d.connected.status === 'source-revoked') return null;
+    const chosenLive: Layer = d.connected.tier;
+    const fqn = versionTarget(d, chosenLive, { id: user.id });
+    const principal = user.domains[0] ?? user.id;
+    return { layer: chosenLive, fqn, principal };
+  }
+  // CONNECTED · SYNC branch (lakehouse-import-exposure.md, Phase 3). An adopted sync dataset
+  // reads its GOVERNED COPY at the declared tier from the domain schema (`versionTarget`
+  // resolves it) — but ONLY once the FIRST landing has verified (earned status: the tier
+  // version is `built`). Before that there is no table yet → null (calm "not synced yet").
+  // A source-revoked sync dataset KEEPS its last-landed copy (sovereign data): it still
+  // resolves so preview/Talk/metrics read the frozen table — the UI banners the freeze. The
+  // read runs AS the viewer's domain principal, matching the domain-schema copy.
+  if (d.connected && d.connected.mode === 'sync') {
+    const chosenSync: Layer = d.connected.tier;
+    if (!d.versions[chosenSync]?.built) return null;
+    const fqn = versionTarget(d, chosenSync, { id: user.id });
+    const principal = user.domains[0] ?? user.id;
+    return { layer: chosenSync, fqn, principal };
+  }
   const chosen = layer && d.versions[layer]?.built ? layer : furthest(d).layer;
   if (!chosen) return null;
   // FAIL-CLOSED, owner-aware: only the OWNER resolves to the personal lane and is read AS
@@ -573,6 +611,12 @@ export function listAskable(user: Principal): AskableDataset[] {
   for (const rec of ds().store.values()) {
     const d = parseDataset(rec.yaml);
     if (!canView(d, user)) continue; // the hard visibility gate
+    // ACTIVE-DOMAIN NARROWING (the same inScope gate listDatasets/listJoinable apply):
+    // canView alone leaks across domains — the owner passes it for their OTHER domains'
+    // datasets, and a certified product is canView-true tenant-wide. Talk-to-Data's
+    // evidence must only cite what the operating domain holds (leak seen live
+    // 2026-08-02: all-domain datasets listed as evidence under a single active domain).
+    if (d.domain && !user.domains.includes(d.domain)) continue;
     const f = furthest(d);
     if (!f.layer) continue; // nothing materialized — nothing to query
     const schema = d.tier === 'dataset' ? personalSchema(user.id) : domainSchema(d.domain);
@@ -632,6 +676,160 @@ export function createDataset(user: Principal, input: { name: string; domain?: s
   ds().store.set(rec.id, rec);
   writeThrough(rec); // best-effort durable mirror
   return d;
+}
+
+/**
+ * ADOPT an exposed connection table as a governed dataset (lakehouse-import-exposure.md,
+ * Phase 2). Unlike {@link createDataset}, an adopted dataset is born at DOMAIN tier
+ * (`asset`, visibility `domain`) — exposure (Company/admin) + adoption (domain_admin) are
+ * the two governance gates, so it lands governed, not in the personal lane. `origin` is
+ * `'connected'` with the `connected` block the FQN seam (`builtLayerFqn`/`versionTarget`)
+ * branches on: a LIVE dataset federates every read straight to `<catalog>.<schema>.<table>`
+ * with NO bronze and NO domain copy — so ONLY `versions[tier].built` is set true (the
+ * declared tier's dot), and it carries the at-adopt description straight into the yaml.
+ *
+ * The ROLE GATE (domain_admin) + the exposure→domain intersection are enforced by the
+ * caller (`resolveAdoptableExposure` in the route) — this store action trusts the resolved
+ * `domain`/`catalog`/`connected` it is handed and only enforces the shape (name uniqueness,
+ * a non-empty description). Pure: audit `trace()` is fired at the route, like adoption's
+ * exposure-CRUD sibling.
+ */
+export function adoptConnectedDataset(
+  user: Principal,
+  input: {
+    name: string;
+    domain: string;
+    description: string;
+    connected: ConnectedSource;
+    /** SYNC-mode adoption (Phase 3): the sync config to attach. The engine lands a governed
+     *  copy into `iceberg.<domain>.<tier>_<slug>`; the tier version stays UNBUILT until the
+     *  first successful landing verifies (earned status). Ignored for live-mode adoptions. */
+    sync?: DatasetSync;
+  },
+): Dataset {
+  ensureSeeded();
+  const domain = input.domain || user.domains[0] || 'platform';
+  const name = input.name.trim() || input.connected.source.table;
+  const description = input.description.trim();
+  // A short description is REQUIRED at adopt time (feeds the documentation gate). Refuse an
+  // empty one honestly — never adopt an undocumented external table.
+  if (!description) fail('A short description is required to adopt a connected table.', 400);
+  const wanted = name.toLowerCase();
+  for (const rec of ds().store.values()) {
+    if (rec.domain !== domain) continue;
+    if (parseDataset(rec.yaml).name.trim().toLowerCase() === wanted) {
+      fail(`A dataset named “${name}” already exists in ${domain} — pick a unique name.`, 409);
+    }
+  }
+  const isSync = input.connected.mode === 'sync';
+  // LIVE: the declared tier's version is immediately "built" (federated) — the FQN seam
+  // resolves the external table. SYNC: no version is built yet — the tier lights (EARNED)
+  // only after the first successful landing, so `builtLayerFqn` returns "not synced yet"
+  // until real data lands. Bronze never exists for a connected dataset either way.
+  const versions = emptyVersions();
+  const tierLayer: Layer = input.connected.tier; // 'silver' | 'gold'
+  if (!isSync) {
+    versions[tierLayer] = { built: true, passThrough: false, quality: 'unknown', updatedAt: now(), artifact: null };
+  }
+
+  const d: Dataset = {
+    version: '1',
+    id: newId(),
+    name,
+    owner: user.id,
+    domain,
+    // DOMAIN tier from birth (the approved decision): a governed asset, domain-visible.
+    tier: 'asset',
+    visibility: 'domain',
+    folder: '/',
+    description,
+    versions,
+    grants: [],
+    measures: [],
+    columns: [],
+    cubeNamespaced: true,
+    origin: 'connected',
+    connected: input.connected,
+    // A sync-mode adoption carries its sync config from birth (the scheduler lands the copy).
+    ...(isSync && input.sync ? { sync: input.sync } : {}),
+  };
+  const rec: DatasetRecord = { id: d.id, owner: d.owner, domain: d.domain, yaml: serializeDataset(d), updatedAt: now() };
+  ds().store.set(rec.id, rec);
+  writeThrough(rec);
+  return d;
+}
+
+/**
+ * REVOCATION PROPAGATION (lakehouse-import-exposure.md, Phase 2 + 3). When an exposure is
+ * revoked, every dataset bound to it (`connected.exposureId`) is frozen honestly:
+ *   • LIVE datasets — `connected.status` flips to `'source-revoked'` so the FQN seam
+ *     returns no table (calm "source revoked" everywhere), and preview/Talk render the
+ *     banner.
+ *   • SYNC datasets — the SOVEREIGN DATA is kept: the last-landed governed copy stays in
+ *     the domain schema (`versions[tier].built` is left true), but the sync is DISABLED and
+ *     the per-dataset CronJob removed (`reconcileSyncCron(id, null)`), so no further landing
+ *     runs. Status still flips to `'source-revoked'` — the Source stage banners "copy frozen
+ *     as of <last successful run>" while preview/Talk/metrics keep reading the frozen table.
+ * Returns the affected datasets (id + name + owner) so the route can notify each owner +
+ * trace per dataset. Idempotent: an already-revoked binding is left untouched (not
+ * re-notified). Server-side (scheduler-style, UNSCOPED) — the revoke path has no per-dataset
+ * session. The CronJob teardown happens in the (server-only) CALLER for entries flagged
+ * `syncFrozen` — importing sync-cron here (even dynamically) drags the k8s client
+ * (node:fs/https) into webpack's client graph via store.ts and breaks the production build.
+ * The frozen copy is already sovereign, so a teardown hiccup never loses data.
+ */
+export function markDatasetsSourceRevoked(exposureId: string): { id: string; name: string; owner: string; domain: string; syncFrozen: boolean }[] {
+  ensureSeeded();
+  const affected: { id: string; name: string; owner: string; domain: string; syncFrozen: boolean }[] = [];
+  for (const rec of ds().store.values()) {
+    if (rec.archived) continue;
+    const d = parseDataset(rec.yaml);
+    if (d.origin !== 'connected' || !d.connected) continue;
+    if (d.connected.exposureId !== exposureId) continue;
+    if (d.connected.status === 'source-revoked') continue; // already frozen — don't re-notify
+    d.connected = { ...d.connected, status: 'source-revoked' };
+    // SYNC freeze: disable the sync and tear down its CronJob so no further landing runs —
+    // the last-landed copy is kept untouched (the tier version stays `built`). LIVE datasets
+    // have no sync/CronJob, so this is a no-op for them.
+    const wasSyncEnabled = d.connected.mode === 'sync' && !!d.sync;
+    if (wasSyncEnabled && d.sync) {
+      d.sync = { ...d.sync, enabled: false };
+    }
+    rec.yaml = serializeDataset(d);
+    rec.updatedAt = now();
+    writeThrough(rec);
+    affected.push({ id: d.id, name: d.name, owner: d.owner, domain: d.domain, syncFrozen: wasSyncEnabled });
+  }
+  return affected;
+}
+
+/**
+ * DRIFT PROPAGATION: when a catalog snapshot diff removes/changes a bound table, mark every
+ * live dataset bound to that connection+table `'drifted'` (still readable, warned). Only
+ * flips `ok → drifted` (never overrides `source-revoked`, the stronger state). Returns the
+ * affected datasets. Server-side, UNSCOPED (the snapshot refresh has no per-dataset session).
+ */
+export function markDatasetsDrifted(
+  connectionId: string,
+  removed: { schema: string; table: string }[],
+): { id: string; name: string; owner: string }[] {
+  ensureSeeded();
+  const removedKeys = new Set(removed.map((t) => `${t.schema}.${t.table}`));
+  const affected: { id: string; name: string; owner: string }[] = [];
+  for (const rec of ds().store.values()) {
+    if (rec.archived) continue;
+    const d = parseDataset(rec.yaml);
+    if (d.origin !== 'connected' || !d.connected) continue;
+    if (d.connected.connectionId !== connectionId) continue;
+    if (d.connected.status !== 'ok') continue; // don't downgrade revoked or re-flag drifted
+    if (!removedKeys.has(`${d.connected.source.schema}.${d.connected.source.table}`)) continue;
+    d.connected = { ...d.connected, status: 'drifted' };
+    rec.yaml = serializeDataset(d);
+    rec.updatedAt = now();
+    writeThrough(rec);
+    affected.push({ id: d.id, name: d.name, owner: d.owner });
+  }
+  return affected;
 }
 
 /**
@@ -735,6 +933,7 @@ export function setDocs(
   id: string,
   user: Principal,
   docs: { description?: string; columns?: ColumnDoc[] },
+  opts: { provenance?: 'ai-auto' } = {},
 ): Dataset {
   const rec = get(id);
   const d = editOf(rec, user);
@@ -742,7 +941,12 @@ export function setDocs(
   if (docs.columns !== undefined) {
     d.columns = docs.columns.filter((c) => c.name.trim()).map((c) => ({ name: c.name.trim(), description: c.description ?? '' }));
   }
-  persist(rec, d, { author: user.id, summary: 'edit docs' });
+  // PROVENANCE: an AI auto-doc write STAMPS 'ai-auto' (so the UI shows "AI-drafted —
+  // review…"). Any OTHER setDocs — every human save through the docs route — CLEARS the
+  // marker, so a reviewed/edited doc drops it. Attribute the auto write in the audit log
+  // ('ai-auto-docs') so the version history reads honestly.
+  d.docsProvenance = opts.provenance === 'ai-auto' ? 'ai-auto' : undefined;
+  persist(rec, d, { author: opts.provenance === 'ai-auto' ? 'ai-auto-docs' : user.id, summary: 'edit docs' });
   return d;
 }
 
@@ -868,6 +1072,24 @@ export function removeCheck(id: string, user: Principal, checkId: string): Datas
   const d = editOf(rec, user);
   d.checks = (d.checks ?? []).filter((c) => c.id !== checkId);
   persist(rec, d, { author: user.id, summary: 'remove check' });
+  return d;
+}
+
+/** Set the human-readable DESCRIPTIONS of existing checks by id (Creator+ on a dataset
+ *  you can edit). Only the description text is touched — the executable rule (rule/column/
+ *  args) is never changed here. Unknown ids are ignored; a trimmed-empty description clears
+ *  the field. This is the persist path behind "Save Data Quality Checks" for edited or
+ *  AI-drafted descriptions. */
+export function updateCheckDescriptions(
+  id: string,
+  user: Principal,
+  updates: { id: string; description: string }[],
+): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  const byId = new Map(updates.map((u) => [u.id, (u.description ?? '').trim()]));
+  d.checks = (d.checks ?? []).map((c) => (byId.has(c.id) ? { ...c, description: byId.get(c.id)! } : c));
+  persist(rec, d, { author: user.id, summary: 'describe checks' });
   return d;
 }
 
@@ -1006,6 +1228,25 @@ export function removeMeasure(id: string, user: Principal, measureName: string):
   rec.artifacts = artifacts;
   persist(rec, d, { author: user.id, summary: `remove metric ${measureName}` });
   return { removed: true };
+}
+
+/**
+ * Rename a metric's DISPLAY name — set the measure's `label` while FREEZING `measure.name`.
+ * A metric IS a measure on a governed dataset, so its physical identity is the Cube member
+ * `${View}.${measure.name}`; changing `name` would move that member (and its sql/semantic
+ * declaration), orphaning every consumer. So — exactly like a dataset rename freezes its
+ * physical slug — we write only the `label` and leave `name` (hence the member + Cube
+ * artifacts) untouched. No artifact regeneration: the semantic/cube YAML key off `name`,
+ * which is unchanged. Edit-scoped (owner or in-domain admin, via {@link editOf}).
+ */
+export function setMeasureLabel(id: string, user: Principal, measureName: string, label: string): Dataset {
+  const rec = get(id);
+  const d = editOf(rec, user);
+  const m = d.measures.find((x) => x.name === measureName);
+  if (!m) fail(`Measure '${measureName}' not found`, 404);
+  m.label = label;
+  persist(rec, d, { author: user.id, summary: `rename metric ${measureName}` });
+  return d;
 }
 
 // ------------------------------------------------------- lifecycle (role-gated) --

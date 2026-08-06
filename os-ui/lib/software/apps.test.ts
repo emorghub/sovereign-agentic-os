@@ -22,10 +22,33 @@ const {
   removeAppInternal,
   listAppVersions,
   restoreAppVersion,
+  renameApp,
+  moveApp,
+  getAppForUser,
   templateFiles,
   containerVersionsToPrune,
   REGISTRY_KEEP_VERSIONS,
+  dirListing,
+  repoHtmlUrl,
+  repoSharedByLiveApp,
+  patchAppDesign,
+  reconcileBuiltStatus,
+  normalizeAppMembers,
+  listAppMembers,
+  addAppMember,
+  removeAppMember,
+  getAppBySlugForUser,
 } = await import('./apps.ts');
+const { __resetUsers, createUser } = await import('../platform-admin/users.ts');
+const { snapshotFiles } = await import('./snapshot.ts');
+const { exposedConnectionTools } = await import('../infra/agent-governed.ts');
+import type { App, AppEpic } from './apps.ts';
+const { config } = await import('../core/config.ts');
+
+/** Minimal App stub — only the fields repoSharedByLiveApp reads matter. */
+function appStub(id: string, slug: string, status: 'active' | 'archived'): App {
+  return { id, slug, status, repo: { fullName: `gitea_admin/${slug}`, htmlUrl: '', seeded: [] } } as unknown as App;
+}
 
 const APP_KEY = Symbol.for('soa.apps.cache');
 const user = { id: 'u1', name: 'U1', domains: ['sales'], role: 'admin' as const };
@@ -354,4 +377,394 @@ test('containerVersionsToPrune: default keep is REGISTRY_KEEP_VERSIONS (2)', () 
     { version: 'c', created_at: '2026-07-29T00:00:00Z' },
   ];
   assert.deepEqual(containerVersionsToPrune(versions), ['c'], 'default keeps newest 2, deletes 1');
+});
+
+// ------------------------------------------------ rename: display name + FROZEN slug --
+
+const owner = { id: 'ro1', name: 'RO1', domains: ['sales'], role: 'creator' as const };
+
+test('renameApp: the physical slug (repo/image/container/CI identity) stays FROZEN across a rename', async () => {
+  __resetAppsCache();
+  const app = await createApp(owner, { name: 'Renewals Tracker', template: 'service' });
+  const frozenSlug = app.slug;
+  assert.equal(frozenSlug, 'renewals-tracker', 'slug derived from the create-time name');
+  assert.equal(app.subdomain.split('.')[0], frozenSlug, 'subdomain host = slug');
+
+  const renamed = await renameApp(app.id, owner, 'Contract Renewals');
+  assert.equal(renamed.name, 'Contract Renewals', 'DISPLAY name changed');
+  // THE key assertion — nothing physical moved: image/repo/container FQN + subdomain
+  // are all keyed off slug, which is byte-identical to before the rename.
+  assert.equal(renamed.slug, frozenSlug, 'slug FROZEN — image/repo/container identity never moves');
+  assert.equal(renamed.subdomain.split('.')[0], frozenSlug, 'the per-app host is unchanged');
+  assert.equal(renamed.repo.fullName.split('/')[1] || frozenSlug, frozenSlug, 'the CI repo name is unchanged');
+});
+
+test('renameApp: owner allowed; shared admits an in-domain domain_admin; a non-owner non-admin denied; empty rejected', async () => {
+  __resetAppsCache();
+  const promoter = { id: 'padm', name: 'PAdm', domains: ['sales'], role: 'domain_admin' as const };
+  const app = await createApp(owner, { name: 'Private App', template: 'service' });
+
+  // Owner may rename a Personal app.
+  assert.equal((await renameApp(app.id, owner, 'Private Renamed')).name, 'Private Renamed');
+  // A different domain_admin is NOT the owner and cannot manage a PRIVATE (Personal) app.
+  const otherAdmin = { id: 'other', name: 'Other', domains: ['sales'], role: 'domain_admin' as const };
+  await assert.rejects(
+    () => renameApp(app.id, otherAdmin, 'Hijack'),
+    (e: Error & { status?: number }) => e.status === 403,
+  );
+  // Empty / whitespace name → 400.
+  await assert.rejects(
+    () => renameApp(app.id, owner, '   '),
+    (e: Error & { status?: number }) => e.status === 400,
+  );
+
+  // Promote Personal → Shared (domain_admin+ gate), then an in-domain domain_admin may rename it.
+  await promoteApp(app.id, promoter);
+  const shared = await renameApp(app.id, otherAdmin, 'Shared Renamed');
+  assert.equal(shared.name, 'Shared Renamed', 'a Shared app admits an in-domain domain_admin');
+  assert.equal(shared.slug, app.slug, 'still frozen after the shared rename');
+
+  // A bare creator who is not the owner still may not rename the shared app.
+  const stranger = { id: 'nobody', name: 'Nobody', domains: ['sales'], role: 'creator' as const };
+  await assert.rejects(
+    () => renameApp(app.id, stranger, 'Nope'),
+    (e: Error & { status?: number }) => e.status === 403,
+  );
+});
+
+test('renameApp: no-op (same name) does not churn the version log', async () => {
+  __resetAppsCache();
+  const app = await createApp(owner, { name: 'Steady', template: 'service' });
+  const before = (await listAppVersions(app.id, owner)).length;
+  const same = await renameApp(app.id, owner, 'Steady');
+  assert.equal(same.name, 'Steady');
+  assert.equal((await listAppVersions(app.id, owner)).length, before, 'no version churn on a no-op rename');
+  // A real rename records exactly one snapshot.
+  await renameApp(app.id, owner, 'Steady v2');
+  assert.equal((await listAppVersions(app.id, owner)).length, before + 1, 'a real rename snapshots once');
+});
+
+// ---------------------------------------------------------------- move: folder --
+
+test('moveApp: sets the folder (edit-scoped), normalises the path, and is visible in the scope', async () => {
+  __resetAppsCache();
+  const app = await createApp(owner, { name: 'Foldered', template: 'service' });
+  assert.equal(app.folder, '/', 'a fresh app lives at the root');
+
+  const moved = await moveApp(app.id, owner, 'reports/q3');
+  assert.equal(moved.folder, '/reports/q3', 'folder normalised to a leading-slash path');
+  // Re-read through the governed path — the folder persists.
+  const back = await getAppForUser(app.id, owner);
+  assert.equal(back.folder, '/reports/q3');
+
+  // A non-owner non-admin cannot move a Personal app.
+  const stranger = { id: 'nobody', name: 'Nobody', domains: ['sales'], role: 'creator' as const };
+  await assert.rejects(
+    () => moveApp(app.id, stranger, '/elsewhere'),
+    (e: Error & { status?: number }) => e.status === 403,
+  );
+});
+
+test('repoHtmlUrl: the EXTERNAL browsable URL, not Forgejo’s in-cluster html_url (the repo-404 fix)', () => {
+  const base = config.forgejoConsoleUrl.replace(/\/+$/, '');
+  // Built from the external console URL + full name — never the internal ROOT_URL.
+  assert.equal(repoHtmlUrl('gitea_admin/my-app'), `${base}/gitea_admin/my-app`);
+  // No double slash when the full name carries a leading slash.
+  assert.equal(repoHtmlUrl('/gitea_admin/my-app'), `${base}/gitea_admin/my-app`);
+  // A cluster-internal host is NEVER produced from a well-formed full name.
+  assert.doesNotMatch(repoHtmlUrl('gitea_admin/my-app'), /forgejo-http:3000/);
+  // Empty full name degrades to the base console URL, not a dangling slash.
+  assert.equal(repoHtmlUrl(''), base);
+});
+
+test('dirListing: immediate children only, dirs before files, deduped', () => {
+  const files = [
+    'src/App.tsx',
+    'src/epics/README.md',
+    'src/epics/sales/lead/Lead.tsx',
+    'src/epics/sales/general/util.ts',
+    'src/template/shell.tsx',
+    'README.md',
+  ];
+  // Root: top-level files + top-level dirs, dirs first.
+  const root = dirListing(files, '');
+  assert.deepEqual(
+    root.map((e) => `${e.type}:${e.name}`),
+    ['dir:src', 'file:README.md'],
+  );
+  // A directory: its direct entries, with subdirs as `dir` (not recursed).
+  const epics = dirListing(files, 'src/epics');
+  assert.deepEqual(
+    epics.map((e) => `${e.type}:${e.name}`),
+    ['dir:sales', 'file:README.md'],
+  );
+  assert.equal(epics.find((e) => e.name === 'sales')?.path, 'src/epics/sales');
+  // A trailing slash resolves to the same directory.
+  assert.deepEqual(dirListing(files, 'src/epics/'), epics);
+  // A path matching nothing → empty (the tool turns this into a 404).
+  assert.deepEqual(dirListing(files, 'src/nope'), []);
+  // A deeper dir with only files.
+  assert.deepEqual(
+    dirListing(files, 'src/epics/sales/lead').map((e) => `${e.type}:${e.name}`),
+    ['file:Lead.tsx'],
+  );
+});
+
+// -------------------------------------------- repo-delete guard (shared slug) --
+
+test('repoSharedByLiveApp: another ACTIVE app on the same slug blocks the delete', () => {
+  const self = appStub('app_new', 'northpeak-products', 'active');
+  const peer = appStub('app_old', 'northpeak-products', 'active');
+  assert.equal(
+    repoSharedByLiveApp(self, [self, peer]),
+    'app_old',
+    'a live peer sharing the slug is returned (delete must be skipped)',
+  );
+});
+
+test('repoSharedByLiveApp: self is excluded and no peer → null (delete proceeds)', () => {
+  const self = appStub('app_solo', 'solo-app', 'active');
+  assert.equal(repoSharedByLiveApp(self, [self]), null, 'an app never blocks its own delete');
+  const other = appStub('app_other', 'a-different-slug', 'active');
+  assert.equal(repoSharedByLiveApp(self, [self, other]), null, 'a different slug does not block');
+});
+
+test('repoSharedByLiveApp: an ARCHIVED peer on the same slug does NOT block', () => {
+  const self = appStub('app_new', 'shared-slug', 'active');
+  const archived = appStub('app_arch', 'shared-slug', 'archived');
+  assert.equal(
+    repoSharedByLiveApp(self, [self, archived]),
+    null,
+    'archived peers do not veto a delete — only live apps count',
+  );
+});
+
+// -------------------------------------------- earned built-ness (phantom fix) --
+
+const epicsWithStory = (status: 'todo' | 'building' | 'done'): AppEpic[] => [
+  {
+    id: 'e1',
+    title: 'Admin',
+    stories: [
+      { id: 's1', title: 'Tenant mgmt', asA: 'a', iWant: 'b', soThat: 'c', acceptance: 'ok', status },
+    ],
+  } as unknown as AppEpic,
+];
+
+test('patchAppDesign REFUSES to flip a story to done on an app with NO committed code', async () => {
+  __resetAppsCache();
+  const owner = { id: 'eb1', name: 'EB1', domains: ['sales'], role: 'admin' as const };
+  const app = await createApp(owner, { name: 'PhantomGuard', template: 'sovereign-app' });
+  // No real commit: offline scaffold, empty seeded repo, no snapshot pages.
+  assert.notEqual(app.pipeline.forgejo, 'ok');
+  const after = await patchAppDesign(app.id, owner, { epics: epicsWithStory('done') });
+  assert.equal(after.epics?.[0].stories[0].status, 'todo', 'a self-reported done is forced back to todo — built-ness is earned');
+});
+
+test('patchAppDesign KEEPS done when the app has a real commit (forgejo ok)', async () => {
+  __resetAppsCache();
+  const owner = { id: 'eb2', name: 'EB2', domains: ['sales'], role: 'admin' as const };
+  const app = await createApp(owner, { name: 'RealCommit', template: 'sovereign-app' });
+  app.pipeline.forgejo = 'ok'; // a real repo with a landed commit
+  const after = await patchAppDesign(app.id, owner, { epics: epicsWithStory('done') });
+  assert.equal(after.epics?.[0].stories[0].status, 'done', 'a genuinely-committed app trusts the earned status');
+});
+
+test('reconcileBuiltStatus demotes phantom done/building when nothing is committed', async () => {
+  __resetAppsCache();
+  const owner = { id: 'eb3', name: 'EB3', domains: ['sales'], role: 'admin' as const };
+  const app = await createApp(owner, { name: 'HealMe', template: 'sovereign-app' });
+  // Simulate the live lie: status already persisted done, but no repo/commit exists.
+  app.epics = epicsWithStory('done');
+  const r = reconcileBuiltStatus(app);
+  assert.equal(r.demoted, 1);
+  assert.equal(app.epics?.[0].stories[0].status, 'todo', 'the phantom-built story self-corrects to its true state');
+});
+
+test('reconcileBuiltStatus is a NO-OP when the committed snapshot has story pages', async () => {
+  __resetAppsCache();
+  const owner = { id: 'eb4', name: 'EB4', domains: ['sales'], role: 'admin' as const };
+  const app = await createApp(owner, { name: 'TrulyBuilt', template: 'sovereign-app' });
+  app.epics = epicsWithStory('done');
+  // A real committed page under the story-folder convention → built-ness is genuine.
+  snapshotFiles(app.id, [{ path: 'src/epics/admin/tenant/Page.tsx', content: 'export default () => null;' }]);
+  const r = reconcileBuiltStatus(app);
+  assert.equal(r.demoted, 0, 'a real committed page is left alone');
+  assert.equal(app.epics?.[0].stories[0].status, 'done');
+});
+
+// ------------------------------------------------- grants → runtime OPA profile --
+
+test('grants recompile: patching grants adds the data-plane tools to the app OPA profile', async () => {
+  __resetAppsCache();
+  const owner = { id: 'gr1', name: 'GR1', domains: ['sales'], role: 'admin' as const };
+  const app = await createApp(owner, { name: 'GrantsApp', template: 'sovereign-app' });
+
+  // Baseline: the app's OPA profile carries its TEMPLATE tools; no data-plane grant tools yet.
+  const before = exposedConnectionTools(app.mcpPrincipal);
+  assert.equal(before.includes('query_data'), false, 'no granted data tool before any grant');
+
+  // Patch a DATA + KNOWLEDGE grant → recompile must fold in their data-plane tools.
+  await patchAppDesign(app.id, owner, {
+    grants: {
+      connections: [],
+      data: [{ id: 'ds_x', access: 'read-only' }],
+      knowledge: [{ id: 'wf_y', access: 'read-only' }],
+      files: [],
+      metrics: [],
+    },
+  });
+  const after = exposedConnectionTools(app.mcpPrincipal);
+  assert.ok(after.includes('query_data'), 'granted data ⇒ query_data now exposed');
+  assert.ok(after.includes('get_dataset'), 'discovery companion exposed');
+  assert.ok(after.includes('search_knowledge'), 'granted knowledge ⇒ search_knowledge exposed');
+  // Template tools remain the baseline surface (grants only ADD).
+  assert.ok(after.length >= before.length, 'grants add to, never remove, the template surface');
+});
+
+test('grants recompile: clearing grants fails closed — data-plane tools drop back to template default', async () => {
+  __resetAppsCache();
+  const owner = { id: 'gr2', name: 'GR2', domains: ['sales'], role: 'admin' as const };
+  const app = await createApp(owner, { name: 'GrantsApp2', template: 'sovereign-app' });
+  await patchAppDesign(app.id, owner, {
+    grants: { connections: [], data: [{ id: 'ds_z', access: 'read-only' }], knowledge: [], files: [], metrics: [] },
+  });
+  assert.ok(exposedConnectionTools(app.mcpPrincipal).includes('query_data'), 'granted');
+  // Revoke every grant → recompile removes the data-plane tools (fail-closed).
+  await patchAppDesign(app.id, owner, {
+    grants: { connections: [], data: [], knowledge: [], files: [], metrics: [] },
+  });
+  assert.equal(
+    exposedConnectionTools(app.mcpPrincipal).includes('query_data'),
+    false,
+    'revoking the grant removes runtime access',
+  );
+});
+
+// --------------------------------------------------------------- Membership --
+
+test('membership: normalizeAppMembers is deterministic, drops junk, excludes owner', () => {
+  const owner = 'ownerX';
+  const out = normalizeAppMembers(
+    [
+      { id: 'zeb', role: 'member' },
+      { id: 'ann', role: 'admin' },
+      { id: 'ownerX', role: 'admin' }, // owner is implicit — dropped
+      { id: 'ann', role: 'member' }, // dup — first role wins
+      { id: 'bad', role: 'nope' }, // unknown role — dropped
+      { role: 'member' }, // no id — dropped
+      null,
+      'x',
+    ] as unknown,
+    owner,
+  );
+  assert.deepEqual(out, [
+    { id: 'ann', role: 'admin' },
+    { id: 'zeb', role: 'member' },
+  ], 'sorted by id, junk removed, owner excluded, dedup first-wins');
+  // Absent/invalid list ⇒ owner-only ([]) — the nil-safe default old records rely on.
+  assert.deepEqual(normalizeAppMembers(undefined, owner), []);
+  assert.deepEqual(normalizeAppMembers({} as unknown, owner), []);
+});
+
+test('membership: a fresh app defaults to OWNER-ONLY (no other accounts appear)', async () => {
+  __resetAppsCache();
+  __resetUsers();
+  const owner = { id: 'own1', name: 'Owner One', domains: ['sales'], role: 'builder' as const };
+  await createUser({ id: 'own1', name: 'Owner One', password: 'x', domains: ['sales'], role: 'builder', email: 'own1@example.com' });
+  const app = await createApp(owner, { name: 'Members Default', template: 'sovereign-app' });
+  assert.deepEqual(app.members, [], 'no explicit members on create');
+  const { members, canManage } = await listAppMembers(app.id, owner);
+  assert.equal(members.length, 1, 'only the owner is listed by default');
+  assert.equal(members[0].id, 'own1');
+  assert.equal(members[0].isOwner, true);
+  assert.equal(members[0].role, 'admin', 'owner is the implicit admin');
+  assert.equal(canManage, true, 'owner may manage membership');
+});
+
+test('membership: old records with no members list are nil-safe (owner-only after hydrate)', async () => {
+  __resetAppsCache();
+  __resetUsers();
+  const owner = { id: 'own2', name: 'Owner Two', domains: ['sales'], role: 'admin' as const };
+  await createUser({ id: 'own2', name: 'Owner Two', password: 'x', domains: ['sales'], role: 'admin', email: 'own2@example.com' });
+  const app = await createApp(owner, { name: 'Legacy App', template: 'sovereign-app' });
+  // Simulate a pre-membership persisted record.
+  (app as unknown as { members?: unknown }).members = undefined;
+  const { members } = await listAppMembers(app.id, owner);
+  assert.equal(members.length, 1, 'absent list ⇒ owner-only, never a crash');
+  assert.equal(members[0].isOwner, true);
+});
+
+test('membership: an app admin can add + remove a named member; non-admin is denied', async () => {
+  __resetAppsCache();
+  __resetUsers();
+  const owner = { id: 'own3', name: 'Owner Three', domains: ['sales'], role: 'builder' as const };
+  const outsider = { id: 'out3', name: 'Outsider', domains: ['sales'], role: 'builder' as const };
+  await createUser({ id: 'own3', name: 'Owner Three', password: 'x', domains: ['sales'], role: 'builder', email: 'own3@example.com' });
+  await createUser({ id: 'out3', name: 'Outsider', password: 'x', domains: ['sales'], role: 'builder', email: 'out3@example.com' });
+  await createUser({ id: 'mem3', name: 'New Member', password: 'x', domains: ['sales'], role: 'creator', email: 'mem3@example.com' });
+  const app = await createApp(owner, { name: 'Add Remove', template: 'sovereign-app' });
+
+  // Owner adds a member.
+  await addAppMember(app.id, owner, 'mem3', 'member');
+  let view = await listAppMembers(app.id, owner);
+  assert.equal(view.members.length, 2, 'owner + the added member');
+  assert.ok(view.members.some((m) => m.id === 'mem3' && m.role === 'member' && !m.isOwner));
+
+  // A non-owner, non-admin (Personal app) may NOT add.
+  await assert.rejects(
+    () => addAppMember(app.id, outsider, 'out3', 'member'),
+    (e: unknown) => (e as { status?: number }).status === 403,
+    'a non-admin cannot manage membership',
+  );
+
+  // Adding an unknown OS user fails 404 (must be a real account).
+  await assert.rejects(
+    () => addAppMember(app.id, owner, 'ghost', 'member'),
+    (e: unknown) => (e as { status?: number }).status === 404,
+    'cannot add a non-existent OS user',
+  );
+
+  // Owner removes the member.
+  await removeAppMember(app.id, owner, 'mem3');
+  view = await listAppMembers(app.id, owner);
+  assert.equal(view.members.length, 1, 'back to owner-only after removal');
+
+  // The owner can never be removed (the app cannot go admin-less).
+  await assert.rejects(
+    () => removeAppMember(app.id, owner, 'own3'),
+    (e: unknown) => (e as { status?: number }).status === 400,
+    'the owner cannot be removed',
+  );
+});
+
+test('membership: getAppBySlugForUser resolves the deployed app for a viewer, honours visibility', async () => {
+  __resetAppsCache();
+  __resetUsers();
+  const owner = { id: 'own4', name: 'Owner Four', domains: ['sales'], role: 'builder' as const };
+  const stranger = { id: 'str4', name: 'Stranger', domains: ['ops'], role: 'builder' as const };
+  await createUser({ id: 'own4', name: 'Owner Four', password: 'x', domains: ['sales'], role: 'builder', email: 'own4@example.com' });
+  const app = await createApp(owner, { name: 'Slug App', template: 'sovereign-app' });
+
+  const bySlug = await getAppBySlugForUser(app.slug, owner);
+  assert.ok(bySlug && bySlug.id === app.id, 'owner resolves their app by slug');
+  // Personal app: a stranger in another domain sees nothing.
+  const denied = await getAppBySlugForUser(app.slug, stranger);
+  assert.equal(denied, null, 'a non-visible app is not resolvable by slug');
+  // Unknown slug ⇒ null (a deleted deploy degrades honestly).
+  assert.equal(await getAppBySlugForUser('no-such-slug', owner), null);
+});
+
+test('Phase B flag OFF: refreshBuildStage says WHY honestly and leaves Actions authoritative', async () => {
+  // SOFTWARE_BUILD_SERVICE is unset in this file's process → the build service is OFF.
+  __resetAppsCache();
+  const { refreshBuildStage } = await import('./apps.ts');
+  const { BUILD_SERVICE_OFF_NOTE } = await import('./build-service.ts');
+  const app = await createApp(user, { name: 'Off Flag App', template: 'vite-os' });
+  const before = app.pipeline.harbor;
+  const out = await refreshBuildStage(app);
+  assert.ok(out, 'the OFF state is still reported, never silent');
+  assert.equal(out.status, before, 'the stage is untouched — Forgejo Actions stays authoritative');
+  assert.equal(out.note, BUILD_SERVICE_OFF_NOTE, 'the note states the flag/RBAC cause + the Actions fallback');
+  assert.equal(app.runImageDigest, undefined, 'no digest is ever pinned while the service is off');
 });

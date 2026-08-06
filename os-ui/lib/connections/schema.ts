@@ -72,6 +72,40 @@ export type AtlassianConnectionConfig = {
   email?: string;
 };
 
+/** How an OData connection authenticates: a communication user (Basic) or OAuth2
+ *  client-credentials. Both are vaulted; the token URL (OAuth-CC) is non-secret config. */
+export type ODataAuthType = 'basic' | 'oauth-cc';
+
+/**
+ * The NON-SECRET config carried on a `sap-odata` / `odata-v4` Connection record. The
+ * service ROOT is the connection `endpoint`; the credential (`<user>:<password>` for
+ * Basic, `<client_id>:<client_secret>` for OAuth-CC) is the vaulted secret. `authType`
+ * picks Basic vs OAuth-CC; `tokenUrl` is only meaningful for OAuth-CC (non-secret).
+ */
+export type ODataConnectionConfig = {
+  authType: ODataAuthType;
+  /** OAuth2 client-credentials token endpoint (non-secret). Empty for Basic. */
+  tokenUrl?: string;
+};
+
+/** ONE registered Workday RaaS report — each is a catalog entity. `key` is a stable
+ *  entity slug; `path` is the report URL; `incrementalParam` (optional) is the report's
+ *  date-prompt parameter for an incremental window. Non-secret. */
+export type WorkdayReportRef = {
+  key: string;
+  path: string;
+  label?: string;
+  incrementalParam?: string;
+};
+
+/** The NON-SECRET config carried on a `workday-raas` Connection record. The tenant RaaS
+ *  base URL is the connection `endpoint`; the ISU credential (`<user>:<password>`) is
+ *  vaulted. `reports` is the admin-registered report catalog (there is no cheap global
+ *  describe in Workday RaaS — the admin manages these). */
+export type WorkdayConnectionConfig = {
+  reports: WorkdayReportRef[];
+};
+
 /** The adapter family that implements a connection type (see lib/connection-adapters). */
 export type ConnectorKind = 'drive' | 'database' | 'api' | 'mcp' | 'saas';
 
@@ -195,9 +229,19 @@ export type Connection = {
   /** For an `atlassian` template only: the non-secret auth config (Basic vs Bearer +
    *  the account email for Basic). The API token / OAuth bearer lives in the vault. */
   atlassian?: AtlassianConnectionConfig;
+  /** For a `sap-odata` / `odata-v4` template only: the non-secret auth config (Basic vs
+   *  OAuth-CC + the token URL for OAuth-CC). The credential lives in the vault. */
+  odata?: ODataConnectionConfig;
+  /** For a `workday-raas` template only: the non-secret RaaS report catalog the admin
+   *  registered (there is no cheap global describe). The ISU credential lives in the vault. */
+  workday?: WorkdayConnectionConfig;
   /** Soft-archived: hidden from the working lists, reversible, retained (the vault
    *  secret + OAuth token are KEPT). Absent/false = live. */
   archived?: boolean;
+  /** The folder this connection lives in (normalised path; `'/'` = root). Absent on a
+   *  connection minted before folders existed → treated as root. Purely organisational:
+   *  it NEVER touches the FROZEN physical identity (`slug`/`principal`/catalog/secret). */
+  folder?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -216,6 +260,22 @@ export type ConnectionTemplateKey =
   // JSON:API pages stream to the data-runner; only `purchases` has a true update
   // cursor — see lib/connections/kajabi-resources.ts for the honest per-resource map.
   | 'kajabi-api'
+  // SAP S/4HANA Cloud over its OData services (generic OData core, lib/connections/odata/).
+  // A branded template whose endpoint is the OData SERVICE ROOT of a communication
+  // arrangement; auth is a communication user (Basic) or OAuth2 client-credentials. Like
+  // Salesforce/Kajabi, an OPERATIONAL SYNC SOURCE (api-batch): entity-set pages stream to
+  // the data-runner, cursor honesty per-entity from $metadata detection. HONEST v1 CAVEAT:
+  // cloud-reachable services only — on-prem behind the SAP Cloud Connector is NOT supported.
+  | 'sap-odata'
+  // Generic OData V4 (Dynamics 365 / Business Central and any V4 service) — the UNBRANDED
+  // sibling of sap-odata riding the SAME generic OData core, for free.
+  | 'odata-v4'
+  // Workday over RaaS (Reports-as-a-Service). The endpoint is the tenant RaaS base; auth is
+  // an ISU (Integration System User) Basic credential. Configured custom REPORTS ARE the
+  // entities (no cheap global describe); fields inferred from a sampled first page;
+  // full-refresh-only by default (incremental only when a report exposes a date prompt).
+  // SOAP WWS (true incremental entity sync) is v2, stated plainly.
+  | 'workday-raas'
   | 'generic-mcp'
   | 'generic-api'
   | 'database'
@@ -387,18 +447,16 @@ export const CONNECTION_TEMPLATES: ConnectionTemplate[] = [
     auth: 'service',
     endpointHint: 'https://yourorg.my.salesforce.com',
     secretKey: 'client-credentials',
+    // The per-object preset (read_account / read_opportunity / update_opportunity_amount)
+    // has been REMOVED: the entity-generic `sf_*` action tools (salesforce-tools.ts) replaced
+    // them (operational-system-connections.md, Phase 3). The old mocked, Write-bounded
+    // `update_opportunity_amount` in particular fabricated an "updated" envelope with no live
+    // call — the single worst mocked-write offender. What remains are the two guard rails a
+    // Salesforce connection keeps regardless of the action surface: bulk update is Off, delete
+    // is Blocked (registered, never callable).
     tools: [
-      { name: 'read_account', description: 'Read an account (read).', write: false, mode: 'Read', limits: { dataScope: 'Sales domain accounts' } },
-      { name: 'read_opportunity', description: 'Read an opportunity (read).', write: false, mode: 'Read', limits: { dataScope: 'Sales domain opportunities' } },
-      {
-        name: 'update_opportunity_amount',
-        description: 'Update an opportunity amount (write).',
-        write: true,
-        mode: 'Write-bounded',
-        limits: { maxAmount: 50000, dataScope: 'Sales domain opportunities', rateLimitPerMin: 5, costCapUsd: 1 },
-      },
-      { name: 'mass_update', description: 'Bulk update many records (write).', write: true, mode: 'Off' },
-      { name: 'delete_record', description: 'Delete a record (write).', write: true, mode: 'Blocked' },
+      { name: 'mass_update', description: 'Bulk update many records (write — Off).', write: true, mode: 'Off' },
+      { name: 'delete_record', description: 'Delete a record (write — Blocked).', write: true, mode: 'Blocked' },
     ],
   },
   {
@@ -425,13 +483,69 @@ export const CONNECTION_TEMPLATES: ConnectionTemplate[] = [
       { name: 'read_purchase', description: 'Read an offer purchase (read).', write: false, mode: 'Read', limits: { dataScope: 'your Kajabi sites' } },
       { name: 'list_offers', description: 'List offers (read).', write: false, mode: 'Read' },
       {
+        // Off by default (C2): no real Kajabi write executor is wired yet, so leaving this
+        // Write-approval would mean an approved call still executed only a mocked write. It
+        // stays registered (visible, honest) but uncallable until a real writer lands.
         name: 'tag_contact',
-        description: 'Add a tag to a contact (write).',
+        description: 'Add a tag to a contact (write — Off: no live writer wired yet).',
         write: true,
-        mode: 'Write-approval',
+        mode: 'Off',
         limits: { dataScope: 'your Kajabi contacts', rateLimitPerMin: 10 },
       },
       { name: 'delete_contact', description: 'Delete a contact (write).', write: true, mode: 'Blocked' },
+    ],
+  },
+  {
+    // SAP S/4HANA Cloud over OData (generic OData core, lib/connections/odata/). The
+    // endpoint is the OData SERVICE ROOT of a communication arrangement; the ONE vaulted
+    // credential is `<user>:<password>` (Basic communication user) or
+    // `<client_id>:<client_secret>` (OAuth2 client-credentials). An OPERATIONAL SYNC
+    // SOURCE (api-batch): $metadata drives discovery + cursor detection; entity-set pages
+    // stream to the data-runner. NO action tools this wave (SAP actions are a later
+    // decision) — the profile is read-only; deletes stay Blocked by construction.
+    key: 'sap-odata',
+    label: 'SAP S/4HANA Cloud (OData)',
+    type: 'API',
+    connector: 'api',
+    auth: 'service',
+    endpointHint: 'https://my999999.s4hana.cloud.sap/sap/opu/odata/sap/API_BUSINESS_PARTNER',
+    secretKey: 'odata-credentials',
+    tools: [
+      { name: 'odata_list_entities', description: 'List the service’s entity sets from $metadata (read).', write: false, mode: 'Read' },
+      { name: 'odata_read_entity', description: 'Read entities from one set (bounded page) (read).', write: false, mode: 'Read', limits: { dataScope: 'the exposed entity sets' } },
+    ],
+  },
+  {
+    // Generic OData V4 (Dynamics 365 / Business Central / any V4 service) — the unbranded
+    // sibling riding the SAME generic OData core. Same auth options + capability shape.
+    key: 'odata-v4',
+    label: 'OData V4 (Dynamics 365 / Business Central)',
+    type: 'API',
+    connector: 'api',
+    auth: 'service',
+    endpointHint: 'https://host/api/data/v9.2',
+    secretKey: 'odata-credentials',
+    tools: [
+      { name: 'odata_list_entities', description: 'List the service’s entity sets from $metadata (read).', write: false, mode: 'Read' },
+      { name: 'odata_read_entity', description: 'Read entities from one set (bounded page) (read).', write: false, mode: 'Read', limits: { dataScope: 'the exposed entity sets' } },
+    ],
+  },
+  {
+    // Workday over RaaS (lib/connections/workday-raas.ts). The endpoint is the tenant RaaS
+    // base; the ONE vaulted credential is `<isu_user>:<password>` (ISU Basic). Configured
+    // custom REPORTS ARE the entities (no global describe); fields inferred from a sampled
+    // first page; full-refresh-only by default. An OPERATIONAL SYNC SOURCE (api-batch);
+    // no action tools this wave (read-only profile; deletes Blocked by construction).
+    key: 'workday-raas',
+    label: 'Workday (RaaS reports)',
+    type: 'SaaS',
+    connector: 'saas',
+    auth: 'service',
+    endpointHint: 'https://wd2-impl-services1.workday.com/ccx/service/customreport2/tenant',
+    secretKey: 'workday-isu-credentials',
+    tools: [
+      { name: 'workday_list_reports', description: 'List the configured RaaS reports (each is an entity) (read).', write: false, mode: 'Read' },
+      { name: 'workday_read_report', description: 'Read one RaaS report’s rows (read).', write: false, mode: 'Read', limits: { dataScope: 'the configured reports' } },
     ],
   },
   {
@@ -1024,7 +1138,7 @@ export const CONNECTION_TEMPLATES: ConnectionTemplate[] = [
  * import, the connections gate, adapter tests) and is deliberately NOT offered in
  * the create picker — a user can never stand up a non-working mock connection.
  */
-export const USER_FACING_TEMPLATE_KEYS: ConnectionTemplateKey[] = ['gdrive', 'onedrive', 'notion-mcp', 'generic-api', 'generic-mcp', 'airflow', 'github', 'supabase', 'atlassian', 'slack', 'gmail', 'gcal', 'outlook', 'teams', 'entra', 'purview', 'ai-foundry', 'sagemaker', 'gcp-identity', 'gcp-directory', 'snowflake-governance', 'salesforce-api', 'kajabi-api'];
+export const USER_FACING_TEMPLATE_KEYS: ConnectionTemplateKey[] = ['gdrive', 'onedrive', 'notion-mcp', 'generic-api', 'generic-mcp', 'airflow', 'github', 'supabase', 'atlassian', 'slack', 'gmail', 'gcal', 'outlook', 'teams', 'entra', 'purview', 'ai-foundry', 'sagemaker', 'gcp-identity', 'gcp-directory', 'snowflake-governance', 'salesforce-api', 'kajabi-api', 'sap-odata', 'odata-v4', 'workday-raas'];
 
 export function isUserFacingTemplate(key: string): boolean {
   return (USER_FACING_TEMPLATE_KEYS as string[]).includes(key);

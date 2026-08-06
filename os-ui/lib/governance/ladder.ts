@@ -10,12 +10,14 @@ import { record as auditRecord } from '@/lib/governance/audit';
 import { publishPromotionLive } from '@/lib/data/publish-server';
 import { getWorkflow } from '@/lib/knowledge';
 import { getPersonalKnowledge, decertifyPersonalKnowledge, unsharePersonalKnowledge } from '@/lib/knowledge/personal-store';
-import { getDashboard } from '@/lib/dashboards';
-import { getConnectionForUser, promoteConnection, demoteConnection } from '@/lib/connections';
+import { freezeCertifiedKnowledgeBundle } from '@/lib/knowledge/okf-freeze';
+import { getDashboard, demoteDashboard } from '@/lib/dashboards';
+import { getConnectionForUser, promoteConnection, demoteConnection, approveOnce } from '@/lib/connections';
+import { approveExposureActions } from '@/lib/connections/exposures';
 import { resolveOmCatalog, applyOmSyncForConnection, applyDqSyncForConnection } from '@/lib/connections/openmetadata';
 import { applyCatalogIngest } from '@/lib/connections/openmetadata-ingest';
 import { getDataset } from '@/lib/data';
-import { getModel } from '@/lib/science';
+import { getModel, demoteModel } from '@/lib/science';
 import { getArtifact, promoteArtifact, demoteArtifact } from '@/lib/core/artifacts';
 import { getAppForUser, promoteApp } from '@/lib/software/apps';
 import { demoteApp } from '@/lib/software/lifecycle';
@@ -208,6 +210,20 @@ export function buildEffectDeps(): EffectDeps {
       const { app } = await decideDeploy(cardId, asCurrentUser(approver), decision);
       return { appName: app.name, state: app.deploy.state, live: app.pipeline.live === 'ok' };
     },
+    enableExposureActions: (exposureId, approver) => approveExposureActions(exposureId, asCurrentUser(approver)),
+    freezeKnowledgeBundle: (workflowId, approver) => freezeCertifiedKnowledgeBundle(workflowId, { id: approver.id, role: approver.role, domains: approver.domains }),
+    applyConnectionWrite: async (payload, approver) => {
+      // EXECUTE the held write through the governed approveOnce seam AS the approver — the
+      // capability profile / four-layer intersection is re-checked inside, so a doctored
+      // payload can never widen the write. Map the ToolCallResult to an honest {ok, reason}.
+      const res = await approveOnce(payload.connId, asCurrentUser(approver), { tool: payload.tool, args: payload.args });
+      const ok = res.decision === 'allow';
+      const execFailed = ok && (res.result as { ok?: boolean } | undefined)?.ok === false;
+      const reason = execFailed
+        ? `executor reported failure: ${((res.result as { reason?: string }).reason) ?? 'no reason given'}`
+        : res.reason;
+      return { ok: ok && !execFailed, reason };
+    },
     applyOmSync: async (payload, approver) => {
       const user = asCurrentUser(approver);
       const c = await resolveOmCatalog(payload.connId, user); // DLS guard (404)
@@ -344,8 +360,8 @@ export async function promoteOrRequest(
 
 /** The ladder kinds a DEMOTE (revoke sharing) is wired for — the reverse of the
  *  UI direct-promote buttons. dataset/file keep their own lifecycle/transition rails. */
-export type DemotableKind = Extract<LadderKind, 'artifact' | 'app' | 'connection' | 'personal_knowledge' | 'agent_system'>;
-const DEMOTABLE: readonly DemotableKind[] = ['artifact', 'app', 'connection', 'personal_knowledge', 'agent_system'] as const;
+export type DemotableKind = Extract<LadderKind, 'artifact' | 'app' | 'connection' | 'personal_knowledge' | 'agent_system' | 'dashboard' | 'model'>;
+const DEMOTABLE: readonly DemotableKind[] = ['artifact', 'app', 'connection', 'personal_knowledge', 'agent_system', 'dashboard', 'model'] as const;
 export function isDemotableKind(x: string): x is DemotableKind {
   return (DEMOTABLE as readonly string[]).includes(x);
 }
@@ -406,6 +422,18 @@ export async function demoteThroughSeam(
     case 'agent_system': {
       const rec = demoteSystem(id, p);
       result = { id: rec.id, name: rec.name, visibility: rec.visibility };
+      break;
+    }
+    case 'dashboard': {
+      const d = demoteDashboard(id, p);
+      result = { id: d.id, name: d.spec.name, visibility: d.tier };
+      break;
+    }
+    case 'model': {
+      // The science Actor role: a creator maps to 'user' (no manage rights); the
+      // isAgent:false invariant holds — only humans reach this seam.
+      const m = demoteModel(id, { id: user.id, role: user.role === 'creator' ? 'user' : user.role, domains: user.domains, isAgent: false });
+      result = { id: m.model, name: m.name, visibility: m.tier };
       break;
     }
     default:

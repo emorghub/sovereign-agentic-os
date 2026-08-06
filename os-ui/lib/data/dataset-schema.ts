@@ -87,6 +87,11 @@ export type Measure = {
   name: string;
   type: string;
   sql: string;
+  /** DISPLAY name shown wherever the metric's name appears. A metric IS `dataset.measure`,
+   *  so its physical identity is the Cube member `${View}.${name}` — renaming a metric must
+   *  NEVER move that member. So a rename writes THIS label (falls back to `name` when unset)
+   *  and freezes `name`, exactly as a dataset rename freezes its physical slug. */
+  label?: string;
   /** Conditional filters narrowing what the aggregation counts (Cube `filters:`). */
   filters?: MeasureFilter[];
   /** A moving time window — trailing/leading/running total (Cube `rolling_window:`). */
@@ -95,6 +100,14 @@ export type Measure = {
   format?: string;
   /** Drill-down members exposed for exploration (Cube `drill_members:`). */
   drillMembers?: string[];
+  /** COMPOSITE metric only: the SOURCE formula the user wrote (`([revenue]-[cost])/[orders]`).
+   *  `sql` holds its compiled `{measure}`-reference form; this round-trips the human-readable
+   *  original for Edit/View. Absent on every non-formula measure. */
+  formula?: string;
+  /** A plain-language sentence — "what does this metric mean?" — shown in the View
+   *  Definition panel and on the metric tile. Absent on every measure created before this
+   *  field existed (byte-stable, exactly like `label`/`formula`); `sameMeasure` ignores it. */
+  description?: string;
 };
 
 /** A documented column (the documentation form). At least one with a non-empty
@@ -135,10 +148,23 @@ export type GoldSpecJoin = {
 };
 export type GoldSpecDimension = { source: string; as?: string };
 export type GoldSpecMeasure = { name: string; agg: string; col?: string; op?: string; col2?: string };
+/** A row-level DERIVED output column in the panel's own `ref::column` vocabulary: a
+ *  new column `name` = `left` `op` (`right` column | `rightValue` constant). Exactly ONE
+ *  of `right`/`rightValue` is set. Stored verbatim, never trusted — the server recompiles
+ *  from the resolved refs. ABSENT on every dataset built before derived fields existed
+ *  (byte-stable). */
+export type GoldSpecDerived = { name: string; left: string; op: string; right?: string; rightValue?: number };
 export type GoldSpec = {
   joins: GoldSpecJoin[];
   dimensions: GoldSpecDimension[];
+  derived?: GoldSpecDerived[];
   measures: GoldSpecMeasure[];
+  /** The EXPLICIT base dataset a CURATED compose builds from (its physical gold/silver
+   *  becomes the compile `source`, ref 0). ABSENT on every ingested dataset and on every
+   *  dataset built before curated compose existed — absent means "own-silver base", which
+   *  is byte-stable for every existing record. Stored verbatim, never trusted: the route
+   *  re-resolves it through `getDataset` (entitlement + active domain) before compiling. */
+  baseDatasetId?: string;
 };
 
 /** The dropdown-driven data-quality rule kinds the DQ editor offers. Each compiles
@@ -206,6 +232,33 @@ export type DatasetSync = {
   enabled: boolean;
 };
 
+/** Sharing/refinement TIER a connected (adopted) dataset carries — the curated
+ *  silver/gold an exposure declares. Kept in lockstep with `ExposureTier` (this base
+ *  module stays import-light so client bundles never drag the connections registry in). */
+export type ConnectedTier = 'silver' | 'gold';
+/** How an adopted dataset reads its source: `live` federates every read straight through
+ *  to the external FQN (Phase 2); `sync` lands a governed copy (Phase 3). */
+export type ConnectedMode = 'live' | 'sync';
+/** The honesty state of a connected dataset's bond to its source exposure. `ok` reads
+ *  normally; `drifted` = the catalog snapshot removed/changed the bound table (warn, still
+ *  readable); `source-revoked` = the exposure was revoked (no data shown, reads disabled). */
+export type ConnectedStatus = 'ok' | 'drifted' | 'source-revoked';
+
+/** ADOPTED-FROM-A-CONNECTION provenance (lakehouse-import-exposure.md, Phase 2). Present
+ *  ONLY when `origin:'connected'`: the dataset IS an exposed external table, not an
+ *  ingested/curated one. `source` is the verbatim external `catalog.schema.table` the
+ *  live FQN seam resolves to (`store-fqn.ts versionTarget`, `store.ts builtLayerFqn`);
+ *  `exposureId` binds it to the ExposureSet so revocation/drift can find it. ABSENT on
+ *  every non-connected dataset (byte-stable, zero migration — the `sync`/`origin` precedent). */
+export type ConnectedSource = {
+  connectionId: string;
+  exposureId: string;
+  source: { catalog: string; schema: string; table: string };
+  mode: ConnectedMode;
+  tier: ConnectedTier;
+  status: ConnectedStatus;
+};
+
 export type Dataset = {
   version: string;
   id: string;
@@ -269,12 +322,27 @@ export type Dataset = {
    *  pre-existing datasets stay un-emitted until they are re-promoted (zero migration,
    *  byte-stable). Set at promote time. Omitted from yaml when false. */
   gitBacked?: boolean;
-  /** How the dataset was born (TWO-PATH create). `'curated'` = built from EXISTING
-   *  governed datasets via the Gold join (the reuse path); `'ingest'`/ABSENT = the classic
-   *  bring-a-file/extract path. Only `'curated'` is ever written to the yaml — absent means
-   *  ingest, so every pre-existing record serializes exactly as before (byte-stable, zero
-   *  migration; the `cubeNamespaced` precedent). Purely descriptive: no gate reads it. */
-  origin?: 'ingest' | 'curated';
+  /** How the dataset was born (create paths). `'curated'` = built from EXISTING governed
+   *  datasets via the Gold join (the reuse path); `'connected'` = ADOPTED from a warehouse
+   *  connection's exposure (lakehouse-import-exposure.md — the dataset IS an external table,
+   *  see `connected`); `'ingest'`/ABSENT = the classic bring-a-file/extract path. Only
+   *  `'curated'`/`'connected'` are ever written to the yaml — absent means ingest, so every
+   *  pre-existing record serializes exactly as before (byte-stable, zero migration; the
+   *  `cubeNamespaced` precedent). Purely descriptive: no gate reads it. */
+  origin?: 'ingest' | 'curated' | 'connected';
+  /** ADOPTED-FROM-A-CONNECTION block — present ONLY with `origin:'connected'`. Binds this
+   *  dataset to the ExposureSet + external source it federates (live) or copies (sync).
+   *  ABSENT on every non-connected dataset (byte-stable; the `sync`/`goldSpec` precedent). */
+  connected?: ConnectedSource;
+  /** DOCS PROVENANCE marker: `'ai-auto'` when the dataset's documentation (description +
+   *  column notes) was DRAFTED automatically after ingestion (background LLM, grounded in
+   *  the real schema/profile) and NOT yet touched by a human. The Documentation section
+   *  shows a subtle "AI-drafted — review in Edit → Documentation" note while this is set.
+   *  CLEARED the moment a human saves the Documentation section (`setDocs` from the docs
+   *  route), so a reviewed/edited doc drops the marker. ABSENT ⇒ human-authored or empty
+   *  docs (every dataset before this field existed) — omitted from the yaml (byte-stable,
+   *  zero migration; the `origin`/`gitBacked` precedent). */
+  docsProvenance?: 'ai-auto';
   /** STALE-DOMAIN-TABLE marker (Northpeak fix). Set true when a PROMOTED dataset's
    *  personal-lane Gold is REBUILT but the governed domain table (`iceberg.<domain>.gold_<slug>`
    *  — the FQN Cube + every consumer reads) was not re-materialized in the same act, so the
@@ -446,6 +514,16 @@ function parseMeasure(raw: unknown, i: number): Measure {
     if (win.trailing || win.leading || win.offset) m.rollingWindow = win;
   }
   if (typeof raw.format === 'string' && raw.format) m.format = raw.format;
+  // The DISPLAY label a rename writes (freezing `name`); round-trips so a renamed metric
+  // keeps its display name across persist/hydrate.
+  if (typeof raw.label === 'string' && raw.label) m.label = raw.label;
+  // The plain-language "what does this metric mean?" sentence. Absent on every measure
+  // created before this field existed (byte-stable, like `label`).
+  if (typeof raw.description === 'string' && raw.description) m.description = raw.description;
+  // COMPOSITE metric source formula — without this parse the human-readable formula was
+  // LOST on store reload (sql survived; Edit hydration fell back to nothing). Latent gap
+  // found during the description work; round-trips byte-stably like label/description.
+  if (typeof raw.formula === 'string' && raw.formula) m.formula = raw.formula;
   const dm = (raw.drillMembers ?? (raw as Record<string, unknown>).drill_members) as unknown;
   if (Array.isArray(dm)) {
     const members = dm.map((x) => String(x)).filter(Boolean);
@@ -503,8 +581,26 @@ export function parseGoldSpec(raw: unknown): GoldSpec | undefined {
       ...(typeof m.op === 'string' && m.op ? { op: m.op } : {}),
       ...(typeof m.col2 === 'string' && m.col2 ? { col2: m.col2 } : {}),
     }));
-  if (joins.length === 0 && dimensions.length === 0 && measures.length === 0) return undefined;
-  return { joins, dimensions, measures };
+  // Derived fields: absent stays absent (byte-stable for every pre-derived record). A
+  // row keeps a `right` column OR a finite `rightValue` constant — never both; when
+  // both appear the column ref wins (deterministic re-hydration).
+  const derived = (Array.isArray(raw.derived) ? raw.derived : [])
+    .filter(isRecord)
+    .map((d): GoldSpecDerived => ({
+      name: typeof d.name === 'string' ? d.name : '',
+      left: typeof d.left === 'string' ? d.left : '',
+      op: typeof d.op === 'string' ? d.op : '',
+      ...(typeof d.right === 'string' && d.right
+        ? { right: d.right }
+        : typeof d.rightValue === 'number' && Number.isFinite(d.rightValue)
+          ? { rightValue: d.rightValue }
+          : {}),
+    }));
+  // The explicit curated base (nil-safe): absent stays absent — byte-stable for every
+  // ingested dataset and every pre-curated record (absent ⇒ own-silver base).
+  const baseDatasetId = typeof raw.baseDatasetId === 'string' && raw.baseDatasetId ? raw.baseDatasetId : undefined;
+  if (joins.length === 0 && dimensions.length === 0 && derived.length === 0 && measures.length === 0 && !baseDatasetId) return undefined;
+  return { joins, dimensions, ...(derived.length > 0 ? { derived } : {}), measures, ...(baseDatasetId ? { baseDatasetId } : {}) };
 }
 
 /** Re-hydrate the sync block. Tolerant like `parseGoldSpec`: a record missing its
@@ -544,6 +640,26 @@ export function parseSyncBlock(raw: unknown): DatasetSync | undefined {
     out.lookbackMinutes = raw.lookbackMinutes;
   }
   return out;
+}
+
+/** Re-hydrate the `connected` block. Tolerant like `parseSyncBlock`: a record missing its
+ *  essentials (connection, exposure, a full catalog.schema.table) parses to undefined
+ *  rather than bricking the dataset. `mode`/`tier`/`status` fall back to safe defaults so
+ *  an older/partial record still opens (live · silver · ok). */
+export function parseConnectedBlock(raw: unknown): ConnectedSource | undefined {
+  if (!isRecord(raw)) return undefined;
+  const src = isRecord(raw.source) ? raw.source : {};
+  const connectionId = typeof raw.connectionId === 'string' ? raw.connectionId : '';
+  const exposureId = typeof raw.exposureId === 'string' ? raw.exposureId : '';
+  const catalog = typeof src.catalog === 'string' ? src.catalog : '';
+  const schema = typeof src.schema === 'string' ? src.schema : '';
+  const table = typeof src.table === 'string' ? src.table : '';
+  if (!connectionId || !exposureId || !catalog || !schema || !table) return undefined;
+  const mode: ConnectedMode = raw.mode === 'sync' ? 'sync' : 'live';
+  const tier: ConnectedTier = raw.tier === 'gold' ? 'gold' : 'silver';
+  const status: ConnectedStatus =
+    raw.status === 'drifted' ? 'drifted' : raw.status === 'source-revoked' ? 'source-revoked' : 'ok';
+  return { connectionId, exposureId, source: { catalog, schema, table }, mode, tier, status };
 }
 
 function parseCheck(raw: unknown, i: number): DataCheck {
@@ -621,8 +737,18 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
   const gitBacked = doc.gitBacked === true ? true : undefined;
   // Northpeak fix: absent/false ⇒ the domain table is in sync (or never promoted).
   const domainTableStale = doc.domainTableStale === true ? true : undefined;
-  // TWO-PATH create: only 'curated' is stored; absent ⇒ ingest (every pre-existing record).
-  const origin = doc.origin === 'curated' ? ('curated' as const) : undefined;
+  // Create paths: only 'curated'/'connected' are stored; absent ⇒ ingest (every pre-existing
+  // record). A 'connected' record must carry a valid `connected` block; a malformed block
+  // downgrades the origin to ingest so nothing half-connected leaks into the FQN seam.
+  const connected = parseConnectedBlock(doc.connected);
+  const origin =
+    doc.origin === 'connected' && connected
+      ? ('connected' as const)
+      : doc.origin === 'curated'
+        ? ('curated' as const)
+        : undefined;
+  // Auto-docs: only 'ai-auto' is stored; absent ⇒ human-authored/empty (every pre-existing record).
+  const docsProvenance = doc.docsProvenance === 'ai-auto' ? ('ai-auto' as const) : undefined;
 
   return {
     version: doc.version !== undefined ? String(doc.version) : '1',
@@ -652,6 +778,10 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
     ...(gitBacked ? { gitBacked } : {}),
     ...(domainTableStale ? { domainTableStale } : {}),
     ...(origin ? { origin } : {}),
+    // Only carry `connected` when the origin is genuinely connected (a stray block on a
+    // non-connected record is dropped — byte-stable, and the FQN seam only trusts origin).
+    ...(origin === 'connected' && connected ? { connected } : {}),
+    ...(docsProvenance ? { docsProvenance } : {}),
   };
 }
 
@@ -690,8 +820,14 @@ export function serializeDataset(d: Dataset): string {
   if (d.upstreams && d.upstreams.length > 0) doc.upstreams = d.upstreams;
   // Omit-when-empty (byte-stable): a Gold spec is written only once a Gold build stores
   // one; every dataset without a stored spec serializes exactly as before.
-  if (d.goldSpec && (d.goldSpec.joins.length > 0 || d.goldSpec.dimensions.length > 0 || d.goldSpec.measures.length > 0)) {
-    doc.goldSpec = d.goldSpec;
+  if (d.goldSpec && (d.goldSpec.joins.length > 0 || d.goldSpec.dimensions.length > 0 || (d.goldSpec.derived?.length ?? 0) > 0 || d.goldSpec.measures.length > 0 || !!d.goldSpec.baseDatasetId)) {
+    // Omit an EMPTY `derived` array so a spec with no derived fields serializes exactly
+    // as it did before derived fields existed (byte-stable — no prior record churns).
+    // Likewise drop a falsy `baseDatasetId` so an ingested spec never emits an empty-string
+    // key (byte-stable — a curated base only writes when actually set).
+    const { derived, baseDatasetId, ...rest } = d.goldSpec;
+    const withDerived = derived && derived.length > 0 ? { ...rest, derived } : rest;
+    doc.goldSpec = baseDatasetId ? { ...withDerived, baseDatasetId } : withDerived;
   }
   if (d.checks && d.checks.length > 0) doc.checks = d.checks;
   // Only persist explicitly-disabled monitors (default-ON); an all-on dataset omits the
@@ -726,8 +862,23 @@ export function serializeDataset(d: Dataset): string {
   // Omit-when-false (byte-stable): only a promoted dataset whose domain table drifted
   // from a rebuild carries this; every in-sync/un-promoted dataset serializes as before.
   if (d.domainTableStale) doc.domainTableStale = true;
-  // Omit-unless-curated (byte-stable): the classic ingest path serializes exactly as before.
+  // Omit-unless-curated/connected (byte-stable): the classic ingest path serializes exactly
+  // as before. A connected dataset writes its origin + the `connected` block together (the
+  // block is meaningless without the origin, and vice versa).
   if (d.origin === 'curated') doc.origin = 'curated';
+  else if (d.origin === 'connected' && d.connected) {
+    doc.origin = 'connected';
+    doc.connected = {
+      connectionId: d.connected.connectionId,
+      exposureId: d.connected.exposureId,
+      source: { catalog: d.connected.source.catalog, schema: d.connected.source.schema, table: d.connected.source.table },
+      mode: d.connected.mode,
+      tier: d.connected.tier,
+      status: d.connected.status,
+    };
+  }
+  // Omit-unless-ai-auto (byte-stable): human-authored/empty docs serialize exactly as before.
+  if (d.docsProvenance === 'ai-auto') doc.docsProvenance = 'ai-auto';
   return yaml.dump(doc, { lineWidth: 100, noRefs: true });
 }
 

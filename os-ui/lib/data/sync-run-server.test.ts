@@ -76,6 +76,34 @@ test('append run: probe → delete-batch → insert, cursor advances only after 
   assert.equal(currentWatermark('ds1'), '100');
 });
 
+test('connected-sync run: lands into the DOMAIN schema at the tier, not the personal bronze lane', async () => {
+  // A connected-sync dataset: the copy lands in iceberg.<domain>.<tier>_<slug>, read/written
+  // AS the domain principal (the exposure grants the domain — never the personal lane).
+  const connectedSync = dataset({}, {
+    domain: 'sales',
+    origin: 'connected',
+    connected: {
+      connectionId: 'conn1', exposureId: 'exp1',
+      source: { catalog: 'glue', schema: 'public', table: 'orders' },
+      mode: 'sync', tier: 'gold', status: 'ok',
+    },
+  });
+  let freshnessMarked = false;
+  const { deps, executed, queried } = fakes({
+    dataset: () => connectedSync,
+    // The freshness hook fires for a connected-sync too (lights the tier — earned status).
+    markBronzeBuilt: () => { freshnessMarked = true; },
+  });
+  const out = await runDatasetSync('ds1', 'schedule', deps);
+  assert.ok(out.ok && !out.skipped && out.run!.status === 'ok');
+  // The source probe still reads the external table (catalog resolved live via the connection)…
+  assert.match(queried[0].sql, /FROM pg_shop\.public\.orders/);
+  // …but the DELETE + INSERT target the DOMAIN-schema gold copy, never personal_lena.bronze.
+  assert.match(executed[0].sql, /^DELETE FROM iceberg\.sales\.gold_orders WHERE _batch_id = '/);
+  assert.match(executed[1].sql, /^INSERT INTO iceberg\.sales\.gold_orders SELECT \*, /);
+  assert.equal(freshnessMarked, true, 'freshness marking fired (lights the tier — earned status)');
+});
+
 test('failed write: honest error row, cursor does NOT advance', async () => {
   const { deps } = fakes({ execute: async () => { throw new Error('Trino down'); } });
   const out = await runDatasetSync('ds1', 'schedule', deps);
@@ -491,4 +519,76 @@ test('kafka incremental retry reuses the offsets window', async () => {
   assert.equal(queried.length, 0, 'partition highs are NOT re-probed');
   assert.match(executed[1].sql, /\(_partition_id = 0 AND _partition_offset > 41 AND _partition_offset <= 90\)$/);
   assert.equal(out.run!.cursorAfter, '{"0":"90","1":"7"}');
+});
+
+test('api-batch: odata + workday platforms route to their slice runners', async () => {
+  const odSeen: Record<string, unknown>[] = [];
+  const { deps: odDeps } = fakes({
+    dataset: () => dataset({ source: { schema: 'odata', table: 'Accounts' }, cursor: undefined, mode: 'full-refresh' }),
+    connectionCatalog: async () => null,
+    apiPlatform: async () => 'odata',
+    odataSlice: async (args) => { odSeen.push(args as unknown as Record<string, unknown>); return { rowsAffected: 3, batchId: 'b', highWatermark: null }; },
+    salesforceSlice: async () => { throw new Error('must not be called'); },
+  });
+  const od = await runDatasetSync('ds1', 'schedule', odDeps);
+  assert.ok(od.ok && !od.skipped && od.run!.status === 'ok');
+  assert.equal((odSeen[0] as { entitySet: string }).entitySet, 'Accounts');
+
+  const wdSeen: Record<string, unknown>[] = [];
+  const { deps: wdDeps } = fakes({
+    dataset: () => dataset({ source: { schema: 'workday', table: 'headcount' }, cursor: undefined, mode: 'full-refresh' }),
+    connectionCatalog: async () => null,
+    apiPlatform: async () => 'workday',
+    workdaySlice: async (args) => { wdSeen.push(args as unknown as Record<string, unknown>); return { rowsAffected: 9, batchId: 'b', highWatermark: null }; },
+    salesforceSlice: async () => { throw new Error('must not be called'); },
+  });
+  const wd = await runDatasetSync('ds1', 'schedule', wdDeps);
+  assert.ok(wd.ok && !wd.skipped && wd.run!.status === 'ok');
+  assert.equal((wdSeen[0] as { report: string }).report, 'headcount');
+});
+
+test('api-batch: odata merge mode names the OData platform honestly', async () => {
+  const { deps } = fakes({
+    dataset: () => dataset({ mode: 'merge', mergeKeys: ['Id'], cursor: undefined }),
+    connectionCatalog: async () => null,
+    apiPlatform: async () => 'odata',
+    odataSlice: async () => { throw new Error('must not be called'); },
+    salesforceSlice: async () => { throw new Error('must not be called'); },
+  });
+  const out = await runDatasetSync('ds1', 'schedule', deps);
+  assert.ok(out.ok && !out.skipped && out.run!.status === 'error');
+  assert.match(out.run!.error!, /OData sync supports append or full-refresh only/);
+});
+
+test('quota pre-flight: near-quota Salesforce SKIPS honestly, cursor unadvanced, real numbers in the detail', async () => {
+  let sliceCalled = false;
+  const { deps } = fakes({
+    dataset: () => dataset({ source: { schema: 'salesforce', table: 'Account' }, cursor: { kind: 'timestamp', column: 'SystemModstamp' } }),
+    connectionCatalog: async () => null,
+    apiPlatform: async () => 'salesforce',
+    watermark: () => '2026-06-01T00:00:00.000Z',
+    apiUsage: async () => ({ max: 100000, remaining: 3000 }), // 3% left → skip
+    salesforceSlice: async () => { sliceCalled = true; return { rowsAffected: 1, highWatermark: 'x' }; },
+  });
+  const out = await runDatasetSync('ds1', 'schedule', deps);
+  assert.ok(out.ok && out.skipped, 'the run is skipped, not failed');
+  assert.match(out.reason!, /throttled — resuming next window/);
+  assert.match(out.reason!, /3000\/100000/, 'the real limit numbers ride the reason (Developer view)');
+  assert.equal(sliceCalled, false, 'no pages were pulled — never a hard 429 mid-slice');
+  assert.equal(out.run!.status, 'skipped');
+  assert.equal(out.run!.cursorAfter ?? null, null, 'the cursor did not advance');
+});
+
+test('quota pre-flight: absent /limits data changes NOTHING (nil-safe)', async () => {
+  const { deps } = fakes({
+    dataset: () => dataset({ source: { schema: 'salesforce', table: 'Account' }, cursor: { kind: 'timestamp', column: 'SystemModstamp' } }),
+    connectionCatalog: async () => null,
+    apiPlatform: async () => 'salesforce',
+    watermark: () => '2026-06-01T00:00:00.000Z',
+    apiUsage: async () => null, // no signal → proceed unchanged
+    salesforceSlice: async () => ({ rowsAffected: 4, batchId: 'ds1.hw', highWatermark: '2026-06-30T00:00:00.000Z' }),
+  });
+  const out = await runDatasetSync('ds1', 'schedule', deps);
+  assert.ok(out.ok && !out.skipped && out.run!.status === 'ok');
+  assert.equal(out.run!.rowsAffected, 4);
 });

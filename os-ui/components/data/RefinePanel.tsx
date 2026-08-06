@@ -4,7 +4,6 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { useToast } from '@/components/core/Toast';
 import type { CleanDraft } from './StageAssistant';
 import {
   compileSilver,
@@ -17,8 +16,8 @@ import {
   type TransformOp,
 } from '@/lib/data/transform';
 import { inferColumnTypes, type TypeSuggestion } from '@/lib/data/infer-types';
-import { domainSchema } from '@/lib/data/store-fqn';
-import ExplorePanel from './ExplorePanel';
+import BuildResultDialog, { type BuildResult } from './BuildResultDialog';
+import QueryError from './QueryError';
 
 type Layer = 'silver' | 'gold';
 type Stage = { layer: Layer; copy: { title: string; subtitle: string; tool: string } };
@@ -72,6 +71,7 @@ function SilverBuilder({
   columns,
   silverBuilt,
   proposal,
+  saveLabel,
   onCommitted,
   onContinue,
 }: {
@@ -87,10 +87,14 @@ function SilverBuilder({
   /** An AI "Clean it up" proposal — applied into the guided controls when it arrives
    *  (never auto-builds; the user reviews and clicks Build). */
   proposal?: CleanDraft | null;
-  /** Reload the dataset (record the ✓) WITHOUT auto-advancing — the user stays on the
-   *  Silver step to explore the result and chooses when to move on to Gold. */
+  /** The section's primary-action label. The simplified Data Edit surface names this
+   *  section "Transformation" and passes "Save Transformations" so the section closes with
+   *  one obvious verb; defaults to the classic "Build Silver version" when unset. */
+  saveLabel?: string;
+  /** Reload the dataset (record the ✓) WITHOUT auto-advancing — the caller may then also
+   *  auto-materialize Gold (metrics need it). */
   onCommitted: (stages: unknown[]) => void;
-  /** The user chose to move on — advance to the next stage (Harmonize / Gold). */
+  /** The user chose to move on — advance to the next stage. */
   onContinue: () => void;
 }) {
   const [cols, setCols] = useState<string[]>(() => Array.from(new Set(columns.filter(Boolean))));
@@ -105,7 +109,6 @@ function SilverBuilder({
   // `builtOk` shows the SUCCESS state (Silver built ✓ + preview + Continue) — set on a
   // live build in this session, and true on open when a Silver version already exists.
   const [builtOk, setBuiltOk] = useState(silverBuilt);
-  const toast = useToast();
 
   const set = (c: string, patch: Partial<ColUI>) => setUi((m) => ({ ...m, [c]: { ...FRESH, ...m[c], ...patch } }));
 
@@ -202,6 +205,11 @@ function SilverBuilder({
     setNewCol('');
   }
 
+  // The build OUTCOME announces itself as a CENTRAL modal (BuildResultDialog) —
+  // the old bottom-right toast was easy to miss. Success offers the explicit
+  // "Continue to Harmonize →" confirmation; failure shows the honest error big.
+  const [buildResult, setBuildResult] = useState<BuildResult | null>(null);
+
   async function apply() {
     setErr(''); setReport(null); setBusy(true);
     try {
@@ -211,22 +219,33 @@ function SilverBuilder({
         body: JSON.stringify({ ops, columns: cols }),
       });
       const data = await res.json();
-      if (!res.ok) { setErr(data.error ?? 'Could not build the Silver version'); return; }
-      if (data.build && !data.build.ok) { setReport(data.build); setErr(data.error ?? 'The transform did not pass'); return; }
-      // ALWAYS surface the build mode on success — a ✓ that silently ran as the
-      // offline mock (no live table) must say so, not just the failure path.
-      if (data.build?.mode === 'offline-mock') {
-        toast.info('Silver recorded as an offline preview — no live table was written (cluster unreachable).');
-      } else {
-        toast.success(`Silver written live — ${data.target ?? target} is queryable.`);
+      if (!res.ok) {
+        const msg = data.error ?? 'Could not build the Silver version';
+        setErr(msg);
+        setBuildResult({ ok: false, what: 'Silver', detail: msg });
+        return;
       }
-      // SUCCESS — stay on the Silver step (no auto-advance): show the built state + the
-      // resulting silver table (preview + stats) so the user can explore, edit above and
-      // Rebuild, then CHOOSE to continue. `onCommitted` reloads + records the ✓ only.
+      if (data.build && !data.build.ok) {
+        const msg = data.error ?? 'The transform did not pass';
+        setReport(data.build); setErr(msg);
+        setBuildResult({ ok: false, what: 'Silver', detail: msg });
+        return;
+      }
+      // SUCCESS — the modal is the loud announcement (incl. the honest offline-preview
+      // note); the panel underneath still shows the built state + preview, and the user
+      // CHOOSES to continue from the modal — no auto-advance, no hunt for a button.
       setBuiltOk(true);
       onCommitted(data.stages ?? []);
+      setBuildResult({
+        ok: true,
+        what: 'Transformation',
+        detail: `${data.target ?? target} is live and queryable, and served for metrics automatically.`,
+        offline: data.build?.mode === 'offline-mock',
+      });
     } catch (e) {
-      setErr((e as Error).message);
+      const msg = (e as Error).message;
+      setErr(msg);
+      setBuildResult({ ok: false, what: 'Silver', detail: msg });
     } finally {
       setBusy(false);
     }
@@ -234,18 +253,12 @@ function SilverBuilder({
 
   return (
     <div className="guided-panel">
-      <p className="muted" style={{ marginTop: 0 }}>
-        Clean your Bronze columns — rename, set the type, tidy the text, drop what you don’t need,
-        keep only the rows you want, and remove duplicates. It writes one governed table
-        (<code className="mono">silver_{s}</code>) that only ever reads what you’re allowed to see.
-      </p>
-
       {/* Detected types — data-grounded suggestions, applied only on the user's click. */}
       {openSuggestions.length > 0 && !suggestionsDismissed ? (
         <div className="passthrough-note" style={{ marginBottom: 12 }}>
           <strong>Types detected from your data</strong>{' '}
           <span className="muted" style={{ fontSize: 13 }}>
-            (from the first 50 Bronze rows — every sampled value matched):
+            (from the first 50 source rows — every sampled value matched):
           </span>
           <div style={{ margin: '6px 0 0' }}>
             {openSuggestions.map((s) => (
@@ -369,7 +382,7 @@ function SilverBuilder({
         <div className="error" style={{ marginTop: 12 }}>Can’t build yet — {compiled.error}</div>
       ) : null}
 
-      {err ? <div className="error" style={{ marginTop: 12 }}>{err}</div> : null}
+      {err ? <QueryError error={err} style={{ marginTop: 12 }} /> : null}
       {report ? (
         <div className="table-wrap" style={{ marginTop: 10 }}>
           <table>
@@ -391,36 +404,32 @@ function SilverBuilder({
         {/* Clear IN-PROGRESS signal so a build never looks like "nothing happened". */}
         {busy ? <span className="hint" style={{ margin: 0 }}>Building Silver…</span> : null}
         {report?.mode === 'offline-mock' ? <span className="hint" style={{ margin: 0 }}>offline preview — no live table written</span> : null}
-        <button className="btn" onClick={apply} disabled={busy || !!compiled.error}>
-          {busy ? <span className="spin" /> : builtOk ? 'Rebuild Silver version' : 'Build Silver version'}
+        <button className="btn primary" onClick={apply} disabled={busy || !!compiled.error}>
+          {busy ? <span className="spin" /> : saveLabel ?? (builtOk ? 'Rebuild Silver version' : 'Build Silver version')}
         </button>
       </div>
-      <p className="hint" style={{ textAlign: 'right' }}>
-        The Silver step lights only after this table is written into Trino and a probe reads it back — no faked check.
-      </p>
 
-      {/* SUCCESS state — the Silver table exists. Stay on the step: confirm it, let the user
-          EXPLORE the result (preview + descriptive stats, governed + masked), and CHOOSE
-          when to continue. Editing above + Rebuild keeps the definition reproducible. */}
+      {/* SUCCESS state — the table exists. A calm confirmation; the full preview (with the
+          layer toggle) lives in View, so Edit no longer repeats a preview here. Editing
+          above + saving again keeps the definition reproducible. */}
       {builtOk ? (
         <div style={{ marginTop: 18, borderTop: '1px solid var(--border)', paddingTop: 16 }}>
           <div className="row" style={{ alignItems: 'center', gap: 8 }}>
-            <span className="ok-note" style={{ fontWeight: 600 }}>Silver built ✓</span>
+            <span className="ok-note" style={{ fontWeight: 600 }}>Transformation saved ✓</span>
             <span className="hint" style={{ margin: 0 }}>
-              <code className="mono">silver_{s}</code> is live and queryable. Explore it below, or change the
-              cleaning above and Rebuild.
+              <code className="mono">silver_{s}</code> is live. Edit above and save again to update it.
             </span>
           </div>
-
-          <div className="section-title" style={{ marginTop: 16 }}>Your Silver table</div>
-          {/* Reuse the existing governed preview + profiling machinery — first rows +
-              per-column type / completeness / distinct / range / top values, all masked. */}
-          <ExplorePanel datasetId={datasetId} builtLayers={['silver']} />
-
-          <div className="row" style={{ marginTop: 14, gap: 8, justifyContent: 'flex-end' }}>
-            <button className="btn" onClick={onContinue} disabled={busy}>Continue to Harmonize →</button>
-          </div>
         </div>
+      ) : null}
+
+      {/* Central build-outcome popup — the honest success/failure announcement. */}
+      {buildResult ? (
+        <BuildResultDialog
+          result={buildResult}
+          onContinue={() => setBuildResult(null)}
+          onClose={() => setBuildResult(null)}
+        />
       ) : null}
     </div>
   );
@@ -436,6 +445,7 @@ export default function RefinePanel({
   columns,
   silverBuilt,
   proposal,
+  saveLabel,
   onCommitted,
   onContinue,
 }: {
@@ -449,6 +459,8 @@ export default function RefinePanel({
   stage: Stage;
   /** An AI "Clean it up" proposal — filled into the guided controls when it arrives. */
   proposal?: CleanDraft | null;
+  /** The section's primary-action label (e.g. "Save Transformations"). */
+  saveLabel?: string;
   onCommitted: (stages: unknown[]) => void;
   onContinue: () => void;
 }) {
@@ -462,6 +474,7 @@ export default function RefinePanel({
       columns={columns}
       silverBuilt={silverBuilt}
       proposal={proposal}
+      saveLabel={saveLabel}
       onCommitted={onCommitted}
       onContinue={onContinue}
     />

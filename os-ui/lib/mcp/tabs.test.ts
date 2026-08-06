@@ -40,8 +40,8 @@ test('every declared write tool is registered under its correct real tab', () =>
   for (const n of ['create_dataset', 'add_dataset_version', 'document_dataset', 'request_promotion', 'approve_promotion', 'query_data', 'ingest_dataset', 'profile_dataset', 'transform_silver', 'build_gold_join']) {
     assert.ok(namesFor('data').includes(n), `data tab missing ${n}`);
   }
-  // Knowledge
-  for (const n of ['author_knowledge', 'publish_knowledge', 'index_knowledge', 'search_knowledge']) {
+  // Knowledge — incl. the OKF interchange twins (export_okf_bundle / import_okf_bundle).
+  for (const n of ['author_knowledge', 'publish_knowledge', 'index_knowledge', 'search_knowledge', 'export_okf_bundle', 'import_okf_bundle']) {
     assert.ok(namesFor('knowledge').includes(n), `knowledge tab missing ${n}`);
   }
   // Files / Metrics / Dashboards / Big Bets / Agents / Science
@@ -151,6 +151,8 @@ test('context.md and guide.md files reference only real MCP tool names (drift tr
     'rest_api',                                           // connection type enum value
     'gross_revenue', 'order_count',                       // example metric names in guide worked examples
     'big_number_total',                                   // dashboard vizType enum value (create_dashboard charts[].vizType)
+    'binary_classification', 'multiclass_classification', // model taskType enum values (create_model), not tools
+    'exposure_action_enable',                             // approval kind (operational action enablement), not a tool
   ]);
 
   const tabsDir = join(process.cwd(), 'lib', 'tabs');

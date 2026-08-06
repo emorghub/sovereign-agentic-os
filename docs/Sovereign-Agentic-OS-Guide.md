@@ -115,35 +115,36 @@ metric, a connection, a dashboard — is an **artifact** with the same four attr
 > service), preview-first,
 > cataloged and audited.
 
-## One Builder Framework — every build tab reads the same
+## One artifact model — every build tab reads the same
 
-Creating any non-trivial artifact happens in a **staged builder**, and every builder is the
-*same* shape (one core primitive — `lib/core/stages.ts` + `components/core/StageShell.tsx`).
-Learn the Agents builder and you can drive the Data, Metrics, Dashboards, Software and Science
-builders, because they all share four traits:
+Every artifact in the OS reads the same way: a tab lists tiles in folders; **＋ New** opens a
+short **type chooser** and lands you in **Edit**; clicking a tile opens a full-page **View**; a
+**✎ Edit** button re-opens it. Learn one tab and you can drive them all, because they share the
+same shape:
 
-- **A numbered five-stage flow** with a stepper rail. Each tab names its own five stages, but
-  the machinery is identical: **Agents** — Define · Design · Build · Run · Evaluate; **Data** —
-  Ingest · Define · Harmonize · Validate · Publish; **Metrics** — Define · Refine · Preview ·
-  Publish · Monitor; **Dashboards** — Define · Design · Build · View · Govern; **Software** —
-  Define · Design · Build · Test · Publish; **Science** — Define · Train · Deploy · Predict ·
-  Monitor.
-- **Honest, gated navigation.** A stage is reachable only when its precondition is met (you
-  can't Harmonize to Gold before Silver exists), and a stage shows a ✓ only when you completed
-  it *this session* **and** its live condition still holds — a ✓ clears the moment you invalidate
-  it. A fresh artifact opens on its first incomplete stage with **no** pre-marked checks. No
-  faked green.
-- **A per-stage assistant.** The Sovereign-OS AI helper is scoped to the *current* stage — it
-  knows you're defining a metric, or harmonizing a Gold join — and, like every assistant, it
-  acts through the same governed tools. On the Data tab the assistant dissolves into the flow
-  itself: instead of a separate helper box, each stage carries big **✨ actions at the top**
-  ("✨ Draft documentation", "✨ Clean it up", "✨ Suggest measures" …) — the same governed,
-  audited, cost-capped assistant underneath, surfaced exactly where the work happens.
-- **Simple ⇄ Developer, and lifecycle-in-header.** A **Simple** view keeps the guided flow calm
-  and NL-first; a **Developer** view exposes the raw technical surface (the dbt SQL, the Cube
-  YAML, the repo tree). The artifact's name, visibility badge and lifecycle controls (Archive ·
-  Restore · Delete · Promote) live in a **persistent header** above the stages, always reachable
-  mid-flow.
+- **＋ New → type → Edit → View.** The Context tabs (Data, Metrics, Files, Knowledge,
+  Connections) and Dashboards all speak this one language — no staged steppers. Edit is a set of
+  **named sections, each with its own Save** (e.g. Data's *Ingestion · Documentation ·
+  Transformation · Checks*), so you save the part you changed and nothing else. **View** is the
+  read-first surface (talk to it, preview it, read its stats and quality). The build tabs that
+  produce *running systems* — **Agents** (Define · Design · Build · Run · Evaluate), **Software**
+  (Define · Design · Build · Test · Publish) and **Science** (Design · Launch · Monitor) — keep a
+  **staged builder** (`lib/core/stages.ts` + `components/core/StageShell.tsx`),
+  because a deploy genuinely has ordered gates; the artifact tabs no longer do.
+- **Honest state.** Nothing shows a ✓ it hasn't earned: a data-quality scorecard turns green only
+  when checks actually ran and passed (honestly `unknown`, never a fake pass, when nothing ran), a
+  metric previews the real governed query, and a dashboard panel shows a live / offline-mock badge
+  for whether Cube answered. No faked green.
+- **AI where the work happens.** The Sovereign-OS AI helper is scoped to what you're doing and
+  acts through the same governed tools. On the Data tab it dissolves into the flow — each section
+  carries big **✨ actions** ("✨ Draft documentation", "✨ Clean it up", "✨ Suggest measures" …) —
+  the same governed, audited, cost-capped assistant underneath, surfaced exactly where the work
+  happens.
+- **Simple ⇄ Developer, and lifecycle-in-header.** A **Simple** view keeps the flow calm and
+  NL-first; a **Developer** view exposes the raw technical surface (the dbt SQL, the Cube YAML,
+  the lineage graph, the repo tree). The artifact's name, visibility badge and lifecycle controls
+  (Archive · Restore · Delete · Promote) live in a **persistent header**, always reachable — this
+  is where a dataset, metric or dashboard is **shared**, not a separate stage.
 
 ## The sharing ladder
 
@@ -181,6 +182,11 @@ approve, the platform executes the governed effect — for a dataset, a physical
 tier flips only once it verifies — and writes the audit. Nothing enters the governed store
 without **documentation + passing checks**: a transparency gate that turns green only when an
 artifact is documented and in the lineage graph.
+
+**The ladder also runs down — on every artifact type.** From an artifact's header, **Unshare**
+returns a Domain artifact to My (its owner or an in-domain Domain admin) and **Revoke from
+Company** returns a certified one to Domain (Admin). A metric shares its dataset's tier, so
+demoting a metric moves the dataset and every metric on it together — the confirm dialog says so.
 
 ## Four roles, assigned per domain
 
@@ -263,46 +269,53 @@ there.
   and it compiles into an OPA guardrail. (The structured backbone — Operating Model, Strategy,
   Big Bets, Workflows — lives in the Plan section; Knowledge is the reference library.)
 - **Files — a calm governed drive.** Any unstructured file — documents, images, audio, video —
-  uploaded and auto-indexed (parse → embed → hybrid OpenSearch) so agents can search and cite
-  it. Governed exactly like Data; *"Use as"* distils a file into Knowledge or Data.
-- **Data — datasets, refined and governed.** A five-stage medallion builder turns a
-  plain-language flow into real governed artifacts (a dlt pipeline, dbt models, a Cube cube),
-  with no YAML. **+ New dataset** opens a calm two-path chooser first: **📥 Ingest new data**
-  (bring a file or extract in — raw Bronze) or **🔗 Create a curated dataset** (combine
-  existing governed datasets you can read into one new joined dataset — name it, then be
-  guided straight to the Harmonize join builder). A name already taken in the domain isn't a
-  dead end — an inline note explains the clash and offers a one-click **Open** of the existing
-  dataset, or suggests a distinguishing name — and renaming later is a labelled **✎ Rename**
-  button (the physical table slug stays stable). The stages:
-  **Ingest** (land a file as a Bronze Iceberg table) · **Define** (document the
-  columns, clean and conform to Silver) · **Harmonize** (join into a Gold business mart — a
-  join is optional, so a single-table Gold is fine, and the **JOIN TO** picker offers only
-  datasets visible in your *active* domain — My / Domain / Company of the operating domain,
-  with the Marketplace as the only cross-domain surface) · **Validate** (quality checks + lineage) ·
-  **Publish** (sharing first, then **measures** — measures are defined here and in the Metrics
-  tab, *not* in Gold, so Gold stays a pure row-level projection/join and a Gold rebuild never
-  wipes them — then Talk-to-Data, then the metrics, dashboards and agent systems
-  already built on this data — each list links out and offers a create pre-scoped to the
-  dataset). Each build stage has exactly **one clear main action** (upload · **Build Silver
-  version** · **Build Gold version**); the result and a big **Continue →** appear only after
-  the build actually succeeded — no premature next button, though stages stay voluntarily
-  skippable via the stage rail on top. Gold's **"Keep columns" starts with every column
-  kept** — remove the ones you don't want, or *Remove all* and hand-pick; *Add all columns*
-  fills the base *and* every joined dataset in one click. And AI is built into each stage's
-  natural flow as big **✨ actions at the top** — "✨ Draft documentation" and the structured
-  "✨ Clean it up" that fills the guided Silver cleaning controls for your review (the AI
-  never builds on its own), "✨ Explain this error" right beside a real ingest error,
-  "✨ Propose a clean/join", "✨ Suggest quality rules", "✨ Suggest measures".
-  Silver and Gold builds are never one-shot black boxes: after a build the definition
-  stays visible and editable, so you explore the result, tweak, and **Rebuild in place** — and
-  *you* choose when to Continue. The **Validate** stage is a real data-quality gate: author dropdown-driven rule checks
+  added via **＋ New** (**Upload a file** or **New note (markdown)** written in place) and
+  auto-indexed (parse → embed → hybrid OpenSearch) so agents can search and cite it. Opening a
+  file lands on a **full-page reading surface**. Governed exactly like Data; *"Use as"* distils a
+  file into Knowledge or Data.
+- **Data — datasets, refined and governed.** One artifact per dataset, two surfaces — **Edit**
+  and **View** — that turn a plain-language flow into real governed artifacts (a dlt pipeline,
+  dbt models, a Cube cube) with no YAML. **＋ New** opens a calm chooser first:
+  **📥 Ingest new data** (bring a *file* in — external lakehouse data arrives governed, via a
+  connection, not by ingest) or **🔗 Create a curated dataset** (combine
+  governed datasets you can read into one new joined table). A **domain admin** sees a third card,
+  **🔗 From a connection**, whenever a platform admin has exposed a warehouse or operational table
+  to their domain: pick the exposed table, add a short description, and it adopts as a curated
+  **Domain-tier** dataset (live or sync — see *Lakehouse — bringing external tables in*), with no
+  bronze or refinement stage. Either lands you in **Edit**; a name
+  already taken in the domain isn't a dead end — an inline note explains the clash and offers a
+  one-click **Open** of the existing dataset, or a distinguishing name — and renaming later is a
+  labelled **✎ Rename** button (the physical table slug stays stable). Tiles group into
+  **Ingested Data** and **Curated Data**. **Edit** is a set of named sections, each with its own
+  Save — no stepper, no Continue:
+  an **ingested** dataset walks **Ingestion → Documentation → Transformation → Checks**
+  (*Save Data · Save Documentation · Save Transformations · Save Data Quality Checks*); a
+  **curated** dataset opens on **Composition** (pick an explicit **base dataset**, add **joins**,
+  keep or rename columns, add **derived fields**, then *Save Composition*) followed by
+  Documentation and Checks. Ingested data **never joins** — that is the curated path. The
+  business (Gold) layer that metrics read is **materialized automatically**: a clean single-table
+  ingested dataset **passes through** to a queryable business table with no manual "build Gold"
+  step, and a curated dataset materializes the composition you saved. Measures are defined in the
+  Metrics tab, not in the composition, so the business layer stays a pure projection/join and a
+  rebuild never wipes them. The **Composition** join picker offers only datasets visible in your
+  *active* domain (My / Domain / Company of the operating domain, with the Marketplace as the only
+  cross-domain surface); its **"Keep columns" starts with every column kept** — remove the ones
+  you don't want, or *Remove all* and hand-pick. AI is built into each section as big
+  **✨ actions** — "✨ Draft documentation", the structured "✨ Clean it up" that fills the guided
+  cleaning controls for your review (the AI never builds on its own), "✨ Explain this error"
+  beside a real ingest error, "✨ Propose a clean/join", "✨ Suggest quality rules". The **Checks**
+  section is a real data-quality gate: author dropdown-driven rule checks
   (`not_null`, `not_blank`, `unique`, `accepted_values`, `range`) that compile to SQL and run
-  *for real* against the built table, get a 0–100 **health score** and a passing/failing badge
-  (honestly `unknown`, never a fake pass, when nothing ran), let the OS **suggest rules from the
-  column profile**, and watch three heuristic **monitors** — freshness, row-volume and schema
-  stability — that learn each dataset's normal band from its own run history. Then **Talk to your
-  data**: governed NL→SQL, one validated read-only `SELECT`, executed under your row filters. A
-  **Developer** view exposes the raw dbt SQL and the physical table behind the guided flow.
+  *for real* against the built table, yielding a **quality scorecard** — a 0–100 pass-rate and a
+  passing/failing badge (honestly `unknown`, never a fake pass, when nothing ran) — let the OS
+  **suggest rules from the column profile**, and watch three heuristic **monitors** — freshness,
+  row-volume and schema stability — that learn each dataset's normal band from its own run
+  history. Opening a tile lands on the full-page **View**: **Talk to Data** (governed NL→SQL, one
+  validated read-only `SELECT`, executed under your row filters) → a **preview** with a
+  raw · cleaned · business layer toggle (business by default) → **statistics** → the **quality
+  scorecard** → **configuration**. Until it is shared the header carries a **"not certified"**
+  chip, and sharing (Promote · Certify) lives in that header, not a stage. A **Developer** view
+  exposes the raw dbt SQL, the physical table and the **lineage** graph behind the guided flow.
   A table imported from an external warehouse doesn't go stale either: a **"Keep this in
   sync"** panel schedules regular refreshes — **Full refresh**, **Add new rows** (incremental
   append over a cursor column, with a late-data lookback window), or **Update by key** (a
@@ -342,9 +355,9 @@ there.
   install guide). For teams already running a lakehouse elsewhere, an admin-enabled
   **external-warehouse** connector federates it through central Trino as a governed catalog —
   AWS Glue/Athena, Snowflake, BigQuery, Databricks/Delta, and (experimental) Microsoft
-  Fabric/OneLake — so you can query it in place under the same OPA path, or import a core table
-  as a governed data product into the sovereign lakehouse — and keep the copy fresh with a
-  scheduled sync (see *Data* above), so an import is a living dataset, not a one-time snapshot.
+  Fabric/OneLake. Bringing those external tables into the OS is a governed, four-step journey —
+  **Connect → Snapshot → Organize → Expose → Adopt** — not a raw import (see *Lakehouse: bringing
+  external tables in* below).
   Operational sources are first-class here too: PostgreSQL / MySQL / SQL Server sync on a
   timestamp or id cursor, **Kafka** topics land append-only on a per-partition offset cursor
   (de-duplicate downstream), **Salesforce** objects sync incrementally by `SystemModstamp`
@@ -352,25 +365,37 @@ there.
   cursors (purchases incrementally by `updated_at`; contacts/customers/orders by `created_at` —
   new records only, edits need a full refresh; resources without a documented cursor are
   full-refresh only) — schedules run from every 15 minutes (append recommended at high
-  frequency; frequent merges accumulate delete files) up to weekly.
+  frequency; frequent merges accumulate delete files) up to weekly. Salesforce, SAP S/4HANA
+  Cloud (and generic OData V4) and Workday RaaS also travel the same expose→adopt path as
+  warehouses, and Salesforce can additionally expose governed *write actions* for agents (see
+  *Operational systems* below).
   And for BI on your own desktop, a
   **one-click Power BI** button downloads a `.pbids` file that drops Power BI Desktop straight
   into the pre-filled PostgreSQL connector for the **Cube SQL API** — connecting as the
   `bi_<domain>` principal in **DirectQuery** mode, so per-domain row security re-runs on every
   query and no password is ever written into the file.
-- **Metrics — one number, everywhere.** The KPI semantic layer. Define "Revenue" once — a
-  **virtual declaration** the OS compiles into one governed Trino `SELECT` over the Gold mart,
-  run **as the viewer** — and it resolves to the *same* number in the explorer, in dashboards,
-  and in an agent's `metrics` tool, each under the viewer's own row- and column-level
-  security. A **built Gold of any tier is enough**: you can define, preview and explore a
-  metric on a *personal* dataset — promotion is only needed to *share* the metric (and to
-  register its cube for dashboards). The metric builder's column palette shows the **actual
-  Gold columns**, including joined datasets' columns after a Gold join; each definition also
-  emits a portable **dbt-MetricFlow-style semantic declaration** (`semantic/<slug>.yml`) into
-  the dataset's artifacts; and if the lakehouse is unreachable the metric honestly reads
-  **unavailable** — never a fabricated number.
+- **Metrics — one number, everywhere.** The KPI semantic layer, on the same one-artifact model:
+  **＋ New** picks a type, Edit defines it, and a full-page **View** reads it back. Define
+  "Revenue" once — a **virtual declaration** the OS compiles into one governed Trino `SELECT` over
+  the dataset's business (Gold) layer, run **as the viewer** — and it resolves to the *same*
+  number in the explorer, in dashboards, and in an agent's `metrics` tool, each under the viewer's
+  own row- and column-level security. **＋ New** asks **Simple or Complex** on a two-card chooser
+  first (the formula left the aggregation dropdown, where it was buried and undiscoverable). Tiles
+  group into **Simple Metrics** (a single aggregation) and **Complex Metrics** — a composite
+  built as arithmetic over this dataset's existing metrics with `[metric]` references and
+  **null-safe division** (e.g. `([revenue] - [cost]) / [orders]`). A **materialized business layer
+  is enough**: you can define, preview, explore *and* build a complex metric on a *personal*
+  dataset with built Gold — no promotion needed; promotion is only to *share* it (and register its
+  cube for dashboards). The metric View
+  shows where it is already charted — an **On dashboards** section with **＋ Add to a dashboard**.
+  The builder's column palette shows the **actual business-layer columns**, including joined
+  datasets' columns for a curated dataset; each definition emits a portable
+  **dbt-MetricFlow-style semantic declaration** (`semantic/<slug>.yml`) into the dataset's
+  artifacts; and if the lakehouse is unreachable the metric honestly reads **unavailable** — never
+  a fabricated number.
 
-**One folder UX on every context tab.** Files, Data, Knowledge and Metrics all share the *same*
+**One folder UX on every context tab.** The Context tabs — Data, Metrics, Files, Knowledge and
+Connections — all share the *same*
 folder experience (one core primitive, `lib/core/folders.ts`, with each tab registering a thin
 adapter — no per-tab divergence). Each tab shows a scope segment (My / Domain) and a single
 **folder rail tied to the active scope** — you only ever see the root that matches. You **create,
@@ -444,8 +469,18 @@ honestly rather than inventing an answer when retrieval comes back empty.
   accounts or passwords, ever. The app shows its **owning-domain badge** and ships **My /
   Domain scope helpers** that filter every record by domain + user; an **Admin section** (OS
   `domain_admin` / Administrator only) carries a **read-only directory** of the OS users who
-  can reach the app — managing users stays in the OS; and a top-bar **MCP button** links to
-  the app's own MCP connection in Connections. The scaffolded **README is the build
+  can reach the app *and* an honest **Granted context** panel that lists **only what this app was
+  actually granted** — not everything its signed-in user can see; and a top-bar **MCP button**
+  links to the app's own MCP connection in Connections. **The app runs least-privilege, not
+  as-you-wide.** Although a generated app rides the signed-in user's session, a governed read from
+  an app origin is capped at **(what the user can see ∩ what the app was granted)**: list surfaces
+  filter to the granted ids, a single artifact the app wasn't granted returns an honest 403 that
+  names the app and points at the Software-tab grant flow, and the free-form "ask your data"
+  surface is narrowed to *this app's* granted datasets (an app with zero grants is told so, plainly).
+  Its `os.datasets.query(id, { nl })` is likewise scoped to the app's grants, and its writes are the
+  bounded `os.records` surface. When you change an app's grants, a **Refresh SDK** action in the
+  Software tab re-vends the client so the app picks the new context up. The scaffolded **README is
+  the build
   contract** — it documents how each story adds a page + section, and the Build assistant
   reads the same text as context. Each built story page is **auto-wired into the app's
   navigation**: the OS deterministically regenerates the section registry from the committed
@@ -465,24 +500,136 @@ honestly rather than inventing an answer when retrieval comes back empty.
   Deployment + Service + Ingress with a live per-app URL (a `vite-os` app publishes as **static**
   files served by nginx). Apps carry the same lifecycle as every other tab — **Archive →
   Restore / Delete**.
-- **Science — classic ML** *(opt-in, Layer 4)*. Take traditional ML (regression, forecasting,
-  clustering — *not* LLMs) from a governed data product to a deployed model-as-service, exposed
-  as both a REST `predict` API and a `predict` MCP tool. Off by default; GPU is cost-gated.
+- **Science — classic ML, in three plain stages** *(opt-in, Layer 4)*. Take traditional ML
+  (classification and regression — *not* LLMs) from a governed data product to a deployed model
+  through **Design · Launch · Monitor**. **Design** is chat-first: describe what you want to
+  predict and the assistant, grounded in the datasets you were actually granted, proposes a
+  model — every dataset/column it names is validated server-side, so it can never reference a
+  column you can't see or that doesn't exist (the manual form — dataset browser plus target and
+  feature *column pickers* — is one click away). The runtime trains on **CPU** and picks the
+  algorithm, optimize metric and train/test split **for you** — there is nothing to tune, and an
+  algorithm it can't actually train is refused by name rather than silently substituted; no
+  forecasting or clustering yet. **Launch** is one **"Train & launch"** button: it reads the
+  data, trains, and puts the model live in a single fused action, rendered as a plain-language
+  timeline (*reading data → training → publishing*). The real trained metric is stated in
+  business language — an AUC becomes "ranked positives above negatives NN%", an RMSE "typical
+  error ±NN" — and only once a run has actually produced it; a failed rollout says so and offers
+  a retry rather than faking a deploy. **Monitor** scores the deployed model on a real row from
+  your data → a plain verdict, shows live serving health, the real call count (allowed and
+  denied) and a score-distribution chart (honestly empty until something is scored — no invented
+  drift badges). Sharing widens *who may call the model* up the same ladder (Promote to Domain ·
+  Certify to Company). The whole journey is available over MCP too — `create_model` →
+  `train_model` → `get_model_status` → `science_predict` → `promote` — the same governed
+  functions, no back door. Off by default; the ML layer is a per-domain toggle and GPU is
+  cost-gated.
 - **Dashboards — governed BI, rendered natively.** Dashboards are built and rendered *in the
   OS* — **Apache ECharts on the governed Cube semantic layer** — and panels resolve the same
   metric declarations the Metrics tab serves, so BI and agents can never disagree. (Dashboards
   still query through Cube; the metric read path itself is now direct governed Trino SQL — a
-  dual-run, with dashboard migration next. See *The lakehouse & semantic layer*.) The staged
-  flow: **Define** (name it and bind **one governed Cube view** via metric
-  chips) · **Design** (the panel designer — metrics, dimensions, time grain, filters, and
-  big-number / line / area / bar / pie / table viz types, with a live preview) · **Build**
-  ("Save dashboard") · **View** (every panel queries Cube **as the viewer** — per-user
-  row-level security, with a live/offline badge; switch *View as* and every panel re-queries
-  as that viewer) · **Govern** (reports, promote / certify, and **Connect tools**). Connect
+  dual-run, with dashboard migration next. See *The lakehouse & semantic layer*.) They read the
+  same one-artifact model as the Context tabs — **＋ New → Edit**, tile → **View**, **✎ Edit**, no
+  stepper. In **Edit** you name it, bind **one governed Cube view** via metric chips, then design
+  panels — metrics, dimensions, time grain, filters, per-panel width (⅓ · ½ · full), and viz types
+  led by **pie · bar · table** (then big number, line, area) — each with a live preview before
+  **Save dashboard**. The full-page **View** renders every panel by querying Cube **as the
+  viewer** (per-user row-level security, with a live/offline badge; switch *View as* and every
+  panel re-queries as that viewer). The viewer surface adds **cross-filter chips** (click a bar or
+  slice to filter the whole dashboard through a governed `WHERE`), a **drill-down drawer**, a
+  **time-grain switcher**, persisted default filters, and **⬇ CSV** on table panels. Any panel
+  also **expands full-screen** (its title or ⤢) — a graph shown large with its underlying rows as
+  a table and **⬇ CSV** beneath, a table panel simply rendered large. Sharing lives
+  in the **header** — promote / certify, schedule reports, and **Connect tools**, not a stage.
+  Connect
   tools are the Tier-2 BI bridge over the **Cube SQL API** as a domain-scoped read-only
   principal: **one-click Power BI** (a pre-filled `.pbids` file), **Tableau** connection
   fields, and — when the operator has configured it — an **"Open in Superset →"** link to
   Superset's own console in a new tab, never embedded.
+
+## Lakehouse — bringing external tables in, governed
+
+Many teams already run a lakehouse — Glue/Athena, Snowflake, BigQuery, Databricks — and want its
+tables *inside* the OS without copying data around by hand. The governed way is **expose → adopt**,
+and it closes a real security gap: a table in an external catalog that nobody has exposed reads
+**zero rows for everyone** (a fail-closed policy floor), so registering a warehouse never quietly
+opens it to the tenant. An exposure is the gate that opens *exactly the named tables* to *exactly
+the named domains*. The journey has two sides.
+
+**The platform admin exposes** (on a warehouse connection, an admin-only **Expose** surface, a
+staged flow — **Catalog · Organize · Assign · Review**):
+
+- **Catalog.** Take a **snapshot** of the warehouse — the OS walks `SHOW SCHEMAS`/`SHOW TABLES`
+  *as the connection's domain* and caches the listing. Freshness is always honest ("snapshot from
+  <time>"), drift since the last snapshot is shown as +added/−removed, and an unreachable
+  catalog shows the real error rather than a fabricated table list.
+- **Organize** *(optional, AI).* Ask the assistant to group the tables into folders. You first
+  choose how the folders should be seeded — **mirror the source schemas**, **mirror your OS
+  domains**, a **starter set**, or **empty** — and the classifier only ever places tables into
+  *that* taxonomy; it never invents a folder, a low-confidence table lands in **Unsorted** with a
+  plain reason, and a human move wins permanently. Every AI placement carries an "AI" chip and a
+  hover-why: "Organized by AI — suggested, not verified." If the model is unavailable the run
+  stops honestly and the view falls back to the plain schema tree — organization never blocks
+  exposure.
+- **Assign.** Name the exposure, pick the **domains** it serves, choose **Live** (federated —
+  every read runs against the external table in place) or **Sync** (a scheduled governed copy
+  lands in the OS), and a tier (silver/gold). 
+- **Review.** A plain human-impact card, the exact tables, and drift warnings; **Create**
+  compiles the grant **straight to OPA**, per table, per domain.
+
+**A domain admin adopts** (in the **Data** tab, **＋ New → 🔗 From a connection** — visible only to
+`domain_admin`+ when a table is actually exposed to one of their domains). They browse the same
+AI-organized folders the platform admin saw, pick a table, write a short description (the
+documentation gate), and it becomes a governed **Domain-tier** dataset. It enters **curated** —
+there is no bronze or refinement lane for connected data — and everything else in the Data tab
+(preview, profile, Talk to Data, `query_data`, metrics on a synced copy) reads it through the one
+governed path. A **live** dataset federates every read through the external table under the
+viewer's own row security; a **sync** dataset lands a scheduled incremental copy.
+
+**Revocation is honest and never silent.** When the admin revokes an exposure, the OPA grant is
+withdrawn (a live read drops to zero rows immediately), every adopted dataset is notified and its
+owner told; a **synced** copy is *frozen* — sync stops, its schedule is removed, but the
+last-landed data stays queryable (it is sovereign data now), and the dataset banners "copy frozen
+as of <last run>". A live dataset simply stops showing data until re-adopted. The Revoke button in
+the UI and the MCP `revoke_exposure_set` tool run the **same** propagation code — one seam, no back
+door. The whole expose→adopt journey — including the AI organization and adoption — is available
+over MCP (`list_exposed_tables`, `adopt_exposed_table`, `classify_catalog`, exposure CRUD), each a
+thin adapter over the exact library the UI calls.
+
+*(A one-shot personal `import_warehouse_table` copy still exists for developer/personal-lane use,
+but its own description now points you at expose→adopt as the governed path for shared data.)*
+
+## Operational systems — Salesforce, SAP, Workday as a source *and* a surface
+
+Operational systems (Salesforce, SAP S/4HANA Cloud with a generic OData V4 core, Workday RaaS,
+Kajabi) are **both** a data source **and** an action surface, and they travel the same
+expose→adopt journey as a warehouse — with two honest differences. They have **no Trino catalog**,
+so an operational exposure always **syncs** (there is no live mode — the OS says so plainly if you
+ask for one), and their entity catalog is discovered per platform: Salesforce SObjects with their
+business field labels, OData entity sets with `sap:label`s from `$metadata`, Workday reports (the
+admin registers each report URL — Workday has no cheap global describe, and the OS states that
+rather than guessing). Cursor honesty is **per entity and never invented**: Salesforce locks to
+`SystemModstamp`; an OData entity is incremental only when `$metadata` actually exposes a
+change-timestamp, else full-refresh-only; a Workday report is incremental only when the admin
+configured a date prompt. Real record counts appear only where they are cheap (a Salesforce
+`COUNT()`, an OData `$count`) and are simply omitted otherwise — never estimated. The v1 caveats
+are stated in each install guide: SAP is **cloud-reachable only** (on-prem behind the SAP Cloud
+Connector is out of scope), and Workday's true-incremental SOAP path is a later version.
+
+The action surface is where operational systems go beyond data. A Salesforce exposure can *also*
+carry governed **agent actions** — per entity, `read`/`search`/`create`/`update` (a delete is
+never an action; it is Blocked). This whole surface ships **off by default**
+(`OPERATIONAL_ACTIONS_ENABLED`), and even when it is on it is fail-closed at four independent
+layers, **recomputed fresh on every single call** so a revocation anywhere narrows access at once:
+the connection's capability profile ∩ the exposure's non-revoked actions ∩ the adopting domain's
+consent ∩ the agent's own grant. Reads and searches activate immediately; a **create or update**
+enqueues an admin approval at enable time *and* is held-with-preview at run time — two layers of
+human consent before an agent can write into a system of record. A domain admin must explicitly
+**adopt the actions** into their domain (the consent step that keeps one exposure from silently
+arming another domain's agents), and every result an agent gets back is labelled with the
+integration service account it ran as ("as the integration account — records it cannot see are
+absent"). Salesforce also pre-flights its API quota before a sync slice: near the limit it skips
+honestly ("throttled — resuming next window") with the real numbers, leaving the cursor
+unadvanced, rather than hitting a hard 429 mid-slice. SAP, OData and Workday ship as **data-only**
+this wave — Salesforce proved the action pattern; the others follow later.
 
 ## Monitor & Admin
 
@@ -531,41 +678,47 @@ live teaching cohort* — so every step below is a real, governed flow, not a mo
 
 Meet **Mara**, a Creator in the `sales` domain. She has a `campaign_master.csv`.
 
-1. **Create & ingest (Bronze).** In **Data**, Mara creates a dataset and uploads the CSV. Her
-   bytes land as a real Iceberg table in her *own* per-user schema
-   (`iceberg.personal_mara.bronze_campaign_master`) — registered only when apply **and** a
-   governed verify both pass. No fake green ✓.
-2. **Clean it (Silver).** She presses **Build Silver version** with guided ops (cast types,
-   drop dupes, set the key) — or lets "✨ Clean it up" propose them into the same controls for
-   her review. The OS compiles **one** allowlisted CTAS into her schema and runs it
-   as her — OPA masks every read. The result and a big **Continue →** appear only once the
-   build actually succeeded.
-3. **Harmonize (Gold).** **Build Gold version** joins the campaign, margin and CAC datasets on
-   a reconciled key (the JOIN TO picker offers only her active domain's datasets). Gold is a
-   pure row-level projection/join — measures come later, at Publish — and on success her Gold
-   is already **metric-ready**, even before any promotion.
-4. **Validate — quality & lineage.** In the **Validate** stage Mara authors a few checks
+1. **New → ingest.** In **Data**, Mara clicks **＋ New → 📥 Ingest new data**, names the dataset,
+   and uploads the CSV in the **Ingestion** section. Her bytes land as a real Iceberg table in her
+   *own* per-user schema (`iceberg.personal_mara.bronze_campaign_master`) — registered only when
+   apply **and** a governed verify both pass. No fake green ✓.
+2. **Clean it (Transformation).** In the **Transformation** section she applies guided ops (cast
+   types, drop dupes, set the key) — or lets "✨ Clean it up" propose them into the same controls
+   for her review — then **Save Transformations**. The OS compiles **one** allowlisted CTAS into
+   her schema and runs it as her — OPA masks every read. Because this is a single ingested source,
+   the business layer **materializes automatically via pass-through**: there is no separate "build
+   Gold" step, and her dataset is already **metric-ready**, even before any promotion.
+3. **Curate — join margin & CAC.** To bring in margin and CAC, Mara clicks **＋ New → 🔗 Create a
+   curated dataset** and, in **Composition**, picks the campaign dataset as the explicit **base**,
+   joins margin and CAC on a reconciled key (the join picker offers only her active domain's
+   datasets), keeps the columns she wants and adds a derived field — then **Save Composition**.
+   The composed business table materializes; measures come later in Metrics, so a rebuild never
+   wipes them. (A single ingested dataset never joins — the curated path is where joins live.)
+4. **Checks — quality & lineage.** In the **Checks** section Mara authors a few rules
    (`not_null` on the key, `unique` on the campaign id, an `accepted_values` list for `channel`,
-   a `range` on `spend`) — or lets the OS **suggest them from the column profile** — and runs
-   them for real against the Gold table. She gets a **health score** and a passing badge, plus
-   freshness/volume/schema **monitors** that will flag the table if its next load arrives late,
-   comes in thin, or changes shape. The lineage graph shows exactly where the Gold came from.
-5. **Document & promote.** Documentation is the gate: Mara adds a description and a tag, then
-   files a promotion request. She's a Creator — she *cannot* approve her own work.
+   a `range` on `spend`) — or lets the OS **suggest them from the column profile** — and
+   **Save Data Quality Checks** runs them for real against the built table. She gets a **quality
+   scorecard** and a passing badge, plus freshness/volume/schema **monitors** that will flag the
+   table if its next load arrives late, comes in thin, or changes shape. The **View** (and the
+   Developer lineage graph) shows exactly where every number came from.
+5. **Document & promote.** Documentation (the **Documentation** section) is the gate: Mara adds a
+   description and column docs, then promotes from the dataset **header** — until then it carries a
+   **"not certified"** chip. She's a Creator — she *cannot* approve her own work, so this files a
+   request.
 6. **A Builder approves — and the publish runs.** **Ben**, a Builder in `sales`, approves.
-   The approval independently verifies the physical gold materialized in the domain schema
-   (`iceberg.sales.gold_campaign`), then flips the tier and writes the audit.
+   The approval independently verifies the physical business table materialized in the domain
+   schema (`iceberg.sales.gold_campaign`), then flips the tier and writes the audit.
 7. **One number, everywhere.** In **Metrics**, `revenue`, `aov`, `conversion_rate` and
-   `churn_rate` now resolve on the Gold mart, sliceable by `region`, `product` and `date` — no
+   `churn_rate` now resolve on the business layer, sliceable by `region`, `product` and `date` — no
    SQL. Each metric is a declaration compiled into one governed Trino `SELECT` run **as the
    viewer**, so anyone who asks "what's revenue?" — a dashboard, an agent, the explorer — gets
    the same answer, under their own row filters. (Mara didn't even have to wait for step 6: a
-   built Gold of *any* tier is metric-ready, so she could have defined and previewed these on
-   her personal Gold — promotion is what shares them and registers the dashboard cube. See
-   *The lakehouse & semantic layer*.)
-8. **Talk to it.** Mara opens **Talk to your data** and asks a plain-English question. The
-   model is shown only datasets she can see, generates one validated read-only `SELECT`,
-   executes it through governed Trino under her masks, and answers grounded only in the
+   materialized business layer of *any* tier is metric-ready, so she could have defined and
+   previewed these on her personal dataset — promotion is what shares them and registers the
+   dashboard cube. See *The lakehouse & semantic layer*.)
+8. **Talk to it.** In the dataset's **View**, Mara opens **Talk to Data** and asks a plain-English
+   question. The model is shown only datasets she can see, generates one validated read-only
+   `SELECT`, executes it through governed Trino under her masks, and answers grounded only in the
    returned rows.
 
 *(This entire path is also available over MCP — `create_dataset` · `ingest_dataset` ·
@@ -1096,14 +1249,19 @@ by living inside it.
 ## Status — what's live, what's next
 
 The governance spine — OPA, approvals, RLS, promote ladders, roles, audit, MCP (live end-to-end
-at `/api/mcp`), auth, Knowledge, and the physical Data pipeline (Ingest → Define → Harmonize →
-Validate → Publish, i.e. upload → Bronze → Silver → Gold, with real data-quality checks +
-freshness/volume/schema monitors at Validate, then publish-on-approval → governed metrics →
-Talk to your data) — is **fully live**. Every build tab now shares **one staged Builder Framework** (five
-numbered stages, honest gating, a per-stage assistant, Simple/Developer views, lifecycle in the
-header). Layers 1–3 are in place; **Science (Layer 4)** is an integrated model-as-a-service tab
-(Define → Train → Deploy → Predict → Monitor) wrapping a live KServe `predict` model, with the
-raw MLflow/Featureform/JupyterHub/KServe consoles as a Developer escape hatch. **Software** is now
+at `/api/mcp`), auth, Knowledge, and the physical Data pipeline (ingested or curated datasets:
+ingest → optional transform → automatically materialized business layer, or a curated composition
+of trusted datasets, with real data-quality checks + freshness/volume/schema monitors in the
+Checks section, then publish-on-approval → governed metrics → Talk to Data) — is **fully live**.
+The Context tabs and Dashboards share **one artifact model** (＋ New → type → Edit sections with
+per-section Save → full-page View, honest state, an in-flow assistant, Simple/Developer views,
+lifecycle in the header); the systems tabs — Agents, Software, Science — keep a **staged builder**
+for their ordered deploy gates. Layers 1–3 are in place; **Science (Layer 4)** is an integrated ML
+tab in three plain stages (**Design → Launch → Monitor**): a chat-first, dataset-grounded design,
+one fused **"Train & launch"**, and a Monitor that scores real rows against a live KServe `predict`
+model — classification and regression on CPU, algorithm/metric/split chosen automatically, no
+fabricated metrics. The raw MLflow/JupyterHub/KServe consoles are a Developer escape hatch.
+**Software** is now
 a *governed frontend over the OS API*: new apps scaffold from the **Sovereign standard app
 template** — a Vite/React SPA that
 boots in the OS design (`@sovereign-os/ui`), signs in through the OS session only (no local

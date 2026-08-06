@@ -19,6 +19,8 @@ import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
 import type { FiledApproval } from '@/lib/governance/approval-notice';
 import DomainTag from '@/components/DomainTag';
+import { FolderPickerModal } from '@/components/core/FolderTree';
+import { useFolders } from '@/lib/folders/useFolders';
 import { usePublishPageContext } from '@/components/core/PageContext';
 import { addStep } from '@/lib/knowledge/step-edit';
 import { buildWorkflowReport, workflowPdfFilename } from '@/lib/knowledge/workflow-pdf';
@@ -49,6 +51,8 @@ type WorkflowData = {
   publishedBy: string | null;
   publishedAt: string | null;
   archived?: boolean;
+  /** Folder path within its tier's tree; server defaults to '/'. */
+  folder?: string;
   md: string;
   tacit: string;
   sha: string;
@@ -111,10 +115,16 @@ export default function WorkflowView({
   // Export PDF (client-side jsPDF — same stack as the Agents run report).
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfErr, setPdfErr] = useState('');
+  // Export as OKF bundle (server-side zip download — the portable interchange format).
+  const [okfBusy, setOkfBusy] = useState(false);
   // Inline rename of the workflow title (edit-gated; server re-checks canManageArtifact).
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [renameErr, setRenameErr] = useState('');
+  // Move-to-folder affordance (edit-gated; server re-checks canManageArtifact).
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [folderErr, setFolderErr] = useState('');
+  const { personalNodes, domainNodes, loadFolders } = useFolders('workflows', false);
 
   const reload = useCallback(async () => {
     try {
@@ -340,6 +350,33 @@ export default function WorkflowView({
     }
   }
 
+  /** Export this process as an OKF v0.2 bundle (server-side zip) and download it. */
+  async function exportOkf() {
+    if (!data || okfBusy) return;
+    setOkfBusy(true);
+    setPdfErr('');
+    try {
+      const res = await fetch(`/api/knowledge/workflows/${workflowId}/okf`, { cache: 'no-store' });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `Export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(data.title || 'workflow').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}.okf.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setPdfErr(`Could not export the OKF bundle: ${(e as Error).message}`);
+    } finally {
+      setOkfBusy(false);
+    }
+  }
+
   async function rename() {
     const title = nameDraft.trim();
     setRenameErr('');
@@ -352,6 +389,19 @@ export default function WorkflowView({
     const d = await res.json().catch(() => ({}));
     if (!res.ok) { setRenameErr(d.error ?? 'Rename failed'); return; }
     setRenaming(false);
+    await reload();
+  }
+
+  async function moveToFolder(folder: string) {
+    setFolderErr('');
+    const res = await fetch(`/api/knowledge/workflows/${workflowId}/folder`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ folder }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { setFolderErr(d.error ?? 'Move failed'); return; }
+    setFolderPickerOpen(false);
     await reload();
   }
 
@@ -456,16 +506,43 @@ export default function WorkflowView({
           <span className="mono muted" style={{ fontSize: 11 }} title="Business process ID">{data.id}</span>
           {renameErr && <span className="badge err" style={{ fontSize: 11 }}>{renameErr}</span>}
 
+          {folderErr && <span className="badge err" style={{ fontSize: 11 }}>{folderErr}</span>}
+
+          {/* Move to folder — edit-gated; opens the shared folder picker for this tab.
+              Roots follow the tier: a My (Personal) process folders in the personal tree,
+              a Domain/Company process in the domain tree. */}
+          {data.canEdit ? (
+            <button
+              className="btn ghost sm"
+              style={{ marginLeft: 'auto' }}
+              onClick={() => { setFolderErr(''); void loadFolders(); setFolderPickerOpen(true); }}
+              title="Move this business process into a folder"
+            >
+              {data.folder && data.folder !== '/' ? `Folder: ${data.folder}` : 'Move to folder…'}
+            </button>
+          ) : null}
+
           {/* Export PDF — top-right of the workflow detail. Leads with the visual
               flow (swimlane) on page 1, then the full content below. */}
           <button
             className="btn ghost sm"
-            style={{ marginLeft: 'auto' }}
+            style={{ marginLeft: data.canEdit ? undefined : 'auto' }}
             onClick={() => void exportPdf()}
             disabled={pdfBusy}
             title="Export this business process as a PDF — the visual flow first, then all content"
           >
             {pdfBusy ? <span className="spin" /> : 'Export PDF'}
+          </button>
+
+          {/* Export as OKF — the portable interchange bundle (markdown + YAML
+              frontmatter, zipped). Round-trips losslessly back into any OKF consumer. */}
+          <button
+            className="btn ghost sm"
+            onClick={() => void exportOkf()}
+            disabled={okfBusy}
+            title="Export this business process as an OKF bundle — the open, portable knowledge interchange format"
+          >
+            {okfBusy ? <span className="spin" /> : 'Export as OKF'}
           </button>
 
           {data.canPublish && data.status === 'draft' && (
@@ -494,6 +571,27 @@ export default function WorkflowView({
           )}
         </div>
 
+        {/* Folder picker — scoped to this process's tier root (My → personal tree;
+            Domain/Company → domain tree), mirroring the Data tab's move modal. */}
+        <FolderPickerModal
+          open={folderPickerOpen}
+          tab="workflows"
+          roots={[data.visibility === 'Personal' ? 'personal' : 'domain']}
+          personalNodes={data.visibility === 'Personal' ? personalNodes : []}
+          domainNodes={data.visibility === 'Personal' ? [] : domainNodes}
+          title="Move business process to folder"
+          onConfirm={({ path }) => void moveToFolder(path)}
+          onCancel={() => setFolderPickerOpen(false)}
+          onCreate={async (scope, path) => {
+            const res = await fetch('/api/folders', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ tab: 'workflows', scope, path }),
+            });
+            if (!res.ok) { setFolderErr((await res.json()).error ?? 'Could not create folder'); return; }
+            await loadFolders();
+          }}
+        />
+
         {/* Lifecycle lives in the opened detail (OS-wide rule): live → Archive + Version;
             archived → Restore + Delete + Version. `data.archived` carries the real state. */}
         <div style={{ marginBottom: 12 }}>
@@ -520,8 +618,8 @@ export default function WorkflowView({
           <button className={panel === 'actors' ? 'active' : ''} onClick={() => setPanel('actors')}>
             Actors {wf.actors.length > 0 && <span className="badge muted" style={{ marginLeft: 6, fontSize: 10 }}>{wf.actors.length}</span>}
           </button>
-          <button className={panel === 'rules' ? 'active' : ''} onClick={() => setPanel('rules')}>Business Rules</button>
-          <button className={panel === 'tacit' ? 'active' : ''} onClick={() => setPanel('tacit')}>Expert Knowledge</button>
+          <button className={panel === 'rules' ? 'active' : ''} onClick={() => setPanel('rules')}>Business rules</button>
+          <button className={panel === 'tacit' ? 'active' : ''} onClick={() => setPanel('tacit')}>Expert knowledge</button>
           <button className={panel === 'links' ? 'active' : ''} onClick={() => setPanel('links')}>
             Data &amp; Metrics {(data.links.datasets.length + data.links.metrics.length) > 0 && (
               <span className="badge muted" style={{ marginLeft: 6, fontSize: 10 }}>{data.links.datasets.length + data.links.metrics.length}</span>
@@ -601,9 +699,6 @@ export default function WorkflowView({
                 spellCheck={false}
                 rows={24}
               />
-              <p className="hint" style={{ marginTop: 8 }}>
-                The same source the visual flow + diagram render from. Edits here commit to one source.
-              </p>
             </div>
           )}
 
@@ -661,8 +756,7 @@ export default function WorkflowView({
               ) : (
                 <>
                   <p className="hint" style={{ marginTop: 0 }}>
-                    These step links reference an entity that doesn&rsquo;t exist yet. Jump to the right
-                    tab to build it — the workflow context travels with you. Nothing is auto-created.
+                    These step links reference an entity that doesn&rsquo;t exist yet — jump to the right tab to build it.
                   </p>
                   {data.gaps.map((g, i) => (
                     <div key={`${g.stepId}-${g.link.type}-${g.link.ref}-${i}`} className="k-gap-row">

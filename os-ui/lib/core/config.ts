@@ -179,6 +179,13 @@ export const config = {
   // App registry index (Software golden path). Best-effort durable mirror of the
   // in-process app store; the OS UI degrades to in-memory when OpenSearch is off.
   appsIndex: env('APPS_INDEX', 'os-apps'),
+  // App SOURCE-FILE index (Software golden path). Durable mirror of each app's full
+  // committed file tree (path + content), keyed by appId — one doc per app. The app
+  // RECORD (appsIndex) stores file NAMES only, so a lost repo used to be unrecoverable
+  // source (two built stories were lost live). This mirror survives pod restarts so
+  // the offline tree, before/after changesets and repo-heal restore FULL source.
+  // Degrades to the in-process snapshot when OpenSearch is off.
+  appFilesIndex: env('APP_FILES_INDEX', 'os-app-files'),
   // Dataset registry index (Data tab). Best-effort durable mirror of the
   // in-process dataset store so seeded datasets/metrics survive an os-ui restart;
   // degrades to in-memory when OpenSearch is off.
@@ -270,6 +277,19 @@ export const config = {
   softwareRunnerImage: env('SOFTWARE_RUNNER_IMAGE', ''),
   appsIngressClass: env('OS_APPS_INGRESS_CLASS', 'nginx'),
   appsTlsIssuer: env('OS_APPS_TLS_ISSUER', 'letsencrypt-prod'),
+
+  // Software golden path — Phase B DIRECT BUILD SERVICE (lib/software/build-service.ts).
+  // Instead of the Forgejo Actions DIND runner producing the serving image off-thread,
+  // os-ui submits an in-cluster KANIKO batch/v1 Job that builds the app's Dockerfile
+  // from its Forgejo git tree at the committed SHA and pushes a DIGEST-tagged image to
+  // the in-cluster registry — which the runner then serves digest-pinned (no `:latest`
+  // roll dance). Gated ON only when the chart grants the build-Job RBAC + namespace
+  // (softwareBuild.enabled → SOFTWARE_BUILD_SERVICE=true); OFF everywhere else, where
+  // the pipeline says so specifically and the Forgejo Actions path still serves. The
+  // kaniko executor image is pinned (no daemon, runs under the apps-namespace PSS).
+  softwareBuildEnabled: env('SOFTWARE_BUILD_SERVICE', '') === 'true',
+  softwareBuildNamespace: env('SOFTWARE_BUILD_NAMESPACE', 'agentic-apps'),
+  kanikoImage: env('KANIKO_IMAGE', 'gcr.io/kaniko-project/executor:v1.23.2'),
 
   // Hermes autonomous runtime (Layer 1, opt-in). GATED OFF by default — the chart
   // sets HERMES_ENABLED=true only when `hermes.enabled` is on (never in base/kind).
@@ -528,6 +548,17 @@ export const config = {
   // additionally fail closed outside the tested OM version range and require the
   // least-privilege writer bot. See docs/research/data-quality-plan.md (D4).
   openmetadataDqWritebackEnabled: env('OPENMETADATA_DQ_WRITEBACK_ENABLED', '').toLowerCase() === 'true',
+
+  // ---- Operational-system ACTION tools (operational-system-connections.md,
+  // Phase 3). GATED OFF by default: the entity-generic Salesforce action tools
+  // (sf_get_record/sf_search/sf_create_record/sf_update_record/sf_delete_record),
+  // the `ExposureSet.actions` toggles + `exposure_action_enable` write-enable
+  // approval, the domain action-adoption record, and the real
+  // `salesforce-api` executor are ALL inert until an operator turns this on.
+  // When OFF: no action tools compile onto an operational connection's profile,
+  // the executor is not registered (calls fall to the labelled offline mock), and
+  // the action toggles never render. Nil-safe (an unset/empty value ⇒ OFF).
+  operationalActionsEnabled: env('OPERATIONAL_ACTIONS_ENABLED', '').toLowerCase() === 'true',
 
   // ---- Analytics-monorepo APPLY (#146 Phase 1). GATED OFF by default: the
   // registry-apply enforcement point — THE only door from git into compute

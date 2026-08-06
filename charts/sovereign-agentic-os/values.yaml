@@ -2033,6 +2033,23 @@ softwareRunner:
     enabled: true
     ingressNamespace: ingress-nginx
 
+# Software DIRECT BUILD SERVICE (deploy redesign Phase B). When enabled, os-ui
+# submits an in-cluster Kaniko batch/v1 Job per app commit — building the app's
+# Dockerfile from its Forgejo git tree at the committed SHA and pushing a
+# DIGEST-tagged image the runner serves PINNED (no `:latest` on the serving
+# path, no roll-on-same-tag hack). Forgejo Actions ci.yml stays in every app
+# repo as the export/CI-confirmation path, off the serving critical path.
+# NIL-SAFE under --reuse-values: every read is `(.Values.softwareBuild | default
+# dict)`, so upgrading a release that predates this block changes nothing — the
+# flag stays off and the os-ui pipeline states that honestly.
+#   namespace — where the build Jobs run; "" ⇒ softwareRunner.namespace (its PSS
+#     is `baseline`, which Kaniko passes; see the note in apps-build.yaml).
+#   kanikoImage — the pinned daemonless executor.
+softwareBuild:
+  enabled: false
+  namespace: ""
+  kanikoImage: "gcr.io/kaniko-project/executor:v1.23.2"
+
 # -----------------------------------------------------------------------------
 # Connections golden path — manually-credentialed Connections (API/MCP/Database/
 # SaaS) a Builder/Admin creates. The connection RECORD holds metadata + a Secrets
@@ -2045,6 +2062,17 @@ softwareRunner:
 # -----------------------------------------------------------------------------
 connections:
   enabled: true
+  # Optional scheduled catalog-refresh sweep (lakehouse Expose). OFF by default; refresh
+  # is otherwise on-demand via the Expose UI's Refresh button. When enabled, a CronJob
+  # POSTs /api/connections/catalog-refresh with the agent-runtime bearer, re-snapshotting
+  # every warehouse connection's catalog through the governed path. Nil-safe under
+  # --reuse-values (the template default-guards every lookup).
+  catalogRefresh:
+    enabled: false
+    schedule: "23 * * * *"        # hourly, offset from the other sweeps
+    osUiUrl: "http://os-ui:3000"
+    tokenSecret: "os-ui"
+    tokenSecretKey: "agent-runtime-token"
   externalSecrets:
     enabled: false             # turn on once the External Secrets Operator + a
                                # STACKIT Secrets Manager SecretStore are installed

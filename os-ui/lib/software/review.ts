@@ -22,8 +22,8 @@ import {
 } from '@/lib/governance/approvals';
 import { securityScan } from './scan.ts';
 import { resolveSurface } from './metadata.ts';
-import { getSnapshot, snapshotFiles } from './snapshot.ts';
-import { deployApp, runnerStatus, type RunnerApp, type RunnerOutcome, type RunnerStatus } from './runner.ts';
+import { getSnapshot, snapshotFiles, hydrateSnapshot } from './snapshot.ts';
+import { deployApp, runnerStatus, type RunnerApp, type RunnerOpts, type RunnerOutcome, type RunnerStatus } from './runner.ts';
 import { roleAtLeast } from '@/lib/core/session';
 import { config } from '@/lib/core/config';
 
@@ -122,12 +122,25 @@ function isBuilder(user: CurrentUser): boolean {
   return roleAtLeast(user.role, 'builder');
 }
 
+/**
+ * Re-provision the app's runner from its CURRENT record (esp. `runImageDigest`) —
+ * the shared entry the Phase B build service calls to re-pin the pod to a freshly
+ * built digest, so the footprint table + runner shape stay SINGLE-SOURCED here (no
+ * duplicate FOOTPRINT in apps.ts, no import cycle: apps.ts dynamic-imports this).
+ */
+export async function redeployRunnerForApp(app: App): Promise<RunnerOutcome> {
+  return deployApp(runnerAppFor(app));
+}
+
 /** The minimal runnable shape the in-cluster runner needs, derived from an app. */
 function runnerAppFor(app: App): RunnerApp {
   return {
     slug: app.slug,
     host: appHost(app),
     runImage: app.runImage,
+    // The OS build service's captured digest (Phase B) pins the serving image; when
+    // unset the runner keeps the `:latest`/CI convention (purely additive).
+    runImageDigest: app.runImageDigest,
     footprint: FOOTPRINT[app.template] ?? FOOTPRINT['nextjs-supabase'],
   };
 }
@@ -201,9 +214,13 @@ function diffFromFiles(files: ScaffoldFile[], changed?: DiffSummary['files']): D
 async function appFilesForScan(app: App): Promise<{ files: ScaffoldFile[]; source: 'live-repo' | 'snapshot' }> {
   const live = await liveRepoFiles(app);
   if (live) {
+    // Also durably backfills the mirror (heal-forward for legacy apps).
     snapshotFiles(app.id, live); // keep the offline fallback in step with reality
     return { files: live, source: 'live-repo' };
   }
+  // Offline: hydrate the durable mirror first so a scan after a restart sees the
+  // app's REAL last committed tree, not just the template seed.
+  await hydrateSnapshot(app.id);
   return { files: getSnapshot(app.id) ?? templateFiles(app.template, app.name, app.slug), source: 'snapshot' };
 }
 
@@ -458,7 +475,30 @@ export async function decideDeploy(
   }
 
   const app = await getAppByIdInternal(card.appId);
-  if (!app) throw withStatus(new Error('App not found'), 404);
+  if (!app) {
+    // The card outlived its app — the classic multi-session churn: the app was
+    // deleted/re-created (new id) after this review card + its Governance approval
+    // were filed, so the card points at an id that resolves nowhere. A bare "App
+    // not found" (which the UI then shows verbatim next to the card's own summary)
+    // hid the real cause. Auto-retire the orphaned card + its governance record so
+    // it stops blocking the inbox, and tell the user exactly what to do: re-request
+    // the deploy on the CURRENT app. (A transient mirror miss self-heals on the next
+    // press — getAppByIdInternal re-probes the durable mirror every call.)
+    card.decision = 'denied';
+    card.decidedBy = user.id;
+    card.decidedAt = new Date().toISOString();
+    card.note = `Auto-retired: referenced app ${card.appId} no longer exists.`;
+    saveCard(card);
+    for (const a of listGovernanceForCard(card.id)) decideApproval(a, 'reject', user.id);
+    throw withStatus(
+      new Error(
+        `This deploy request references an app that no longer exists (${card.appId}) — it was ` +
+          `re-created since the request was filed. The stale request has been dismissed; open the ` +
+          `current app and press Build → Approve & go live again to file a fresh deploy request.`,
+      ),
+      409,
+    );
+  }
 
   if (decision === 'approve') {
     if (!card.scan.passed) {
@@ -569,13 +609,38 @@ export async function reconcileDeployApproval(app: App): Promise<boolean> {
 export async function reconcileDeployStatus(
   appId: string,
   user: CurrentUser,
+  opts: RunnerOpts = {},
 ): Promise<{ app: App; status: RunnerStatus }> {
   const app = await getAppByIdInternal(appId);
   if (!app) throw withStatus(new Error('App not found'), 404);
   const ownerOrBuilder = app.owner === user.id || (isBuilder(user) && user.domains.includes(app.domain));
   if (!ownerOrBuilder) throw withStatus(new Error('Only the creator or a Builder can read this app runner status'), 403);
 
-  const status = await runnerStatus({ slug: app.slug });
+  let status = await runnerStatus({ slug: app.slug }, opts);
+
+  // SELF-HEAL a missing runner. An app that is preview/live is SUPPOSED to have a
+  // Deployment; when the runner is `absent` (deployment 404) but the cluster IS
+  // reachable, the runner was never provisioned — the classic case is a deploy
+  // approved (or preview started) while the k8s API was transiently unreachable,
+  // so `deployApp` returned offline and no Deployment was ever created (the image
+  // built + pushed regardless). Re-provision idempotently now that the API answers,
+  // then re-read. Only fires for absent-but-reachable + a deploy state that should
+  // be running; `offline` (status 0) is left untouched (we honestly cannot heal
+  // what we cannot reach), and a running/deploying/failed runner is never re-applied.
+  if (status.phase === 'absent' && (app.deploy.state === 'live' || app.deploy.state === 'preview')) {
+    const healed = await deployApp(runnerAppFor(app), opts);
+    if (healed.live) {
+      void trace({
+        principal: app.mcpPrincipal,
+        tool: 'generate',
+        input: { action: 'reconcile_runner', by: user.id, was: 'absent' },
+        output: { phase: healed.phase, detail: healed.detail },
+        decision: 'allow',
+      });
+      status = await runnerStatus({ slug: app.slug }, opts);
+    }
+  }
+
   if (status.live) {
     const running = status.phase === 'running';
     app.deploy.previewUrl = running ? `https://${appHost(app)}` : null;

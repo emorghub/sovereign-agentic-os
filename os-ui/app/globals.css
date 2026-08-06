@@ -21,3 +21,5 @@
 @import './styles/runtime-selector.css';
 @import './styles/lifecycle.css';
 @import './styles/builder-simple.css';
+@import './styles/notifications.css';
+@import './styles/connections.css';
