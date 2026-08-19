@@ -1,0 +1,244 @@
+# EnablerMinds overrides for the STACKIT cluster `emagos`.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Everything in here used to be edited directly INSIDE upstream's two values
+# files. Those are the two files upstream rewrites most often (63 and 55 commits
+# in a recent 60-day window), so every sync from Data-Masterclass produced merge
+# conflicts in exactly the lines we had changed.
+#
+# This file exists ONLY in the EnablerMinds tree. Upstream cannot conflict with a
+# file they do not have, so `values.stackit-selfhosted.yaml` and the chart's
+# `values.yaml` can now stay byte-identical to upstream and a sync is a
+# fast-forward.
+#
+# HOW IT IS APPLIED — it MUST come LAST, because Helm merges -f files
+# left-to-right and the last one wins:
+#
+#   helm upgrade agentic-os charts/sovereign-agentic-os -n agentic-os \
+#     -f values.selfcontained.yaml \
+#     -f values.stackit-selfhosted.yaml \
+#     -f values.em-stackit.yaml \
+#     --set global.profile=local \
+#     --set ml.enabled=false --set kserve.enabled=false --set mail.enabled=false \
+#     --set dbt.enabled=false --set wireguard.enabled=false \
+#     --set softwareRunner.networkPolicy.enabled=false \
+#     --skip-schema-validation --force-conflicts
+#
+# RULES
+#  1. NEVER edit upstream's values files again. Every EM override goes here.
+#  2. `litellm.proxy_config.model_list` is a LIST. Helm REPLACES lists rather than
+#     merging them, so the copy below is the COMPLETE list. On every upstream sync,
+#     check whether they changed model_list and port any additions here by hand.
+#     This is the one deliberate manual check the refactor trades conflicts for.
+#  3. The self-hosted qwen `model-server` cannot live here — it is a Kubernetes
+#     TEMPLATE, not a value. It stays at
+#     charts/sovereign-agentic-os/templates/model-server/model-server.yaml.
+#     Upstream deleted their copy, and their templates/model-server/ directory now
+#     holds only stackit-external-secrets.yaml, so our filename never collides.
+#  4. Verify any change to this file by rendering before and after and requiring an
+#     EMPTY diff of the generated manifests.
+#
+# WHAT IS IN HERE
+#  - our own image registry for every bespoke image (upstream points at theirs)
+#  - the free self-hosted model: qwen2.5:3b on Ollama 0.6.8 + cpu_avx2
+#    (the STACKIT nodes advertise AMX and the new Ollama engine segfaults on it)
+#  - 384-dim embeddings via mock-model, matching retrieval.knnDimension
+#  - osUI.publicUrl / softwareRunner.appsDomain pointed at how emagos is ACTUALLY
+#    reached (port-forward). Upstream's values scope the session cookie to
+#    datamasterclass.com, which a browser on 127.0.0.1 rejects — that silently
+#    breaks login with no error and nothing in the logs.
+#
+# Generated 2026-08-19 by lifting the existing overrides out of upstream's files;
+# the rendered output was verified byte-identical to the pre-refactor render.
+
+modelServer:
+  enabled: true
+  image:
+    repository: ollama/ollama
+    tag: 0.6.8
+  model: qwen2.5:3b
+  llmLibrary: cpu_avx2
+  port: 11434
+  replicas: 2
+  resources:
+    requests:
+      cpu: '2'
+      memory: 4Gi
+    limits:
+      cpu: '12'
+      memory: 6Gi
+  persistence:
+    enabled: false
+    size: 10Gi
+    accessMode: ReadWriteOnce
+    storageClass: ''
+  big:
+    enabled: false
+    image:
+      repository: vllm/vllm-openai
+      tag: v0.6.6
+    args:
+    - --model
+    - Qwen/Qwen3.6-27B
+    - --port
+    - '8000'
+    port: 8000
+    replicas: 1
+    resources:
+      requests:
+        cpu: '2'
+        memory: 16Gi
+        nvidia.com/gpu: '1'
+      limits:
+        cpu: '8'
+        memory: 32Gi
+        nvidia.com/gpu: '1'
+  reasoning:
+    enabled: false
+    image:
+      repository: ghcr.io/ggml-org/llama.cpp
+      tag: server
+    cores: 6
+    port: 8081
+    model: Magistral-Small-2506-Q4_K_M.gguf
+    modelPath: /models
+    ctxSize: 8192
+    memory:
+      request: 18Gi
+      limit: 22Gi
+    persistence:
+      enabled: true
+      size: 20Gi
+      accessMode: ReadWriteOnce
+      storageClass: ''
+litellm:
+  proxy_config:
+    model_list:
+    - model_name: sovereign-default
+      litellm_params:
+        model: openai/qwen2.5:3b
+        api_base: http://model-server:11434/v1
+        api_key: sk-local-unused
+    - model_name: sovereign-mock
+      litellm_params:
+        model: openai/qwen2.5:3b
+        api_base: http://model-server:11434/v1
+        api_key: sk-local-unused
+    - model_name: local-qwen
+      litellm_params:
+        model: openai/qwen3:14b
+        api_base: http://wireguard-ollama:11434/v1
+        api_key: sk-local-unused
+    - model_name: sovereign-reasoning
+      litellm_params:
+        model: openai/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8
+        api_base: os.environ/STACKIT_API_BASE
+        api_key: os.environ/STACKIT_API_KEY
+        timeout: 300
+    - model_name: sovereign-embed
+      litellm_params:
+        model: openai/mock-embed
+        api_base: http://mock-model:8080/v1
+        api_key: sk-mock-unused
+retrieval:
+  knnDimension: 384
+osUI:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/os-ui
+    tag: 0.6.81
+  publicUrl: http://localhost:8080
+agentRuntime:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/agent-runtime
+    tag: 0.1.2
+mockModel:
+  enabled: true
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/mock-model
+sampleAgent:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/sample-agent
+haystack:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/haystack-retriever
+dbt:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/dbt
+egressProxy:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/egress-proxy
+webFetch:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/web-fetch
+softwareRunner:
+  appsDomain: apps.local
+queryTool:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/query-tool
+    tag: 0.6.1
+dataRunner:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/data-runner
+    tag: 0.2.1
+superset:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/superset
+dagster:
+  dagsterWebserver:
+    image:
+      repository: ghcr.io/jashwanthv07/sovereign-os/dagster
+  dagsterDaemon:
+    image:
+      repository: ghcr.io/jashwanthv07/sovereign-os/dagster
+  dagster-user-deployments:
+    deployments:
+    - name: example-user-code
+      annotations:
+        argocd.argoproj.io/sync-wave: '2'
+      image:
+        repository: ghcr.io/jashwanthv07/sovereign-os/dagster
+        tag: 0.2.0
+        pullPolicy: IfNotPresent
+      dagsterApiGrpcArgs:
+      - --python-file
+      - /opt/dagster/app/repo.py
+      port: 3030
+      env:
+      - name: TRINO_HOST
+        value: trino
+      - name: TRINO_PORT
+        value: '8080'
+      - name: TRINO_USER
+        value: dbt-sales
+      - name: TRINO_CATALOG
+        value: iceberg
+      - name: TRINO_SCHEMA
+        value: sales
+      resources:
+        requests:
+          cpu: 50m
+          memory: 384Mi
+        limits:
+          cpu: '1'
+          memory: 1Gi
+mlflow:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/mlflow
+mlAgent:
+  image:
+    repository: ghcr.io/jashwanthv07/sovereign-os/ml-agent
+terminal:
+  broker:
+    image:
+      repository: ghcr.io/jashwanthv07/sovereign-os/terminal-broker
+  sandbox:
+    image:
+      repository: ghcr.io/jashwanthv07/sovereign-os/sandbox-shell
+workbench:
+  broker:
+    image:
+      repository: ghcr.io/jashwanthv07/sovereign-os/workbench-broker
+  workspace:
+    image:
+      repository: ghcr.io/jashwanthv07/sovereign-os/code-server-workbench

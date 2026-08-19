@@ -637,127 +637,6 @@ mockModel:
     limits: { cpu: 250m, memory: 128Mi }
 
 # -----------------------------------------------------------------------------
-# EM: KEPT self-hosted model-server (upstream 0.1.68 DELETED this whole block — moved
-# to STACKIT managed models). This is our free-qwen path; see STACKIT_DEPLOY_RUNBOOK.md.
-# Model server — the DEFAULT self-hosted, OpenAI-compatible LLM (replaces the mock
-# LLM for chat). A CPU llama.cpp/Ollama runtime serving a small permissively-
-# licensed model (Ministral 3 3B, Q4, Apache-2.0) FULLY OFFLINE — no provider key,
-# nothing leaves the sovereign boundary. LiteLLM routes `sovereign-default`
-# (+ back-compat `sovereign-mock`) here and load-balances across `replicas` pods.
-#
-# SCALE (model-benchmark.md): a Ministral 3 3B Q4 CPU replica needs ~3-4 GB RAM;
-# for ~30 concurrent users run ~3-5 replicas, OR a single small GPU. See
-# docs/components/model-server.md. The first request per pod triggers a one-time
-# model pull (needs egress to the model registry once; air-gap by baking weights
-# into an image) — steady state is offline.
-# -----------------------------------------------------------------------------
-modelServer:
-  enabled: true
-  image:
-    # Ollama (MIT) — OpenAI-compatible at /v1. Pinned for reproducibility.
-    repository: ollama/ollama
-    tag: "0.6.8"
-  # Default model tag pulled on first boot (Ollama library tag). Default is
-  # qwen2.5:3b (Apache-2.0) — runs on the pinned Ollama 0.6.8 (OLD engine).
-  # NOTE: the original default (ministral-3:3b-instruct-2512-q4_K_M) needs Ollama's
-  # NEW engine (ollama:latest), which selects AMX matmul kernels that SIGSEGV on
-  # virtualized Xeons (e.g. STACKIT m3i) — see values.stackit-selfhosted.yaml and
-  # STACKIT_DEPLOY_RUNBOOK.md §13. Keep to permissively-licensed weights and size
-  # modelServer.resources to the tag.
-  model: "qwen2.5:3b"
-  # Optional: force a specific Ollama CPU runner (OLD-engine images only). Leave
-  # empty by default; set (e.g. "cpu_avx2") only on nodes where the auto-selected
-  # runner faults — e.g. AMX advertised in CPUID but broken under the hypervisor.
-  llmLibrary: ""
-  port: 11434
-  # N replicas behind LiteLLM load-balancing (the Service round-robins). Bump for
-  # more concurrent users (~3-5 for ~30 users on CPU).
-  replicas: 2
-  resources:
-    # The ministral-3:3b-instruct-2512-q4_K_M tag is ~2.95 GB on disk; CPU resident
-    # set ~3 GB. Give headroom so it doesn't OOMKill on load.
-    requests: { cpu: "1", memory: 3Gi }
-    limits: { cpu: "4", memory: 4Gi }
-  persistence:
-    # OFF locally (emptyDir per pod — re-pulls on restart). For a shared, no-re-pull
-    # model cache set enabled + an RWX storageClass (or RWO with replicas:1).
-    enabled: false
-    size: 10Gi
-    accessMode: ReadWriteOnce
-    storageClass: ""
-  # Optional BIGGER self-hosted model (toggle, OFF by default) — a GPU vLLM serving
-  # a larger Apache-2.0 model (Qwen 3.6 / Mistral) for harder escalations, sitting
-  # BELOW STACKIT in the fallback chain. Registered with LiteLLM as `sovereign-big`.
-  # Enabling it needs a GPU node pool AND adding `sovereign-big` to the fallback
-  # chain (see litellm.proxy_config.router_settings below). Not for a kind box.
-  big:
-    enabled: false
-    image:
-      repository: vllm/vllm-openai
-      tag: "v0.6.6"
-    # vLLM CLI args — point at a permissively-licensed model id.
-    args:
-      - "--model"
-      - "Qwen/Qwen3.6-27B"
-      - "--port"
-      - "8000"
-    port: 8000
-    replicas: 1
-    resources:
-      requests: { cpu: "2", memory: 16Gi, nvidia.com/gpu: "1" }
-      limits: { cpu: "8", memory: 32Gi, nvidia.com/gpu: "1" }
-  # ---------------------------------------------------------------------------
-  # Self-hosted REASONING tier — Magistral Small 24B (Apache-2.0, Mistral/EU)
-  # served by llama.cpp `llama-server` (OpenAI-compatible /v1) from a MOUNTED GGUF.
-  # This is the SOVEREIGN reasoning default: a single RESIDENT (always-loaded) CPU
-  # replica, registered with LiteLLM as `sovereign-reasoning`. STACKIT Qwen
-  # (`sovereign-reasoning-fast`) is the explicit fast alternative AND the fallback.
-  #
-  # CORE CAP (the hard guardrail on a shared box): `cores` is BOTH the CFS CPU
-  # limit AND the llama.cpp thread count (`-t`) — one number, kept equal by the
-  # template — so the model can never exceed its budget and starve Trino.
-  #
-  # SIZING (m3i.16 = 16 vCPU / 118 GB): 6 cores capped, ~18-22 GB. Schedule on the
-  # box via `nodeSelector`. The Q4_K_M GGUF (~14-16 GB) is PROVIDED OUT OF BAND on
-  # the box (NOT redistributed): place it in the mounted models volume at
-  # `<modelPath>/<model>`. NOT for a CPU-tiny kind box at full size — kind e2e uses
-  # a tiny stand-in under the SAME `sovereign-reasoning` model_name.
-  #
-  # OFF by default (like `big`): it needs the m3i.16 box AND the GGUF provided out
-  # of band, so a kind/unsized node would only get a Pending 6-core pod. Enable it
-  # where the box provides the weights (values.stackit-selfhosted.yaml). The LiteLLM
-  # `sovereign-reasoning` model_name stays DEFINED regardless (the routing contract);
-  # with no pod, LiteLLM simply fails over to `sovereign-reasoning-fast` (STACKIT).
-  reasoning:
-    enabled: false
-    image:
-      # llama.cpp server (MIT) — OpenAI-compatible at /v1. Pinned for reproducibility.
-      repository: ghcr.io/ggml-org/llama.cpp
-      tag: "server"
-    # The single knob that protects Trino: CPU limit == request == `-t` threads.
-    cores: 6
-    port: 8081
-    # The GGUF filename in the mounted models volume (provided on the box).
-    model: "Magistral-Small-2506-Q4_K_M.gguf"
-    modelPath: /models
-    # Prompt context window (RAG-sized). Bump with care — KV cache grows with it.
-    ctxSize: 8192
-    memory:
-      request: 18Gi
-      limit: 22Gi
-    # Schedule on the big box. Empty {} schedules anywhere (kind). On STACKIT set
-    # the m3i.16 node-pool label, e.g. { topology.kubernetes.io/node-pool: m3i-16 }.
-    nodeSelector: {}
-    persistence:
-      # The GGUF volume. On the box, pre-populate this PVC with the Q4_K_M file
-      # (RWO + single resident replica). Off => emptyDir (operator must mount/seed
-      # the GGUF another way; the pod stays NotReady until the file is present).
-      enabled: false
-      size: 20Gi
-      accessMode: ReadWriteOnce
-      storageClass: ""
-
-# -----------------------------------------------------------------------------
 # STACKIT AI Model Serving — PREMIUM, managed, pay-per-token. NOT the default.
 # Used ONLY as (a) the LAST-RESORT fallback when every self-hosted route is
 # unreachable/overloaded, and (b) the route for VISION inputs (`sovereign-vision`).
@@ -1006,36 +885,25 @@ litellm:
     limits: { cpu: "1", memory: 2Gi }
   proxy_config:
     model_list:
-      # --- Self-hosted DEFAULT (qwen2.5:3b, Apache-2.0, offline, no key) --------
-      # EM: KEPT self-hosted (upstream 0.1.68 repointed these to STACKIT gpt-oss-20b,
-      # pay-per-token). `sovereign-default` is the cheap-first light tier. The k8s
-      # Service in front of the model-server Deployment round-robins across its
-      # `replicas` pods; `sovereign-mock` is a back-compat ALIAS -> SAME self-hosted default.
+      # --- Standard / worker tier (STACKIT gpt-oss-20b, pay-per-token) ----------
+      # `sovereign-default` is the lightweight worker for non-reasoning tasks
+      # (chat, coding, tool-selection). `sovereign-mock` is a back-compat ALIAS
+      # (existing agents/UI default to that name) pointing at the SAME worker tier.
+      # STACKIT-routed: the key is empty unless stackitPremium is configured, so
+      # these only succeed when STACKIT is wired; otherwise they error. Admin can
+      # re-point each role in Platform Settings.
       # NOTE: proxy_config is static config (the LiteLLM subchart consumes it as-is,
       # in its OWN value context), so these are LITERALS.
       - model_name: sovereign-default
         litellm_params:
-          model: openai/qwen2.5:3b            # == modelServer.model
-          api_base: http://model-server:11434/v1   # == modelServer.port
-          api_key: "sk-local-unused"          # self-hosted; ignored, not a secret
-      - model_name: sovereign-mock            # back-compat alias -> self-hosted default
+          model: openai/gpt-oss-20b
+          api_base: os.environ/STACKIT_API_BASE
+          api_key: os.environ/STACKIT_API_KEY
+      - model_name: sovereign-mock            # back-compat alias -> worker tier
         litellm_params:
-          model: openai/qwen2.5:3b
-          api_base: http://model-server:11434/v1
-          api_key: "sk-local-unused"
-      # --- External self-hosted over WireGuard (Mac Mini's Ollama qwen3:14b) ----
-      # `local-qwen` reaches a Mac Mini's Ollama at 10.10.0.2:11434 THROUGH the
-      # durable in-cluster WireGuard tunnel (wireguard.enabled). LiteLLM targets
-      # the NAT-forwarder Service `wireguard-ollama` (the pod DNATs it out the
-      # tunnel to 10.10.0.2:11434) — the tunnel subnet is NOT routable elsewhere in
-      # the cluster, so this Service name is the reachable address. DEFINED even
-      # when wireguard is OFF: like the STACKIT routes, it simply errors if called
-      # while the tunnel is down (never a boot failure). Free (self-hosted); no cap.
-      - model_name: local-qwen
-        litellm_params:
-          model: openai/qwen3:14b            # == the Mac's Ollama model tag
-          api_base: http://wireguard-ollama:11434/v1   # NAT forwarder -> 10.10.0.2:11434
-          api_key: "sk-local-unused"         # self-hosted; ignored, not a secret
+          model: openai/gpt-oss-20b
+          api_base: os.environ/STACKIT_API_BASE
+          api_key: os.environ/STACKIT_API_KEY
       # --- Reasoning tier (STACKIT Qwen3-VL-235B, pay-per-token) ---------------
       # `sovereign-reasoning` is the reasoning default (the routing.ts reasoning
       # tier points here). STACKIT-routed; the key is empty unless stackitPremium
