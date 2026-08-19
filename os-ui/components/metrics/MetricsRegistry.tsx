@@ -20,6 +20,8 @@ import { ensureFolderId, renamedPath } from '@/lib/folders/client';
 import { useFolders } from '@/lib/folders/useFolders';
 import { ConfirmProvider, useConfirm } from '@/components/lifecycle/ConfirmDialog';
 import { archiveFolderCopy, deleteFolderCopy } from '@/lib/core/lifecycle';
+import SourceUnavailable from '@/components/core/SourceUnavailable';
+import { metricSourceUnavailable } from '@/lib/core/source-availability';
 import DomainTag from '@/components/DomainTag';
 import {
   type MetricGroups,
@@ -47,13 +49,27 @@ function rootOf(m: MetricSummary): FolderRoot {
 }
 
 function MetricCard({
-  m, onOpen, scope, canManage, onMove, picked, onPick,
+  m, onOpen, scope, canManage, onMove, picked, onPick, visibleDatasetIds,
 }: {
   m: MetricSummary; onOpen: (m: MetricSummary) => void; scope: ScopeKey;
   canManage: boolean; onMove?: (m: MetricSummary) => void;
   picked?: boolean; onPick?: (checked: boolean) => void;
+  /** The dataset ids currently resolvable to the viewer — a metric whose source fell out
+   *  (dataset demoted/archived/deleted) degrades gracefully instead of dead-linking (0.6.98). */
+  visibleDatasetIds?: ReadonlySet<string>;
 }) {
   const showDomain = showDomainForScope(scope);
+  // GRACEFUL DEGRADATION (0.6.98): the metric's source dataset was demoted to Personal,
+  // archived or deleted, so it no longer resolves to a visible dataset — render the calm
+  // SourceUnavailable note (non-clickable) so opening it can't deref a missing dataset and
+  // throw, while every other tile stays live.
+  if (visibleDatasetIds && metricSourceUnavailable(m.datasetId, visibleDatasetIds)) {
+    return (
+      <div className="card tile" style={{ minHeight: 120, boxSizing: 'border-box' }} title={`Source dataset for “${m.name}” is unavailable`}>
+        <SourceUnavailable name={m.name} compact />
+      </div>
+    );
+  }
   // FAIL-SOFT: one metric's model couldn't load — render its reason inline, non-clickable,
   // so the rest of the registry stays live (one bad cube never 500s the whole surface).
   if (m.error) {
@@ -85,26 +101,30 @@ function MetricCard({
       }}
       title="Open this metric — explore, govern, or set an alert"
     >
-      <div className="tile-top">
-        <div className="row" style={{ gap: 6, alignItems: 'center', minWidth: 0, flex: 1 }}>
+      <div className="tile-top" style={{ alignItems: 'flex-start' }}>
+        <div className="row" style={{ gap: 6, alignItems: 'flex-start', minWidth: 0, flex: 1 }}>
           {onPick ? (
             // Multi-select for bulk archive. Stop the click so ticking a card
             // doesn't also open it.
             <input
               type="checkbox" className="file-pick" aria-label={`Select ${m.name}`}
+              style={{ marginTop: 3 }}
               checked={!!picked}
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => onPick(e.target.checked)}
             />
           ) : null}
-          <span className="tile-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={m.name}>{m.name}</span>
+          <span className="tile-name tile-name--metric" title={`${m.name}\nMetric: ${m.member}\nSource dataset: ${m.datasetName}`}>{m.name}</span>
         </div>
         <div className="row" style={{ gap: 4, alignItems: 'center', flex: 'none' }}>
           {showDomain ? <DomainTag domain={m.domain} /> : null}
           <span className={`badge ${TIER_BADGE[m.tier]}`}>{TIER_WORD[m.tier]}</span>
         </div>
       </div>
-      <div className="muted mono" style={{ fontSize: 12 }}>{m.member}</div>
+      {/* The Cube member is the metric's TECHNICAL identity (a domain-namespaced
+          `<VIEW>.<measure>`) — it made the tile unreadable, so it no longer rides the tile
+          face. The clean metric NAME (above) is the identity here; the full member + source
+          dataset are on the name's hover title for discoverability. */}
       {/* Plain-language meaning, one truncated line (full text on hover). Absent ⇒ no line,
           so a metric without a description keeps the exact prior tile layout. */}
       {m.description ? (
@@ -118,8 +138,6 @@ function MetricCard({
       ) : null}
       <div className="tile-meta" style={{ marginTop: 'auto' }}>
         <span className="muted">{m.owner}</span>
-        <span className="dot-sep">·</span>
-        <span className="muted">{m.datasetName}</span>
         <span className="dot-sep">·</span>
         <span className="badge muted" title={m.composite ? 'A formula over other metrics' : undefined}>{m.composite ? 'formula' : m.type}</span>
       </div>
@@ -173,6 +191,17 @@ function MetricsRegistryInner({
   useEffect(() => { void loadFolders(); }, [loadFolders, groups]);
 
   const uid = user?.id ?? '';
+  // The datasets currently resolvable to the viewer = every distinct source dataset across
+  // the metrics the API returned (a listed metric proves its dataset is visible). A metric
+  // that references a dataset NOT in this set has lost its source → degrade its tile (0.6.98).
+  // Non-error metrics only (an errored tile carries a placeholder datasetId).
+  const visibleDatasetIds = useMemo(() => {
+    const s = new Set<string>();
+    if (groups) for (const m of [...groups.mine, ...groups.domain, ...groups.marketplace]) {
+      if (!m.error && m.datasetId) s.add(m.datasetId);
+    }
+    return s;
+  }, [groups]);
   const scoped = groups ? groupByScope(groups, uid) : null;
   const counts = groups ? scopeCounts(groups, uid) : null;
   const scopedAll = (scoped ? scoped[scope] : []) as MetricSummary[];
@@ -466,6 +495,7 @@ function MetricsRegistryInner({
                     {list.map((m) => (
                       <MetricCard
                         key={m.id} m={m} onOpen={onOpen} scope={scope}
+                        visibleDatasetIds={visibleDatasetIds}
                         canManage={canManage(m)}
                         onMove={canManage(m) ? (mm) => setMoveIds({ ids: [mm.id], root: rootOf(mm) }) : undefined}
                         picked={picked.has(m.id)}
@@ -506,7 +536,7 @@ function MetricsRegistryInner({
               Hidden from the working registry — open one to Restore or Delete.
             </p>
             <div className="tile-grid">
-              {archived.map((m) => <MetricCard key={m.id} m={m} onOpen={onOpen} scope={scope} canManage={false} />)}
+              {archived.map((m) => <MetricCard key={m.id} m={m} onOpen={onOpen} scope={scope} canManage={false} visibleDatasetIds={visibleDatasetIds} />)}
             </div>
           </>
         ) : (

@@ -4,7 +4,8 @@
 
 /**
  * THE STAGED MCP SURFACE (pure) — how the Platform MCP mirrors the UI's five-stage
- * Software flow (Define → Design → Build → Test → Publish) for an EXTERNAL agent.
+ * Software flow (Define App → Design Epics → Choose Context → Build App → Test & Publish,
+ * 0.6.105) for an EXTERNAL agent.
  *
  * An external agent (Claude / Codex) IS the model. So the Build and Test tools do not
  * run an internal LLM — they hand the agent the EXACT SAME governed directive + grounded
@@ -109,8 +110,7 @@ export function buildGate(app: App, target: BuildTarget): BuildGate {
   const unspecified = scope
     .filter(({ story }) => !specHasContent(story.spec))
     .map(({ epic, story }) => ({ epicId: epic.id, storyId: story.id, title: story.title }));
-  if (target.kind !== 'app' && unspecified.length === 0 && scope.length > 0) return { ok: true };
-  if (target.kind === 'app' && unspecified.length === 0 && scope.length > 0) return { ok: true };
+  if (unspecified.length === 0 && scope.length > 0) return { ok: true };
   return {
     ok: false,
     reason:

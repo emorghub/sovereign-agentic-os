@@ -33,7 +33,7 @@ import {
 import { transparencyGate, gateReason } from './transparency.ts';
 import { CUBE_ARTIFACT, EXPOSURE_ARTIFACT, scaffoldCubeYaml, scaffoldExposureYaml, metricSqlReady, metricCubeReady } from './metrics.ts';
 import { SEMANTIC_ARTIFACT, scaffoldSemanticYaml } from './semantic.ts';
-import { assetTarget, productTarget, personalSchema, domainSchema, physicalSlug, versionTarget } from './store-fqn.ts';
+import { assetTarget, productTarget, reuseSourceFqn, personalSchema, domainSchema, physicalSlug, versionTarget } from './store-fqn.ts';
 import { config } from '../core/config.ts';
 import { osMirror } from '../infra/os-mirror.ts';
 import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
@@ -254,6 +254,44 @@ export function __resetStore(): void {
   versions.__reset();
 }
 
+/**
+ * Test hook: insert a dataset with a FIXED id, owner, domain, tier and columns
+ * directly into the in-process store. Real datasets are born through the governed
+ * flows (createDataset → buildVersion → …) with a minted id, so tests that need a
+ * SPECIFIC production id (e.g. the Northpeak `ds_zpco1s6n7y` the demo-app seed
+ * guards on) cannot reproduce it through the public API. This is the minimal,
+ * test-only door for exactly that — additive, `__`-prefixed like `__resetStore`,
+ * and never referenced by production code paths.
+ */
+export function __seedDatasetForTest(input: {
+  id: string;
+  name: string;
+  owner: string;
+  domain: string;
+  tier?: Tier;
+  columns?: ColumnDoc[];
+}): void {
+  ensureSeeded();
+  const d: Dataset = {
+    version: '1',
+    id: input.id,
+    name: input.name,
+    owner: input.owner,
+    domain: input.domain,
+    tier: input.tier ?? 'dataset',
+    visibility: input.tier === 'asset' ? 'domain' : input.tier === 'product' ? 'public' : 'private',
+    folder: '/',
+    description: '',
+    versions: emptyVersions(),
+    grants: [],
+    measures: [],
+    columns: input.columns ?? [],
+    cubeNamespaced: true,
+  };
+  const rec: DatasetRecord = { id: d.id, owner: d.owner, domain: d.domain, yaml: serializeDataset(d), updatedAt: now() };
+  ds().store.set(rec.id, rec);
+}
+
 // ------------------------------------------------------------------- scoping --
 
 function get(id: string): DatasetRecord {
@@ -435,6 +473,52 @@ export function getDataset(id: string, user: Principal): Dataset {
   return viewOf(get(id), user);
 }
 
+/** UNSCOPED existence+name peek for the software dataset-reference guard (no authz):
+ *  "does this dataset id exist in the world, and what is it called?" — used ONLY to tell a
+ *  DELETED dataset (rebuild/restore) apart from an EXISTS-but-ungranted one (grant it).
+ *  No rows, no per-viewer detail — just the display name or null. An ARCHIVED dataset still
+ *  EXISTS (archived ≠ deleted), so a present record ⇒ non-null. */
+export function peekDatasetMeta(id: string): { name: string } | null {
+  ensureSeeded();
+  const rec = ds().store.get(id);
+  if (!rec) return null;
+  try { return { name: parseDataset(rec.yaml).name }; } catch { return { name: '' }; }
+}
+
+/** UNSCOPED tier peek for the declarative AppSpec validator (0.6.116): "is this dataset
+ *  Personal (owner-only) or a governed asset/product?" — used to WARN when a spec sources a
+ *  Personal dataset (readable only by its owner, so other app users get access-denied →
+ *  promote-to-Domain). Non-throwing: an absent or unparseable record ⇒ null (fail-soft; the
+ *  caller skips the warning rather than emitting a false one). No authz, no rows. */
+export function peekDatasetTier(id: string): Tier | null {
+  ensureSeeded();
+  const rec = ds().store.get(id);
+  if (!rec) return null;
+  try { return parseDataset(rec.yaml).tier; } catch { return null; }
+}
+
+/** UNSCOPED column-name peek for the declarative AppSpec validator (0.6.116): the dataset's
+ *  documented column names, so the validator can verify every spec `field`/`keyField` exists
+ *  and LIST the real columns in the fix hint — the highest-value teaching signal. Non-throwing
+ *  and unscoped (consistent with `peekDatasetMeta`): an absent or unparseable record ⇒ null
+ *  (fail-soft; the caller skips the column check rather than flagging a false unknown). */
+export function peekDatasetColumns(id: string): string[] | null {
+  ensureSeeded();
+  const rec = ds().store.get(id);
+  if (!rec) return null;
+  try { return parseDataset(rec.yaml).columns.map((c) => c.name); } catch { return null; }
+}
+
+/** UNSCOPED measure-name peek for the metric-existence check behind the AppSpec validator
+ *  (0.6.116). A metric IS a measure on a dataset (`datasetId.measure`), so existence is
+ *  "the dataset exists and declares this measure". Non-throwing: absent/unparseable ⇒ null. */
+export function peekDatasetMeasureNames(id: string): string[] | null {
+  ensureSeeded();
+  const rec = ds().store.get(id);
+  if (!rec) return null;
+  try { return parseDataset(rec.yaml).measures.map((m) => m.name); } catch { return null; }
+}
+
 /**
  * The soft-archive flag is a RECORD-level property (`DatasetRecord.archived`), not
  * part of the yaml-derived {@link Dataset}. The detail view needs it to show
@@ -569,7 +653,11 @@ export function listJoinable(user: Principal, excludeId?: string): JoinableDatas
   for (const rec of ds().store.values()) {
     const d = parseDataset(rec.yaml);
     if (d.id === excludeId) continue;
-    if (d.tier === 'dataset') continue; // private, owner-only — not reusable
+    // Personal (My-tier) datasets are reusable ONLY by their OWNER — you may compose a
+    // curated dataset from your OWN private datasets (no cross-user exposure; the join
+    // reads your personal lane AS you), but never from someone else's owner-only data.
+    // Shared (asset) / Company (product) tiers stay open to everyone who canView.
+    if (d.tier === 'dataset' && d.owner !== user.id) continue;
     if (!canView(d, user)) continue; // the hard visibility gate
     // ACTIVE-DOMAIN NARROWING (the same inScope gate the main list applies to all
     // tiers): canView alone leaks across domains — an owner/admin passes it for their
@@ -580,7 +668,7 @@ export function listJoinable(user: Principal, excludeId?: string): JoinableDatas
     // dropdown while operating in agentic-leader.)
     if (d.domain && !user.domains.includes(d.domain)) continue;
     if (!d.versions.gold.built && !d.versions.silver.built) continue; // must be materialized
-    out.push({ id: d.id, name: d.name, domain: d.domain, tier: d.tier, fqn: assetTarget(d), columns: d.columns.map((c) => c.name) });
+    out.push({ id: d.id, name: d.name, domain: d.domain, tier: d.tier, fqn: reuseSourceFqn(d), columns: d.columns.map((c) => c.name) });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -1176,8 +1264,18 @@ export function defineMeasure(id: string, user: Principal, measure: Measure): Da
   // governed Trino SQL run AS the viewer. Refuse a dataset with no built Gold honestly.
   const ready = metricSqlReady(d);
   if (!ready.ok) fail(ready.message ?? 'This dataset is not ready for a metric', 400);
-  if (d.measures.some((m) => m.name === measure.name)) fail(`Measure '${measure.name}' already defined`, 409);
-  d.measures.push(measure);
+  // Define is an UPSERT keyed by the measure name (a metric's frozen physical identity is
+  // its Cube member `${View}.${name}` — there is never two same-named measures on one
+  // dataset). A re-save of an existing measure name is an EDIT of THAT metric: replace it
+  // IN PLACE (preserving order + its DISPLAY `label`, which the define form never carries),
+  // never a false "already defined" 409. A new name appends.
+  const at = d.measures.findIndex((m) => m.name === measure.name);
+  if (at >= 0) {
+    const existing = d.measures[at];
+    d.measures[at] = existing.label ? { ...measure, label: existing.label } : measure;
+  } else {
+    d.measures.push(measure);
+  }
   // The portable MetricFlow-style semantic declaration is ALWAYS emitted (it is served as
   // Trino SQL, works on personal gold). The cube_dbt model + dbt exposure are CUBE artifacts
   // — emit them ONLY when the dataset is cube-ready (governed), never on personal gold where
@@ -1191,7 +1289,7 @@ export function defineMeasure(id: string, user: Principal, measure: Measure): Da
     artifacts[EXPOSURE_ARTIFACT] = scaffoldExposureYaml(d);
   }
   rec.artifacts = artifacts;
-  persist(rec, d, { author: user.id, summary: `define metric ${measure.name}` });
+  persist(rec, d, { author: user.id, summary: `${at >= 0 ? 'update' : 'define'} metric ${measure.name}` });
   return d;
 }
 

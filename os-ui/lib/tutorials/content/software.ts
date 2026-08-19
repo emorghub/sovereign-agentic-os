@@ -8,16 +8,16 @@ const software: TutorialDef = {
   key: 'software',
   route: '/software',
   title: 'Software',
-  tagline: 'Build a governed app by chat — watch the agent work live, preview privately, ship through a review gate.',
+  tagline: 'Compose a governed app from cookbook patterns over your data — no code, live the moment it validates.',
   buttonLabel: 'Ship Software Tutorial',
 
   hook: {
     illustration: 'build',
-    title: 'Build software by chatting — governed end to end',
-    body: 'Five stages — Define · Design · Build · Test · Publish. State a purpose, shape EPICs and user stories, then watch the build agent work live: the plan first, then one honest line per action, every commit landing in a sovereign in-cluster repo. Preview is yours alone; going live is a governed Builder review.',
+    title: 'Compose a governed app — no code, no build, no pod',
+    body: 'An app here is a governed declarative specification, not a coding project: a set of tabs, each a beautiful cookbook pattern filled with your governed data, rendered same-origin by the trusted OS renderer. Five stages — Define App · Design Epics · Choose Context · Build App · Test & Publish. Build App auto-generates the whole app from your epics and granted data; you refine it by chatting ("make Orders a kanban by status") and it applies the change directly, schema-validated. It is live the moment its spec validates — no repo, no CI, no container.',
     byRole: {
       builder: {
-        body: 'Five stages — Define · Design · Build · Test · Publish. Your lane adds the gates: flip to the Developer view for the raw code panel, expand the raw tool I/O behind every activity line, and review deploy requests — security scan, granted resources, the diff — before anything goes live.',
+        body: 'Five stages — Define App · Design Epics · Choose Context · Build App · Test & Publish. Your lane adds Advanced settings (the app theme CSS + the sandboxed custom HTML/CSS/JS block) and the promotion gates — Publish promotes the draft to a new live version, and you climb My → Domain → Company.',
       },
     },
   },
@@ -25,31 +25,31 @@ const software: TutorialDef = {
   steps: [
     {
       illustration: 'build',
-      title: 'Define — purpose and granted context',
-      body: '"Create new software app" needs only a name — a sovereign in-cluster Forgejo repo is provisioned, and the build agent infers UI/API from what it actually builds. State the purpose in a sentence or two and "Save purpose", then grant the governed context the app may use — Connections, Data, Knowledge, Files, Metrics — at Read / Read+propose / Read+write. No raw credentials, ever.',
+      title: 'Define App — its purpose',
+      body: '"New app" creates a declarative app directly — no chooser, no code. Give it a name and state the purpose in a sentence or two. Define App is complete once a purpose is set; the governed context the app may use is resolved next, in Choose Context. (The historic coded path is an advanced, platform-admin-only option — off by default.)',
     },
     {
       illustration: 'document',
-      title: 'Design — EPICs and user stories',
-      body: 'Shape the work on the design board: "+ Add EPIC", each with technical, UX and governance requirements, then "+ Add story" beneath — as a role, I want a capability, so that a benefit — with an acceptance criterion. The Design assistant proposes both; Apply creates them. Ship the backlog outward too: "Push to Jira", "Push code to Git", or seed the frontend from a Claude design.',
+      title: 'Design Epics — EPICs and user stories',
+      body: 'Shape the work on the design board: "+ Add EPIC", then "+ Add story" beneath — as a role, I want a capability, so that a benefit. The Design assistant proposes both; Apply creates them. These epics and stories are the brief Build App reads to auto-generate your tabs, and each tab links back to the story it serves.',
+    },
+    {
+      illustration: 'document',
+      title: 'Choose Context — grant the six types',
+      body: 'Bind the governed context the app may use — Data · Metrics · Files · Knowledge · Agents · Connections — by reference, never raw credentials. Per type: "use existing" (pick governed artifacts you\'re entitled to and grant them) or "create new" (a fresh, possibly-empty dataset/file/knowledge is created in an "App «Name»" folder, granted, and ready to fill). Intelligence enters only as a granted agent; connections are mediated, never held as credentials. A tab can only read what the app was granted.',
     },
     {
       illustration: 'agent',
-      title: 'Build — watch the agent work, live',
-      body: 'Build works off the spec. The left tree is Epics › Stories › Features/NFRs/Rules; tick the features to build next — ticking a story or EPIC cascades, capped at 8 per batch so each result is reliable. One Build button builds the selected set. Two distinct marks: a selection checkbox ("queue to build next") and a green done ✓ badge (already built — a status, not a toggle; done items stay in the tree). The right panel always shows the selected item\'s spec, and after a build ticks each item honestly against what shipped — pending if unverifiable, never fake-ticked. The run streams live (plan, then one line per action, ⚠ on failure); the build chat at the bottom is for feedback. Builders can "show details" for the raw tool I/O and open the code panel in the Developer view.',
-    },
-    {
-      illustration: 'sandbox',
-      title: 'Test — run it and check it against spec',
-      body: 'Keep the live-pod view: the status rail answers "where is this app?" at a glance (Repo · Preview · Deploy, never faking a state it can\'t see), "Provision preview" starts a private runner and "Open app UI ↗" opens the real app. Then the LLM tester reads the committed code and each built story\'s spec and reports PASS/FAIL per item — grounded, never fabricated.',
+      title: 'Build App — it builds itself, then you refine',
+      body: 'Open Build App and the OS auto-generates the whole app from your epics, user stories and granted data — a validated spec of cookbook-pattern tabs wired to your real columns. Refine with the chat assistant: it explains what\'s built, and you say "make Orders a kanban by status" or "add a KPI tab for total revenue" — it applies the change directly, schema- and governance-validated, and the live preview updates (an impossible instruction changes nothing and is explained). You can also edit any pattern by hand. Two grouped, confirm-gated controls: "Reset based on Design" and "Start from blank". There is no Save button — every change autosaves as a draft, so the app always shows in your tiles as "Draft".',
     },
     {
       illustration: 'publish',
-      title: 'Publish — a governed go-live',
-      body: '"Publish release" files a deploy review — approve it in Policies & Approvals. A Builder sees the security scan, the governed resources requested, its footprint and the change diff before anything ships; routine in-envelope updates ship automatically. Once live: call the app\'s governed MCP tools and climb the promotion ladder — My → Domain → Company.',
+      title: 'Test & Publish — versioned go-live',
+      body: 'Test the draft privately while the currently published version stays live at /apps/<slug>. "Publish" runs the full serving gate over your draft and, if clean, promotes it to a new live version with an auto name and a change summary; a blocking draft comes back with inline { path, reason, fix } issues and nothing goes live. You can open the live app and restore an earlier version at any time. Then climb the ladder — My → Domain → Company — and call the app\'s governed MCP tools.',
       byRole: {
         builder: {
-          body: 'Open Deploy reviews: the security scan, the governed resources requested, the footprint, and the change diff — then decide. Approval takes the release live; the app\'s capabilities become governed MCP tools that run AS the caller, OPA-checked and audit-traced.',
+          body: 'Publish validates the draft and promotes it to a new live version (auto name + change summary); earlier versions restore. Advanced settings (builder-gated) add the scoped app theme CSS and the sandboxed custom HTML/CSS/JS block. Promote up the ladder — My → Domain → Company.',
         },
       },
     },
@@ -61,54 +61,55 @@ const software: TutorialDef = {
       sandboxAnchor: ANCHORS.software.sandbox,
       route: '/software',
       title: 'Start from your software',
-      body: 'The list shows All · My · Domain · Company Software. "Create new software app" asks only for a name — "Create & build" scaffolds a sovereign Forgejo repo and drops you into the five-stage flow. Everything starts Personal.',
+      body: 'The list shows All · My · Domain · Company Software. "New app" creates a declarative app directly (name it) and drops you into the five-stage flow (Define App · Design Epics · Choose Context · Build App · Test & Publish). Everything starts Personal.',
     },
     {
       anchor: ANCHORS.software.define,
       sandboxAnchor: ANCHORS.software.sandbox,
       route: '/software',
-      title: 'Define it',
-      body: 'Write the purpose in your own words and "Save purpose" — Define is complete once a purpose is set. Then grant governed context (Connections, Data, Knowledge, Files, Metrics) at Read / Read+propose / Read+write. The stage assistant can sharpen the purpose and suggest grants; you confirm every apply.',
+      title: 'Define the app',
+      body: 'Write the purpose in your own words. Define App is complete once a purpose is set. The stage assistant can sharpen it; you confirm every apply. The governed context the app may use is resolved next, in Choose Context.',
     },
     {
       anchor: ANCHORS.software.design,
       sandboxAnchor: ANCHORS.software.sandbox,
       route: '/software',
-      title: 'Design — specify each story',
-      body: 'Design is the specification. Pick a user story in the tree, then give it three lists — Features (what it does), Non-functional requirements (how well), Rules (governance). The assistant can draft the spec grounded in your Define context; you Apply what it proposes. Add or edit EPICs & stories in the "Backlog & structure" board. Design is complete once every story has a spec.',
+      title: 'Design Epics — the brief for Build',
+      body: 'Add EPICs and user stories in the design board — as a role, I want a capability, so that a benefit. The assistant can draft them; you Apply what it proposes. This is the brief Build App reads to auto-generate your tabs, so a sharper design yields a better first app.',
+    },
+    {
+      anchor: ANCHORS.software.context,
+      sandboxAnchor: ANCHORS.software.sandbox,
+      route: '/software',
+      title: 'Choose Context — grant the six types',
+      body: 'Grant the governed context the app may use across six types — Data · Metrics · Files · Knowledge · Agents · Connections. Per type, "add existing" grants artifacts you\'re entitled to, or "create new" makes a fresh, possibly-empty dataset/file/knowledge in an "App «Name»" folder and grants it. No raw credentials — connections are mediated and intelligence enters only as a granted agent.',
     },
     {
       anchor: ANCHORS.software.build,
       sandboxAnchor: ANCHORS.software.sandbox,
       route: '/software',
-      title: 'Build in focused batches',
-      body: 'The left tree is Epics › Stories › Features/NFRs/Rules. Tick the features to build next (ticking a story or EPIC cascades to its features) — up to 8 per batch so each result is reliable and reviewable; the counter shows "N / 8 selected". One Build button builds the selected set. The right panel always shows the selected item\'s spec and, after build, ticks each item honestly against what actually shipped (pending if unverifiable, never fake-ticked) — done items stay in the tree, green. The build chat at the bottom is for feedback and refinements; the status rail tracks Repo · Preview · Deploy throughout.',
-    },
-    {
-      anchor: ANCHORS.software.test,
-      sandboxAnchor: ANCHORS.software.sandbox,
-      route: '/software',
-      title: 'Test the built stories',
-      body: '"Provision preview" asks the in-cluster runner for a private pod; "Open app UI ↗" appears once it serves the real app, calling the governed OS API as you. Then run the LLM tester: it reads the committed code and each built story\'s spec and reports PASS/FAIL per item — grounded in what it can see, never fabricated. No cluster reachable? "Acknowledge offline" says so honestly and lets you continue.',
+      title: 'Build App — auto-generate, then refine by chat',
+      body: 'Build App auto-generates the whole app from your epics and granted data — cookbook-pattern tabs mapped to your real columns. Refine with the chat assistant ("make Orders a kanban by status") — it applies edits directly, schema-validated, and the live preview updates — or edit a pattern by hand. "Reset based on Design" regenerates; "Start from blank" starts over (both confirm-gated). No Save button: every change autosaves as a draft.',
     },
     {
       anchor: ANCHORS.software.publish,
+      sandboxAnchor: ANCHORS.software.sandbox,
       route: '/software',
       governedWrite: true,
-      title: 'Request the go-live',
-      body: '"Publish release" files the deploy review — approve it in Policies & Approvals. You can see exactly what the Builder sees while it waits: the scan, the granted resources, the diff. Approved, the app goes live; then promote it — My → Domain → Company.',
+      title: 'Test & Publish — promote the draft to a live version',
+      body: 'Test the draft while the published version stays live at /apps/<slug>. "Publish" validates the draft with the full serving gate and promotes it to a new live version (auto name + change summary); a blocking draft returns inline { path, reason, fix } issues and nothing goes live. Open the live app, or restore an earlier version. Then promote it — My → Domain → Company.',
     },
   ],
 
   sandbox: {
-    lane: 'My Software — private apps and previews',
+    lane: 'My Software — private drafts and their live version',
     anchor: ANCHORS.software.sandbox,
-    note: 'Apps start Personal: build, commit, and preview privately in your own sovereign repo. Nothing reaches the domain until a deploy review is approved.',
+    note: 'Apps start Personal: compose and autosave a private draft, previewed only by you. Nothing reaches the domain until you Publish and then promote up the ladder.',
   },
 
   outro: {
-    title: 'Your app shipped through a governed gate',
-    body: 'You defined, designed, built with a live agent, previewed privately, and requested a governed go-live. Next: build an agent that calls your app\'s governed MCP tools, or open Governance to see how deploy reviews are decided.',
+    title: 'You composed a governed app — no code, live on validate',
+    body: 'You defined, designed, granted context, composed cookbook-pattern tabs over governed data, and published a live version — same-origin, no repo or pod. Next: build an agent in the Agents tab and grant it, so your app gains intelligent logic; or open Governance to see how promotion is decided.',
     next: ['agents', 'governance'],
     doc: 'software-golden-path.md',
   },
@@ -116,15 +117,15 @@ const software: TutorialDef = {
   framing: {
     user: {
       verb: 'Use',
-      hook: 'Open the apps your domain shipped — every one passed a governed review.',
+      hook: 'Open the apps your domain published — governed cookbook patterns over trusted data.',
     },
     creator: {
-      verb: 'Create',
-      hook: 'Describe it in chat and watch the agent build it, action by action, in your own governed repo.',
+      verb: 'Compose',
+      hook: 'Grant your data, let Build auto-generate the app, then refine it by chat — no code.',
     },
     builder: {
-      verb: 'Review & promote',
-      hook: 'Review deploy requests — scan, resources, diff — approve go-lives, and promote apps up the ladder.',
+      verb: 'Publish & promote',
+      hook: 'Publish drafts to live versions, restore earlier ones, and promote apps up the ladder.',
     },
   },
 };

@@ -13,6 +13,1228 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+## [os-ui 0.6.140] — 2026-08-14 — Remove the in-app tool overlay entirely (embedded tools open in their own tab)
+
+### Fixed
+- **A black full-screen overlay could cover the whole OS chrome (including the left nav) with no reliable way out.** Root cause: `ToolWindowProvider` restored the embedded-tool overlay (`.toolwin`, `position:fixed; inset:0; z-index:1000; #0c0b0d`) from the `?tool=` URL param on **every mount**, so a stale param (or a hung/focus-grabbing embedded iframe that swallowed the dismiss keys) re-opened the full-screen overlay on each reload and trapped the operator. An overlay that can trap the operator is unacceptable, so the in-app tool overlay is **removed entirely** — embedded tools (Superset, Langfuse, MLflow, …) now open in their **own browser tab** (`window.open('/tools/<key>/…')`), which can never cover or block the OS. `openTool` keeps the same signature (every "Open <tool>" button still works); on load any stale `?tool=` param is stripped. The old `ToolWindow` overlay component is no longer rendered.
+
+## [os-ui 0.6.139] — 2026-08-14 — Software: no stuck full-screen overlay + drop dead code-view for spec apps + tile Open/Edit + prominent View-live
+
+- **ROBUSTNESS — a stuck full-screen BLACK overlay could trap the whole UI (incl. the left nav) with
+  no way out.** Symptom (platform owner, live): "the menu on the left is blacked out and I cannot see
+  or click anything." Root cause: the embedded-tool overlay `.toolwin` (`position: fixed; inset: 0;
+  z-index: 1000; background: #0c0b0d`) is a near-black surface covering the entire app, and
+  `ToolWindowProvider` RESTORES it from the `?tool=` URL param on every mount — so a stale param, or an
+  embedded `/tools/<key>` iframe that hangs/fails or grabs keyboard focus, leaves the black overlay up
+  with Escape swallowed by the focused iframe and NO backdrop-click dismiss (only a small × in the top
+  bar). Fixes: `ToolWindow` now closes on a **backdrop click** on the black chrome AND on **Escape via
+  a capture-phase listener** (so a focused iframe can't swallow the key). As a GLOBAL SAFETY NET, a new
+  pure helper `lib/core/overlay-dismiss.ts` (`isEscapeKey` / `isBackdropClick` / capture-phase
+  `onEscape`) is shared by the Software-reachable overlays that were missing a dismiss path:
+  `FolderPickerModal` (the folder Move picker) and `GuardedConfirm` now both close on Escape as well as
+  backdrop-click. Every full-screen overlay reachable from Software is now dismissible by BOTH Escape
+  and a backdrop click — it is no longer possible to be left with a blacked-out, unclickable screen and
+  no escape. New unit tests cover the helper (SSR-safe, Escape-only, backdrop-only, no phantom dismiss).
+
+- **Declarative (spec) apps no longer show the dead "Developer" code view.** A `serveMode: 'spec'` app
+  has NO code files, so the top-level Simple⇄Developer toggle (which drives the raw code-files
+  `DeveloperSurface`) was meaningless — toggling it showed an empty old code view. The top-level
+  `BuilderModeToggle` and `DeveloperSurface` are now hidden for spec apps; a spec app always renders the
+  staged flow (Define→Design→Context→Build→Test&Publish). "Developer" for a spec app is the Build-stage
+  manual composer (unchanged). Coded apps keep the top-level code view.
+
+- **Software tiles now have TWO clear actions: "Open App" and "Edit App."** Open App → the SERVED app at
+  `/apps/<slug>` (its own page), enabled only when the app is actually served (a published live spec, or
+  a live deploy); a draft-only app shows Open disabled with a "Publish to open" hint. Edit App → the
+  builder. Lifecycle actions (Move / Archive / Delete) unchanged.
+
+- **The "View live app" link is now prominent.** In the spec app's Test & Publish stage the tiny quiet
+  link became a primary "Open the live app ↗" button (shown once a published spec exists), and the Build
+  App header now always surfaces an "Open app ↗" button whenever the app is published — so there's
+  always an obvious way to open the running app.
+
+## [os-ui 0.6.138] — 2026-08-14 — Build App: fix autosave-draft data-loss + Simple/Developer (Lovable-style) split + de-dupe Test & Publish
+
+- **CRITICAL data-loss fix — the autosaved draft no longer disappears.** Symptom: build some tabs →
+  press Test & Publish → go back to Build and "it all disappears and starts from scratch." Root cause
+  was purely client-side: `saveAppDraft` persists the draft server-side (proven, and `getAppForUser`
+  returns it — no stripping), but (a) the composer's `state` is initialised ONCE from `app.draftSpec`
+  on mount, (b) autosave never refreshed the in-memory `app`, and (c) stage navigation
+  Build→Test&Publish UNMOUNTS `AppSpecComposer`. So returning re-mounted the composer and re-hydrated
+  from the STALE `app.draftSpec` (undefined for a fresh app) → empty. Fix (`AppSpecComposer.tsx`):
+  after each successful autosave, call `onSaved` (→ the page reload) so `app.draftSpec` matches what
+  was saved; add a FLUSH-ON-UNMOUNT (keepalive PUT) so edits within the last debounce window are sent
+  before the composer unmounts; a remount then hydrates from the fresh server draft. The draft now
+  survives Build↔Test&Publish nav, a full page reload, and re-opening from the tiles. Regression test
+  in `lib/software/publish-app.test.ts` asserts the draft round-trips through the READ path
+  (`saveAppDraft` → `getAppForUser`) the UI fetch uses.
+- **Simple ⇄ Developer split for Build App (Lovable-style).** A per-user, localStorage-persisted
+  toggle (reusing the OS-wide `BuilderModeToggle`) in `SpecBuildStage`, defaulting to **Simple**:
+  Simple shows only the live app **preview** + the **assistant** (build by talking); **Developer**
+  shows the full manual composer (tab list, pattern config, advanced theme/functions). Autosave,
+  auto-generate-on-first-load and assistant-apply work identically in both.
+- **De-duped Test & Publish.** The declarative Build stage showed the "Test & Publish →" advance
+  affordance TWICE — `SpecBuildStage`'s own button plus `StageShell`'s standard footer next-button.
+  `SoftwareBuilder` now passes `hideNextFor={['build']}` for spec apps, leaving exactly one.
+
+## [os-ui 0.6.137] — 2026-08-13 — Docs: guide + tutorials rewritten for the declarative Software model
+
+- **End-user guide (`docs/Sovereign-Agentic-OS-Guide.md`).** Rewrote the Software narrative for the
+  declarative AppSpec model in place — no leftover coded-app text. The main tab tour now describes an
+  app as a **governed declarative specification** (a set of cookbook-pattern tabs over granted data,
+  rendered same-origin by the OS renderer — no per-app repo/CI/container/pod, live on validate),
+  documents the **pattern cookbook** (view + interactive patterns, `theme.css`, the `functions` DSL,
+  and the sandboxed null-origin custom block), the **five stages** (Define App · Design Epics ·
+  Choose Context · Build App · Test & Publish), **Choose Context's six grant types**
+  (Data · Metrics · Files · Knowledge · Agents · Connections, use-existing / create-in-"App «Name»"),
+  the **Build App** auto-generate + chat-assistant refine + autosave-draft experience, **Test &
+  Publish** draft/live **versioning + restore**, **intelligence-as-an-ingredient** (agents + DSL, no
+  raw LLM, no credentials), and **coded apps as an off-by-default, platform-admin-only** advanced
+  option. Updated the Status summary, the seeded-demo line, and the Software stage list to match.
+- **In-app Software tutorial (`os-ui/lib/tutorials/content/software.ts`).** Rewrote the hook, the
+  five step panels, the walkthrough, sandbox note, outro and role framing from the old
+  coded/streaming-build/deploy-review flow to the declarative compose-auto-generate-refine-publish
+  flow (anchors, illustration ids and the `governedWrite` gate unchanged). Tutorial coverage tests
+  green.
+
+## [os-ui 0.6.136] — 2026-08-13 — MCP: declarative-first golden path + generate_app_spec + refreshed spec-tool descriptions
+
+Reconciled the Software MCP surface + golden-path guide with the now-shipped DECLARATIVE model (0.6.130→0.6.135). An app is a validated AppSpec of cookbook-pattern tabs over governed data, served same-origin (no repo/CI/pod); coded apps are OFF by default + platform-admin-gated (0.6.133). The MCP descriptions + guide still described the old coded-first flow — fixed.
+
+- **`create_software` default flipped to `kind:'spec'` (declarative).** The MCP handler now defaults to `'spec'` (was `'code'`); an explicit `kind:'code'` still requests the coded path (createApp fails-closed 403 when coded apps are disabled). Descriptions in `lib/software/platform-mcp.ts` + `lib/mcp/server.ts` rewritten to name spec as the golden path and code as the disabled-by-default advanced option.
+- **New `generate_app_spec` MCP tool** — the AI-coder scaffold: composes a complete, validated AppSpec from the app's designed epics/user-stories + granted data (datasets with real columns, metrics, agents) via the OS reasoning model. Returns a validated spec (persists nothing); review with `get_app_spec`, publish live with `set_app_spec`. Wired into both the platform-mcp handler + the `server.ts` registry/schema/`list_capabilities`. Shares one governed server fn (`lib/software/appspec/generate-server.ts`) with the `POST /api/apps/[id]/spec/generate` route (refactored to a thin shell), so they can't drift.
+- **`set_app_spec` = a versioned publish.** A governed MCP author now snapshots a version (auto `v{n}` name + a deterministic `describeApp` change summary) for parity with the UI Publish (`publishApp`) — MCP author = publish (live). `set_app_spec`'s result + the spec route now return the `version`.
+- **Refreshed `set_app_spec` / `get_app_spec` descriptions** to the current model: both pattern shelves enumerated from the authoritative `appspec/patterns.ts` (VIEW: records-table…landing; INTERACTIVE: form…task-checklist), plus app-wide `theme.css`, governed DSL `functions`, the sandboxed custom block, and the real-columns (`get_dataset`) rule.
+- **Rewrote the software golden-path guide** (`lib/tabs/guides/software.guide.md`) declarative-first: create_software (spec) → design_software (epics + grants) → generate_app_spec / set_app_spec → live at `/apps/<slug>` (+ versioned); the coded path is presented as advanced/admin-enabled only. `build_and_ship_software` prompt + the build-spec resource description reframed to match; `list_capabilities` framing confirmed (declarative primary; `commit` gated-when-off).
+
+## [os-ui 0.6.135] — 2026-08-13 — Software apps: autosave draft (always in tiles) + candidate/live versioning + Publish (no Save button)
+
+Declarative (spec) apps now follow a DRAFT/LIVE model. A candidate `draftSpec` is AUTOSAVED
+continuously on every composer change; a separate LIVE `spec` serves at `/apps/<slug>`. There is
+NO manual Save button anywhere — work autosaves in every stage, so an app ALWAYS persists and
+ALWAYS shows in the tiles (even as a draft). **Publish** is the only explicit go-live gate: it
+validates the draft with the full serving gate and, on success, promotes it to live and snapshots
+a version with an auto name (`v{n}`) + a deterministic, LLM-free change summary (a `describeApp`
+diff of the previous-live vs newly-published spec, e.g. "Added Orders tab; changed revenue KPI").
+
+- **Root cause of the disappearing-app bug** ("start a software, don't save → app gone"): the
+  0.6.130 composer persisted work only to CLIENT localStorage — the app record's spec was never
+  written until an explicit Save, so the tiles/other sessions never saw a work-in-progress app,
+  and the composer's Save button was the single point of persistence. The Test & Publish stage was
+  ALSO permanently unclickable for spec apps: it was gated on `anyStoryBuilt`, a coded-app commit
+  signal a declarative app never sets. Fixed by a SERVER draft + a spec-aware stage gate.
+- Added `App.draftSpec?` (additive, nil-safe) — the autosaved candidate alongside the served/
+  versioned `spec`. Serving is UNCHANGED (always reads `spec`); an app with only `spec` behaves
+  exactly as before. `PUT /api/apps/[id]/spec/draft` autosaves partials without the serve gate and
+  no version snapshot; `POST /api/apps/[id]/publish` promotes draft→live + snapshots the version.
+- Composer: DROPPED the "Save & publish" button; every change debounce-autosaves the draft to the
+  server with a subtle "Saving… / Saved" indicator. Loads `draftSpec` if present, else `spec`.
+- Test & Publish gate fix: reachable for a spec app once a draft/spec exists; a dedicated spec
+  Publish surface shows the Publish button (inline validation issues), a "View live app" link
+  (only when a published spec exists), and version history with confirm-gated Restore.
+- Backward-compat: existing declarative apps (including the live seeded demo) keep serving off
+  `spec`; opening Build seeds the draft from `spec`; publishing with no draft falls back to `spec`.
+
+## [os-ui 0.6.134] — 2026-08-13 — Build App: auto-generate on load + agentic chat assistant + reset/blank controls
+
+The declarative Build stage now BUILDS the app for you and lets you refine it in plain
+language — the "chat window we had before", now agentic and declarative-native.
+
+- **Auto-generate on first load.** When Build opens for a FRESH spec app (no meaningful
+  saved spec, no restored draft, still the default single-tab starter) AND there's material
+  to build from (≥1 user story AND ≥1 granted dataset), the composer calls the existing
+  `/spec/generate` route automatically and loads the result, showing a clear "Building your
+  app from your epics & stories…" progress state. Later visits (a real saved spec, or a
+  restored browser draft) load that work untouched — it NEVER regenerates over saved work.
+  No material ⇒ no auto-fire: a calm empty state points to Design / Choose Context.
+- **Chat assistant panel in Build (`<BuildAssistantChat>`).** It (1) EXPLAINS what's being
+  built — automatically on first load and again whenever asked ("what does this app do?") —
+  from the pure `describeApp` (no round-trip, no invented behaviour); and (2) REFINES the app
+  conversationally, APPLYING edits DIRECTLY (agentic, not propose-then-accept): "make the
+  Orders tab a board by status", "add a KPI tab for total revenue" edit the spec immediately,
+  the live preview updates, and the user Saves when happy. An un-satisfiable instruction
+  (ungranted data, unknown pattern) changes nothing and is explained in plain words.
+- **New route `POST /api/apps/[id]/spec/assist`** — takes `{instruction, currentSpec}`,
+  returns `{ok, spec (full validated AppSpec), reply}` or `{ok:false, reply}`. Built by
+  EXTENDING the `generate.ts` infra with a new PURE, unit-tested `assist.ts`
+  (`buildAssistPrompt` reuses the closed-grammar generate frame + appends the current spec +
+  the edit contract; `parseAssistedSpec` delegates to the shared tolerant parse; repair
+  re-exported). Same reasoning model, tolerant JSON recovery, one repair turn, same structural
+  + semantic (`validateAppSpec`) gates, and the SAME governance gate as generate/spec
+  (owner-or-builder-in-domain). Never persists — the composer owns Save.
+- **Composer controls reworked.** Removed the redundant **Description** field (the Define-stage
+  purpose already serves as the description; app name stays editable). Renamed
+  "Regenerate from Design" → **"Reset based on Design"** and added **"Start from blank"**,
+  grouped as small buttons next to **"Discard draft"**. Both Reset and Start-from-blank
+  pop a CONFIRM dialog first (they hard-overwrite the working draft); Discard draft is
+  unchanged.
+- Tests: +10 pure `assist.test.ts` cases (prompt carries granted material + current spec +
+  instruction + edit contract; tolerant parse; repair seed). Full suite green.
+
+## [os-ui 0.6.133] — 2026-08-13 — Coded apps OFF by default (platform-admin gated); Declarative is the sole default path
+
+Rationale: the OS has two ways to build an app — the **Declarative (spec) app** (safe,
+robust, `serveMode:'spec'`, no-code, the way forward) and the **Coded app**
+(`kind:'code'` / image|runtime — the agent writes code + a Forgejo repo + an image
+build). The coded path has been broken for weeks and is higher-risk, so we are turning
+it OFF by default and standing behind Declarative. It remains available to platform
+admins who explicitly opt in.
+
+- **New platform setting `codedAppsEnabled` (default `false`)** in
+  `lib/platform-admin/settings.ts` — extends the `Settings` type + default object,
+  deep-merged with the SAME nil-safe boolean pattern as `standardFirstEscalation` (only
+  a real boolean flips it, so a partial PUT can never accidentally enable it). New
+  `codedAppsEnabled()` helper is the single read the gate consults. Unit-tested
+  (default-off + nil-safe).
+- **Platform-admin-only.** The settings PATCH route gates via `adminCtx()` →
+  `requireAdmin()` (tenant/platform admin, NOT domain_admin) — no change needed; a new
+  "Software → Allow coded (custom) apps" toggle lives in the admin Settings panel.
+- **Launcher drops the chooser when coded is disabled.** The Software create form no
+  longer offers a coded/Declarative chooser when off — "New app" creates a Declarative
+  (spec) app directly, and the copy no longer mentions a coded/repo path. The launcher
+  reads ONLY the `codedAppsEnabled` boolean, surfaced to any authenticated user on the
+  existing `/api/apps` GET (never the admin settings object).
+- **Fail-closed server-side (UI is not the gate).** `createApp` rejects a coded app
+  (`kind:'code'`) with a clear 403 when the flag is off, before any repo/pipeline side
+  effect — so neither UI nor API nor MCP can create a coded app when off; Declarative
+  creation is always allowed.
+- **MCP parity.** `list_capabilities` advertises the coded-only `commit` tool as GATED
+  (with an honest reason) when off, and the Platform MCP fails closed on `commit` and on
+  `create_software kind:'code'`; Declarative tools (`set_app_spec`/`get_app_spec`) stay
+  fully available.
+- Scope: only the coded/raw-code app path is affected — the sandboxed HTML/CSS/JS custom
+  BLOCK inside a Declarative app (null-origin iframe) is untouched.
+
+## [os-ui 0.6.132] — 2026-08-13 — Declarative Software: review-hardening (UX legibility + correctness + defense-in-depth)
+
+Folds in the remaining review findings for the DECLARATIVE (no-code) Software authoring experience. Design law throughout: SAFE, LOW-VARIANCE surfaces for NON-DEV business users — legibility is a product requirement. No behaviour of the coded path changed.
+
+### Fixed — UX legibility (business users)
+- **Create launcher spoke ONLY the coded path (C2/M2).** The headline/sub/note ("the agent writes the code… commits to its own in-cluster Forgejo repo" / "A sovereign Forgejo repo is created in-cluster") described the coded path even though the RECOMMENDED default is Declarative (no-code). Root cause: static copy written before the spec/coded kind split. The collapsed trigger is now neutral ("Build it no-code by mapping your governed data, or have the agent write real code"), and the open form's sub + note are CONDITIONAL on the chosen `kind` (spec → "no repo, no pipeline, served the moment you save"; code → the Forgejo copy). `app/(build)/software/page.tsx`.
+- **Choose-Context / Build data-need warning used coded framing on spec apps (M2).** "Building now would fail: the model has no schema to write against" is coded-path language wrong for a no-code app. `unresolvedDataNeedWarning` (`lib/software/data-plan.ts`) now takes an optional `serveMode`; for `'spec'` it says "Tabs that read data need a granted dataset; tabs that only collect input don't." The blocking card's title also branches ("Some tabs will need data." vs "This app needs data before it can build."). `components/software/SoftwareBuilder.tsx`. Unit-tested.
+- **Fake "Application" template badge for no-code apps (M1).** `createApp` defaults `template:'sovereign-app'`, so Define rendered a template badge the user never picked ("Chosen at creation — locked afterwards"). When `serveMode==='spec'` Define now shows a "Declarative (no-code)" kind badge instead (no template, no surface line). `components/software/SoftwareBuilder.tsx`.
+- **Empty dataset picker read as broken (M3).** In the composer, a tab that needs a dataset with ZERO grants showed a `<select>` with only the "Choose…" placeholder and no options. It's now replaced by an inline "No datasets granted yet — this tab reads data, so grant one first" affordance with a **Choose Context →** jump. Threaded a minimal `onGoContext` callback SoftwareBuilder → SpecBuildStage → AppSpecComposer → DatasetSelect/SourceChoice. The zero-grant banner above the composer gained the same jump button.
+- **Under-honest save/preview failures (M4).** (a) A non-OK save now maps a governed 403 / "Forbidden" / write-envelope denial to a plain sentence ("You don't have permission to publish this app — ask a Builder to publish it for you") instead of raw server text (`friendlySaveError`). (b) The live `<AppSpecRenderer>` preview is wrapped in a React ERROR BOUNDARY (`PreviewBoundary`, resets on the next edit) so a throwing/unservable spec shows a calm "Preview couldn't load — {reason}" instead of white-screening the whole composer. `components/software/appspec/AppSpecComposer.tsx`.
+- **saveMsg layout could push the Save button (M5).** The success/error text rendered inline next to Save; it's now BLOCK-placed below the header with a max-width. Same file.
+- **Metrics "Create new" dead-end (M6).** Metrics `createMode:'derived'` deep-linked to the whole `/data` tab with no next step. It now explains the honest sequence ("a metric is a measure on a dataset — grant/create a dataset above first, then define its metric in the Data tab") with the deep-link demoted to a secondary aid. `components/software/SoftwareContextGrants.tsx`.
+- **In-folder create success had no navigation (M7).** After creating a Data/Files/Knowledge artifact in the App folder, the success line named the location but gave no link. The created artifact's name is now a DEEP LINK to its tab filtered to the App folder (`/data?folder=App «Name»`). Same file.
+- **Agents/Connections deep-link: stale on return + dead params (M8).** The deep-link opens the builder in a new tab; the just-built artifact wouldn't appear on return. The section now RE-FETCHES its grantable list on window focus (deep-link kinds only) and states "Created it? Return to this tab — the list refreshes so you can grant it." Removed the dead `onChangeAgents`/`agentGrants` props `CreateNew` destructured but never used. Same file.
+- **Keyboard accessibility of the composer mini-controls (Mi1).** The tab-row ↑/↓/× were `<span onClick>` NESTED INSIDE the tab `<button>` (invalid nesting, unfocusable, `aria-hidden`). They are now real `<button>`s with `aria-label`, moved OUT to be siblings of the tab button (the `<li>` becomes the hover/active row; reveal keys off `:focus-within`). The ItemCard reorder/remove and the field-builder remove controls became real `aria-label`led buttons too. `components/software/appspec/AppSpecComposer.tsx` + `app/styles/software-tab.css`.
+
+### Fixed — correctness
+- **Negative / inverted range filter silently matched nothing.** A `range` table filter with `min>max` (a plausible mis-entry) rejected EVERY row instead of applying the sensible inclusive band. `matchesFilter` (`lib/software/appspec/render-logic.ts`) now normalises the bounds (`min(a,b)`/`max(a,b)`); `min==max` is a valid exact-match band. Unit-tested (inverted + degenerate cases). No divide was present, so no NaN path existed; this is the range-with-bounds hardening the review called for.
+
+### Verified — already correct (no change needed)
+- **Chart-explorer metric-member validation (finding #11).** `validate.ts`'s `checkChartExplorer` → `checkMetricSource` already flags an ungranted/nonexistent metric as a typed `{path,reason,fix}` issue, with existing tests proving ungranted flagged / granted passes / missing flagged. Left as-is (adding tests would duplicate).
+
+### Security — defense-in-depth
+- **Author-time entitlement check over bound grants (M2).** `validateAppSpec` accepted `user: Principal` but never used it, and grant binding never re-checked the caller is entitled to the bound ids. It now runs the SAME governed reader the UI uses (`getDataset`/`getMetric`/`getSystem`) over every id in `app.grants.data`/`grants.metrics`/`agents`; a 403 (or an unknown agent, 404) surfaces a clear `grants.*` issue "you are not entitled to the granted {kind} {id}". This can ONLY ever DENY — runtime re-enforces viewer RLS on every read — so it never widens access; it turns a silently-bound "ghost" grant into a legible author-time issue instead of a dead runtime 403. Any other store error is FAIL-SOFT (no false deny). `lib/software/appspec/validate.ts`. Unit-tested (outsider denied, owner passes).
+- **Same-origin `/apps/[slug]` grant-scope (M1) — DEFERRED, documented.** A declarative app served same-origin at `/apps/<slug>` isn't matched by `appSlugFromRequest` (its referer path is `/apps/<slug>`, not `/api/apps/runtime/<slug>`), so its governed reads skip `checkAppGrant`. The review deemed this acceptable (not a cross-user leak: `checkAppGrant` only NARROWS an already-RLS-scoped read; the viewer's own `canView` still governs). Threading it would touch a shared security primitive every governed read route attributes through, for low value (a spec app only ever reads its granted artifacts), so it is deferred with a clear `TODO(appspec-grant-scope)` rather than forced. `lib/software/app-origin.ts`.
+
+## [os-ui 0.6.131] — 2026-08-13 — Software build assistant + theme-CSS XSS fix
+
+Two independent parts: a "Generate my app" build assistant for the declarative (no-code) Software composer, and a critical stored-XSS fix in the theme-CSS path.
+
+### Added
+- **"✨ Generate my app from your epics & stories" — a real build assistant.** The declarative Build stage used to drop the user into an *empty* composer (one default records-table tab); there was no server-side spec generator (`design_software` only *persists* a spec an MCP client authored). Pressing the new primary button now BUILDS the app UP from the epics/user-stories/requirements the user designed. New route `POST /api/apps/[id]/spec/generate` (`os-ui/app/api/apps/[id]/spec/generate/route.ts`): it loads the app's epics + Design specs, gathers the app's GRANTED context — datasets with their REAL columns (`peekDatasetColumns`), metrics and agents — calls the OS **reasoning** model via the same `assistantComplete` path every assistant surface uses (no new LLM client; `roleModel('reasoning')`), recovers the JSON with the tolerant `parseJsonReply` (reasoning models wrap JSON in prose — the known landmine), STRUCTURAL-gates it with `parseAppSpec` and SEMANTIC-gates it with `validateAppSpec` against the real stores, does ONE repair turn seeded with the exact issues on failure, then gives up gracefully. It reuses the exact owner-or-builder-in-domain gate `setAppSpec` uses and does NOT auto-persist — the composer loads the result as an editable draft the user reviews and Saves. The generation logic is a pure, unit-tested lib module (`os-ui/lib/software/appspec/generate.ts`: `buildGeneratePrompt` / `parseGeneratedSpec` / `repairInstruction`). The composer (`AppSpecComposer.tsx`) shows the button as the PRIMARY call to action when the draft is at its fresh default, and as a secondary confirm-first "Regenerate from design" once a real spec exists (it replaces the working draft), with honest progress ("Reading your epics, stories and granted data…"), a calm plain-language error on failure, and a "Generated N tabs from M stories — review and Save" note on success.
+
+### Security
+- **Critical: `</style>` breakout in `theme.css` → same-origin stored XSS (fixed, defense in depth).** `scopeThemeCss` (`os-ui/lib/software/appspec/theme.ts`) scoped selectors but did NO neutralization of `<`/`>`, and its output is injected into the TRUSTED OS DOM same-origin via `<style dangerouslySetInnerHTML>` in `AppSpecRenderer.tsx`. The HTML tokenizer ends a `<style>` element at the first `</style>` (case-insensitive, even inside a CSS string/`url()`), so an author's `spec.theme.css` could break out and inject markup running in the OS session origin (full session/data compromise). The schema only length-capped `theme.css` — no content check — and unlike the sandboxed custom block this CSS runs same-origin, so nothing else caught it. Root cause: raw author CSS trusted verbatim at a same-origin injection sink. Fix, both layers: (1) `parseAppSpec` now BLOCKS a `theme.css` containing `<` or `>` (path `theme.css`, "CSS cannot contain '<' or '>'") so a malicious theme never persists; (2) `scopeThemeCss` returns `''` when its input contains `<`/`>`, so even a pre-existing stored value can't break out at render time. The sandboxed custom-block path (null-origin iframe, `CustomBlockRenderer`) is unaffected. Tests in `theme.test.ts` + `schema.test.ts` prove all three verified payloads are blocked at validation AND neutralized at render.
+
+## [os-ui 0.6.130] — 2026-08-13 — Declarative composer: unblock save + survive reload + preview below config
+
+Live fixes from dogfooding the no-code Software composer (Wave 1 of the review-hardening pass).
+
+### Fixed
+- **"Description must not be empty" no longer blocks saving a tab.** The no-code composer exposes no description field, yet the AppSpec schema required a non-empty top-level `description` (`reqString` in `lib/software/appspec/schema.ts`) — so *every* save of a description-less app was rejected. Description is optional metadata; the parser now coerces a missing/empty value to `''` instead of erroring. Regression test in `schema.test.ts`.
+- **Reloading the browser mid-build no longer discards your tabs.** The composer held the entire app in React state and only ever persisted on an explicit *Save & publish* — so a reload (or the save-blocking bug above) lost everything. It now mirrors the working spec to `localStorage` on each edit and restores it on mount, showing a *"Restored your unsaved changes"* notice with a **Discard draft** control; the draft is cleared once a save lands it server-side (`AppSpecComposer.tsx`).
+- **Declarative apps can now reach the Build stage.** Build was hard-gated on Choose Context being resolved (`hasDesign && contextResolved`) — correct for a code-writing app, but wrong for a no-code app that maps data per-tab inside the composer (a form-only app needs no dataset). The gate now reads `hasDesign && (isSpec || contextResolved)`; Choose Context still feeds the composer's dataset picker, it just isn't a build blocker for the no-code path (`components/software/stages.ts`, `SoftwareBuilder.tsx`). Regression test in `stages-model.test.ts`.
+
+### Changed
+- **The live preview now sits BELOW the configuration, full width**, instead of in a cramped right-hand column — more room for both the editor and a faithful preview (`AppSpecComposer.tsx`, `app/styles/software-tab.css`).
+- **Added an App name + Description field** to the composer so authors can set (and see) both directly; description stays optional.
+
+## [os-ui 0.6.128b] — 2026-08-13 — Fix: metric tiles show the metric title
+
+### Fixed
+- **Metric tiles now display the human name** ("Monthly Revenue") instead of the lowercased machine slug ("monthly_revenue"). Root cause: `measureFromForm` in `lib/metrics/model.ts` converted the user's typed name to a Cube slug but never stored the original as `label`; `summariesFor` computes `MetricSummary.name = m.label ?? m.name`, so tiles fell back to the slug. Fix: when the human name differs from its slug, `applyLabel()` sets `m.label = humanName` before returning the measure — the Cube member identity (`m.name`) stays frozen. Tests updated in `model.test.ts`, `rich-model.test.ts`, and `lib/mcp/refine-0164.test.ts`.
+
+## [os-ui 0.6.128] — 2026-08-13 — Declarative AppSpec Phase 4c (rich compose editors for all patterns + Advanced theme/custom-block)
+
+### Added
+- **Every implemented pattern is now authorable by SELECTION** in the Build-stage
+  `<AppSpecComposer>` — `COMPOSE_DEFERRED` is empty; no pattern falls back to a
+  "configure elsewhere" note. New selection-only editors:
+  - **chart-explorer** — a granted metric picker; its dimensions/time-dimension are
+    ticked from the metric's underlying dataset's REAL schema (the metric id → its
+    dataset → the same cached column feed), with granularity + chart type from closed
+    enums. No Cube member is ever typed.
+  - **card-gallery · timeline · calendar** — title/date/subtitle/description field
+    selects from the fetched schema (+ gallery search toggle).
+  - **kpi-overview** — an add/remove card list; each card is a metric, a dataset
+    aggregate (dataset + count/sum/avg + field), or a declared `functions[]` value,
+    via a shared card editor that enforces exactly one source.
+  - **landing** — an ordered block list (markdown | a reused KPI-card list | a table
+    of ticked columns) with reorder/remove.
+  - **assignment** — item dataset + label field, assignee dataset + option-label field,
+    and an optional extra-field builder.
+  - **intake-wizard** — a form builder: add/remove steps, each with a name/label/type/
+    required field list (no dataset; writes to records).
+  - **approval-queue · task-checklist** — a source choice (the app's own records vs a
+    granted dataset) + title/subtitle/assignee fields (typed record keys in records
+    mode, ticked columns in dataset mode) + a reason-required toggle.
+- **Governed `functions[]` editor (Advanced).** Add an aggregate (dataset + op + field)
+  or an expression (a formula over `fn.<id>`, live-validated with the same parser the
+  server uses) → a valid `functions[]` a KPI card can reference. No code, no eval.
+- **Advanced settings (builder-gated, collapsed).** App **theme CSS** (size-capped,
+  scoped under the app root, reflected in the live preview) and a **sandboxed custom
+  HTML/CSS/JS block** — any tab can become a `custom` body (three code fields + an
+  optional read-only injected dataset), rendered through the existing null-origin
+  `CustomBlockRenderer`. The UI states the safety explicitly ("runs in a sandboxed
+  frame with no OS access"); this is the ONLY place free-form code is allowed.
+
+### Changed
+- `compose-model.ts` state now carries per-tab `custom` bodies + app-wide `functions[]`;
+  `stateFromSpec` PRESERVES a custom-block tab + functions on round-trip (4a dropped
+  custom tabs). `compose-issues.ts` maps `functions[…]` + custom-body issue paths.
+
+### Fixed
+- **Build stage crash (React #31) on a fresh declarative app.** The dataset-detail API
+  returns column DOCS (`{name, description}[]`) for BOTH `columns` and `goldColumns`
+  (`goldOutputColumns` → `ColumnDoc[]`), but the composer's schema cache treated
+  `goldColumns` as `string[]` and rendered the raw objects as `<option>`/`<span>`
+  children → "Objects are not valid as a React child ({name, description})", crashing
+  the Build stage on MOUNT for any app whose granted dataset has a built Gold table.
+  A new pure `extractColumnNames()` reduces either shape to a `string[]`; unit-tested
+  so a column object can never reach JSX again.
+
+### Notes
+- **Deferred to 4d:** the runtime "Run agent" invocation + the `action-detail` rendered
+  pattern. Additive; no deploy. Verified: `npm test` green (5322), `tsc --noEmit` clean,
+  `npm run build` compiles.
+
+## [os-ui 0.6.127] — 2026-08-12 — Declarative AppSpec Phase 4b (Choose Context: six types + agents grant + use-existing/create-new-in-App-folder)
+
+### Added
+- **Agents grant — the sixth Choose-Context type.** `App.grants` had five kinds
+  (Data · Metrics · Files · Knowledge · Connections); Phase 4b adds **Agents** as a
+  new, additive `App.grants.agents: [{id, access}]` list — kept SEPARATE from the
+  OS-wide `ContextGrants` primitive (which the Agents builder also uses) so legacy
+  apps and that primitive are untouched. Defaults to `[]` in `hydrateAppDoc` (legacy
+  apps load unchanged), threads through `patchAppDesign`, and compiles into the app's
+  OPA capability profile (`agentToolsFromGrants` → `run_agent_system` +
+  `list_agent_systems`), so a granted agent is RECORDED as available to the app. The
+  runtime "Run agent" invocation stays Phase 4c. Pure model in
+  `lib/software/app-agent-grants.ts` (round-trip unit-tested).
+- **Six-type Choose-Context UI — transparent use-existing + create-new.** The Choose
+  Context stage is redesigned so each of **Data · Metrics · Files · Knowledge · Agents ·
+  Connections** is its own section with two unmistakable modes: *"Already available to
+  this app" / "＋ Add existing"* (the entitled-artifacts picker + grant, unchanged) and
+  *"＋ Create new"*. Create-new for Data/Files/Knowledge makes a fresh, possibly-EMPTY
+  governed artifact in the app's **`App «Name»`** folder under that tab and grants it;
+  Metrics point to the Data tab (a metric is a measure on a dataset); Agents/Connections
+  deep-link into their own tab builders (their own creators) and grant on selection.
+- **`context-provision.ts` server helper** — the governed, fail-soft, testable
+  create-in-App-folder + grant orchestration: `appContextFolder(appName)` (derives
+  `/App «Name»`, sanitising odd names into one safe path segment) and
+  `createAndGrant(app, type, input, user)` (create via the type's existing governed
+  fn → place in the App folder → add the grant via `patchAppDesign`). Surfaced by
+  `POST /api/apps/[id]/context-provision`. The 0.6.115 personal-in-shared warning is
+  preserved.
+- **`/api/context/available?kind=agents`** feed (`availableAgents`) so the picker lists
+  grantable agents, shaped like the other kinds. Pure `choose-context-model.ts`
+  descriptor (six types, create-mode + copy) unit-tested.
+
+### Notes
+- Additive + backward-compatible: no forced migration; pre-4b apps default `agents:[]`.
+- Deferred to 4c: the runtime "Run agent" invocation + `action-detail`, the deferred
+  multi-source/metric/composed pattern editors, and the Advanced custom-block/theme editor.
+
+## [os-ui 0.6.126] — 2026-08-12 — Declarative AppSpec Phase 4a (Build-stage compose UI: pattern-first authoring + live preview + governed save)
+
+### Added
+- **Build-stage COMPOSE editor for declarative apps.** When an app is `serveMode:'spec'` the Software
+  Build stage now renders `<AppSpecComposer>` (a no-code, pattern-first authoring surface) instead of the
+  code-build chat. Three panes: a **tab list** (add / rename / reorder / remove, each with a reads/writes
+  badge); a **tab editor** with a categorised **pattern picker** (VIEW vs INTERACTIVE shelves; only the
+  implemented patterns are pickable, the rest greyed "soon") and a **selection-only config form** — choose
+  a granted dataset from a dropdown, tick real **columns/fields** from the fetched dataset schema (never a
+  free-text field name), set labels/formats/filters from selects, and assign the app's user **stories**;
+  and a **live preview** (the real `<AppSpecRenderer>` on a same-origin `os` client) plus a "How this app
+  works" summary from `describeApp`.
+- **Internal governed save door** — `POST /api/apps/[id]/spec` calls `setAppSpec` AS the signed-in user
+  (the SAME structural `parseAppSpec` + semantic `validateAppSpec` gate as MCP, no MCP dependency). Typed
+  `{path,reason,fix}` issues are located to the owning tab/slot and surfaced INLINE next to the control;
+  on a clean save the spec is live at `/apps/<slug>` immediately.
+- **New-app declarative entry point** — the create UI offers **"Declarative app (no-code · recommended)"**
+  vs **"Coded app (advanced)"** (defaults to declarative → `createApp({kind:'spec'})`, which skips the
+  Forgejo repo / CI / image pipeline). `/api/apps` POST now accepts `kind`.
+- **Pure, unit-tested compose logic** — `lib/software/appspec/compose-model.ts` (editor state + reducers +
+  `composeSpec`), `compose-fields.ts` (per-pattern authoring slots + selection→config folding + dataset
+  schema shaping), `compose-issues.ts` (validation issue-path → owning tab/slot mapping); `compose.test.ts`
+  covers all of it incl. a records-table + detail **round trip** through `parseAppSpec` + `validateAppSpec`.
+
+### Scope
+- 4a gives a rich selection editor to the single-dataset VIEW patterns + `records-table` filters + the
+  single-source `form`; multi-dataset / metric-only / composed patterns stay valid and render an honest
+  "configured in Advanced / MCP for now" note. NOT in 4a: Choose-Context six-types (incl. Agents ·
+  Connections, use-existing + create-new) → **4b**; the "Run agent" / `action-detail` action + the Advanced
+  custom-block/theme editor → **4c**.
+
+## [os-ui 0.6.125] — 2026-08-12 — Declarative AppSpec Phase 3.5d (governed query/expression DSL functions + kpi function cards)
+
+The safe, legible way a declarative app computes a table/number/flag from governed data — the
+GOVERNED backend DSL, `AppSpec.functions[]` (optional/additive). Each function is NAMED +
+DESCRIBED and is exactly ONE of two SAFE kinds — NO arbitrary code, NO `eval`, ever:
+
+- **aggregate** — reduce a GRANTED dataset (queried via the governed `os` client, same OPA/DLS
+  path) to ONE number: `count | sum | avg | min | max`, with optional `eq/neq/gt/lt/gte/lte`
+  filters. `count` needs no field; numeric ops require one. Executed by a PURE reducer over the
+  returned rows (non-numeric/blank cells ignored, never coerced; empty reduce → null).
+- **expression** — a TINY safe grammar over literals, references to OTHER function ids
+  (`fn.<id>`), arithmetic, comparison, boolean (short-circuit) and ternary. Parsed to an AST and
+  evaluated by a PURE tree-walker — never `eval`/`new Function`, no property access, no globals.
+  Safety by construction: unknown ref → null, division-by-zero → null, type-mismatch → null; a
+  DEPTH cap + token/complexity cap reject a pathological expression at PARSE time.
+
+Runtime `evaluateFunctions(functions, os)` resolves aggregates (each distinct dataset queried
+ONCE — memoized) then evaluates expressions in DAG order, DETECTING + rejecting cycles (a cyclic
+function → null); returns `Record<functionId, number|boolean|null>` and never throws or fakes.
+Author-time `validate.ts` proves each function (source granted + fields exist listing the real
+columns; expression refs resolve; no cycles; ids unique); `describe.ts` adds a **functions**
+section (name/description/what + what each READS) for "How this app works". First consumer:
+`kpi-overview` (and the `landing` KPI block) — a card may be `{ label, function:{ functionId } }`
+whose evaluated value renders (numbers compact, booleans Yes/No, null `—`; honest per-card
+loading/error). New pure modules `expr.ts`, `functions-schema.ts`, `functions-eval.ts`
+(fully unit-tested). Still deferred: `editable-grid`/`kanban-workflow` (want `records.update`);
+`action-detail` can now consume functions — wired as a rendered pattern in Phase 4.
+
+## [os-ui 0.6.124] — 2026-08-12 — Declarative demo seed: await store hydration before guards
+
+The boot-time declarative demo seed ran at the `instrumentation` register hook BEFORE the
+dataset/apps stores hydrated from the durable mirror, so its dataset guard saw an empty
+registry and skipped. Fix: `seedDeclarativeDemoApp` now `await`s both
+`lib/data/store.ensureHydrated()` and `lib/software/apps.ensureHydrated()` before its guards,
+so it sees the real registry and stays idempotent across restarts. Still fail-soft — a down
+mirror leaves the stores empty and the guard simply skips.
+
+## [os-ui 0.6.123] — 2026-08-12 — Declarative AppSpec Phase 3.5c (interactive patterns: form, assignment, approval-queue, task-checklist — governed os.records writes)
+
+- **Four INTERACTIVE (append) patterns implemented** on the declarative AppSpec renderer, all writing through the governed, envelope-gated `os.records.add`:
+  - `form` — single-screen create → one governed record (the one-step sibling of `intake-wizard`).
+  - `assignment` — pick an item + an assignee from two granted datasets, then append `{ itemId, assigneeId, …extra, at }` (the "assign a case to an employee" use case, done governed).
+  - `approval-queue` — list items (app's own `records` or a granted dataset), Approve/Reject with an optional reason → append `{ itemId, decision, reason, by, at }`; the item's current decision is DERIVED by reducing the append log (latest wins).
+  - `task-checklist` — a checklist (app's own `records` or a granted dataset); checking appends `{ taskId, done, by, at }`; done-state is DERIVED by reducing the log (a later `done:false` un-checks).
+- **Append-only write model, honestly.** The vendored SDK `records` surface is `list/get/add/export` — no `update`/`delete`. So the interactive patterns APPEND to the app's own record log and reduce it for "current" state (pure `records-reduce.ts`). A governed `Forbidden` is surfaced verbatim; a non-`live-app` (demo-seed) write is labelled illustrative — success is never faked. Tab `roleGate` is advisory (real enforcement is the data layer).
+- **Validation** extended for the four configs (assignment's two datasets granted + label columns exist; approval-queue/task-checklist's dataset source column-checked; `'records'` source needs no store check; form writes-only) with typed `{path,reason,fix}` issues listing the real columns. **`describeApp`** now reports these tabs' `reads` (assignment's two sources; queue/checklist's dataset when not `'records'`) and `writes:[{kind:'records',…}]`.
+- **The remaining 3 interactive ids (`editable-grid`, `kanban-workflow`, `action-detail`) are DEFERRED**, not hacked: they want in-place record mutation or the 3.5d DSL functions, which the append-only door does not cleanly support. They stay valid, categorised ids rendering the honest "coming soon" placeholder — to be built once an `os.records.update` capability or the 3.5d DSL lands.
+- Additive; no deploy. New pure modules `records-reduce.ts`, `interactive-logic.ts`, `interactive-logic-select.ts` (unit-tested) + four renderers (`FormRenderer`, `AssignmentRenderer`, `ApprovalQueueRenderer`, `TaskChecklistRenderer`, covered by tsc + build). Tests: 5208 green (+29). `tsc --noEmit` clean; `next build` compiles.
+
+## [os-ui 0.6.122] — 2026-08-12 — Guarded declarative demo app seed (Northpeak Product Catalog Demo, served at /apps/<slug>)
+
+### Added
+- **Guarded, idempotent, fail-soft declarative demo-app seed** (`lib/software/appspec/seed-demo.ts`
+  → `seedDeclarativeDemoApp()`) — stands up ONE live, clickable AppSpec example so the OS ships a
+  working demonstration of the declarative-app model with zero manual authoring. It creates the
+  **Northpeak Product Catalog (Demo)** app (`kind:'spec'` — no repo/CI/pod; served same-origin at
+  `/apps/northpeak-product-catalog-demo`) as `aborek` in `agentic-leader-q3-2026`: a governed
+  3-tab view (`records-table` · `detail` · `status-board`) over the real Northpeak Products
+  dataset (`ds_zpco1s6n7y`). Guards (all must hold, else a single honest info line + silent
+  return): the dataset EXISTS + is readable by its owner, and no app with the demo slug already
+  exists (idempotent). Grants the dataset (read) via the governed grant door (`patchAppDesign`),
+  then `setAppSpec` validates + persists the spec; blocking issues clean up the half-built app.
+  Every step is wrapped — it NEVER throws, so it can never break boot or any environment.
+- **Boot hook** — fired fire-and-forget from `instrumentation.ts` `register()`, gated on the
+  nodejs runtime so webpack dead-code-eliminates the seed's server graph from the edge bundle.
+- **Test-only fixed-id dataset seeder** (`__seedDatasetForTest` in `lib/data/store.ts`) — inserts
+  a dataset with a SPECIFIC production id (real datasets mint their own), so tests can reproduce
+  the `ds_zpco1s6n7y` the seed guards on. `__`-prefixed, additive, never used by production.
+
+## [os-ui 0.6.121] — 2026-08-12 — Declarative AppSpec Phase 3.5b (7 view patterns + tab↔story links + reads/writes/uses legibility)
+
+### Added
+- **7 remaining VIEW patterns**, each `implemented:true` with a real `parseConfig` + `summarize`
+  and a beautiful, OS-design-language renderer (`.sb-*` classes + vendored `@sovereign-os/ui`):
+  - `master-detail` — a searchable list beside the selected record's detail sheet.
+  - `kpi-overview` — a responsive grid of headline number cards; each card is a governed
+    metric scalar OR a dataset aggregate (`count`/`sum`/`avg` over a field). Pure reducers in
+    `render-kpi.ts` (non-numeric/blank cells ignored, never coerced to 0 — honest averages).
+  - `chart-explorer` — a governed metric charted with **ECharts** (line/bar/area) + a time-grain
+    control. Reuses the dashboards' tree-shaken `echarts/core` registration — **no new dependency**.
+  - `card-gallery` — records as a responsive card grid with optional search.
+  - `timeline` — records on a vertical time axis, newest first (unparseable dates sink, kept).
+  - `calendar` — records on a light, hand-built month grid (no calendar lib); pages by month,
+    surfaces undated records instead of dropping them.
+  - `landing` — a composed home page (safe markdown subset + KPI row + featured table), reusing
+    the `KpiCards` and `TableViewRenderer` sub-blocks; no `dangerouslySetInnerHTML`.
+- **Semantic validation** for every new pattern (`validate.ts`): dataset sources proven to EXIST
+  + be GRANTED and every referenced field present in the real schema (`peekDatasetColumns`,
+  listing the real columns in the fix); metric sources proven to exist + be granted
+  (`peekMetricExists` + `app.grants.metrics`). Typed `{path,reason,fix}` issues throughout.
+- **Tab↔story links** — `Tab.stories?: StoryRef[]` (`{ epicId, storyId }`, optional + additive)
+  in `schema.ts`; `validate.ts` checks each ref against the app's designed `epics`/stories
+  (unknown epic or story-not-under-epic → a typed issue). Many-to-many allowed (no cross-tab
+  uniqueness).
+- **Per-tab reads/writes/uses/serves** in `describeApp` (`describe.ts`) — derived PURELY from the
+  pattern kind + config: `reads` (every dataset/metric across cards, landing sub-blocks and
+  custom-block injected data, deduped), `writes` (interactive patterns → `records`; views → none),
+  `uses` (agents/connections — reserved empty), `serves` (the tab's story refs).
+
+### Notes
+- Additive only; no interactive patterns (3.5c), no DSL `functions[]` (3.5d), no authoring UI
+  (Phase 4). Not deployed. `npm test` green (5176), `tsc --noEmit` clean, `npm run build` compiles.
+
+## [os-ui 0.6.120] — 2026-08-12 — Declarative AppSpec authoring skeleton (set_app_spec + get_app_spec MCP tools; spec apps serve with no image pipeline)
+
+The minimal governed path to author + serve a real declarative app end-to-end. Two Platform MCP
+tools give parity with the (later) Build-stage compose UI; a spec app is created and served with
+NO Forgejo repo / CI / registry / pod. Additive — the code/image path is byte-unchanged.
+
+- **`set_app_spec(appId, spec)`** — delegates to the existing `setAppSpec` server fn AS the caller
+  (owner or owning-domain builder+, plus the author-time `validateAppSpec` gate). On a BLOCKING
+  validation issue it returns `{ ok:false, issues:[{path,reason,fix}], warnings }` and PERSISTS
+  NOTHING; on success it persists (the spec IS the app, `serveMode:'spec'`) and returns
+  `{ ok:true, servedUrl:'/apps/<slug>', warnings }`. The description teaches the model the grammar:
+  an app is TABS, each a cookbook PATTERN (implemented ids: `records-table`, `detail`,
+  `status-board`, `intake-wizard`) filled with a GRANTED dataset + real column field names, or a
+  sandboxed custom html/css/js block — pointing at `get_dataset` to discover columns.
+- **`get_app_spec(appId)`** — returns `{ spec | null, serveMode, describe }` (the `describeApp`
+  legibility summary) for read-modify-write, under the same visibility gate as `get_software`.
+- **Spec apps skip the image pipeline** — `createApp` gains a minimal `kind?: 'spec'|'code'`
+  (default `'code'` keeps today's behavior). A `kind:'spec'` app scaffolds NO repo, sets every
+  pipeline stage `'disabled'`, and `serveMode:'spec'` — servable at `/apps/<slug>` the moment its
+  spec validates. `create_software` accepts `kind`; the image path is otherwise untouched.
+- Both tools registered in `PLATFORM_MCP_TOOLS` (→ `list_capabilities`) and dispatched by
+  `callPlatformMcp`, with input schemas in the MCP server registry.
+- Tests: `lib/software/platform-mcp-appspec.test.ts` (invalid → issues/unpersisted; valid →
+  persisted + serveMode flip + servedUrl; get round-trips + describe; visibility/authorization;
+  spec app has no image pipeline). Full suite green (`tsc` clean, build compiles).
+
+## [os-ui 0.6.119] — 2026-08-12 — Declarative AppSpec Phase 3.5a (tab-pattern cookbook engine + 4 flagship patterns + sandboxed HTML/CSS/JS block + app theme CSS)
+
+Evolves the AppSpec from `sections:[{view}]` to a TABS·PATTERNS·CUSTOM grammar and ships the
+cookbook engine, the first flagship patterns, a security-hardened custom-code block, and
+app-wide theme CSS. Additive: nothing in production uses specs yet, so the v1 schema was
+migrated cleanly (no shim) — `version` is now the literal `2`.
+
+- **Schema (v2):** `AppSpec { version:2, name, description, theme?:{css}, tabs: Tab[] }`. A
+  `Tab` has `{ id, label, icon?, roleGate?, body }` where `body` is a `PatternBody`
+  (`{ kind:'pattern', pattern, config }`) or a `CustomBody`
+  (`{ kind:'custom', html, css?, js?, data? }`). The leaf grammar (`TableColumn`, `FormField`,
+  `Format`, `Control`, …) is unchanged and reused by pattern configs. Custom html/css/js and
+  theme css carry author-time size caps.
+- **Pattern cookbook (`patterns.ts`):** a registry keying every `PatternId` →
+  `{ id, label, category:'view'|'interactive', description, implemented, parseConfig, summarize }`.
+  All **18** ids are valid grammar tokens (10 view, 8 interactive). **4 flagship** render this
+  phase: `records-table`, `detail`, `status-board` (view) + `intake-wizard` (interactive, exercises
+  the governed `os.records` write). The other 14 (incl. reserved `editable-grid`,
+  `kanban-workflow`, `approval-queue`, `assignment`, `task-checklist`, `action-detail`) validate as
+  known, categorised ids and render an honest "pattern coming soon" placeholder.
+- **Renderers:** `AppSpecRenderer` drives tabs → `TableViewRenderer` / `DetailViewRenderer` /
+  `StatusBoardRenderer` (kanban-style read-only tiles) / `IntakeWizardRenderer` (multi-step
+  governed write with honest progress + `Forbidden`-reason surfacing, never a fake success).
+- **Sandboxed custom block (`CustomBlockRenderer` + pure `buildSandboxSrcdoc`):** the author's
+  code runs in `<iframe srcdoc sandbox="allow-scripts">` with **NO `allow-same-origin`** → a
+  null origin with zero access to the OS session/cookies/parent DOM/`/api/*`. Governed data is
+  fetched in the parent (as the viewer, via the SDK) and inlined READ-ONLY as a frozen
+  `window.__DATA__`; a strict CSP `<meta>` is added; `<script>`-breakout sequences in the data
+  are neutralised. The iframe cannot call back — custom JS can never act as the user or exfiltrate.
+- **App theme CSS:** `AppSpecRenderer` applies `spec.theme.css` via a `<style>` whose rules are
+  scoped under the app-root class (`scopeThemeCss`), so it can't leak into the OS chrome.
+- **Legibility (`describeApp`):** a pure reduction of a spec to `{ name, description, themed,
+  tabs:[{label, kind:'view'|'action'|'custom', what, data, roleGate}] }` for the future "How this
+  app works" panel, driven by each pattern's `summarize`.
+- **Tests:** +38 node:test cases across schema (v2 parse + typed issues), validate (pattern
+  field/grant checks against the real dataset schema), patterns (all 18 ids present + categorised,
+  4 implemented), sandbox (no allow-same-origin/CSP/data-inlining/escaping), theme scoping, and
+  describeApp. JSX is covered by `tsc` + `next build`. All green (5140 total).
+
+## [os-ui 0.6.118] — 2026-08-12 — Declarative AppSpec Phase 3 (same-origin serving: app.spec + /apps/<slug> route + setAppSpec)
+
+Serves a declarative AppSpec app FROM the OS, same-origin, under the viewer's existing
+session — no per-app image/pod/CI/registry, no cross-origin (Track 2,
+`software-hybrid-declarative-redesign`). Additive + backward-compatible: existing image /
+runtime apps and every legacy record are untouched (`serveMode` defaults to `'image'`,
+`spec` absent).
+
+- **App model:** `ServeMode` gains `'spec'` and `App` gains `spec?: AppSpec`. `normalizeServeMode`
+  passes `'spec'` through; `hydrateAppDoc` already defaults a nil `serveMode` to `'image'`, so a
+  legacy doc with neither field loads byte-stable. The whole-doc mirror round-trips both fields.
+- **`setAppSpec(appId, spec, user)`** — the ONE write door (Phase-4 MCP tool + demo-seed call it;
+  no MCP wiring here). Authorizes owner-or-in-domain-builder (mirrors `startPreview`), gates on
+  the Phase-1 structural `parseAppSpec` + semantic `validateAppSpec`: blocking issues return
+  `{ issues }` and DO NOT persist; else sets `spec`, flips `serveMode` to `'spec'`, persists,
+  returns `warnings`.
+- **`/apps/<slug>` route** (no collision) — server component: resolves the OS session (signed-out
+  → `/signin`), loads the app via the visibility-gated `getAppBySlugForUser`, and per the pure
+  `resolveServeTarget`: a spec app renders `<AppSpecRenderer>` inside the new `ServedAppSpec`
+  client wrapper (same-origin `createOsClient({ appSlug })`, identity from `os.whoami()` seeded
+  with the server role, vendored `@sovereign-os/ui` theme); an image/runtime app shows an honest
+  "served at its own URL" notice; a spec-mode-but-empty app shows "no spec yet" — never a blank.
+- **Governance:** documented the `TODO(appspec-grant-scope)` — same-origin reads apply canView+RLS
+  but not the cross-origin app-grant intersection (`checkAppGrant`); a shared spec app is thus
+  more-permissive-not-less. Flagged as a Phase-4 follow-up in DESIGN.md; not built here.
+- **Tests:** `served-app.test.ts` (image/legacy/runtime → image-elsewhere; spec+spec → spec;
+  spec-mode empty/absent → none) and `set-app-spec.test.ts` (invalid/malformed → issues,
+  unpersisted; valid → persisted + `serveMode` flips).
+
+## [os-ui 0.6.117] — 2026-08-12 — Declarative AppSpec Phase 2 (AppSpecRenderer + view-kind renderers; not yet served)
+
+The ONE trusted React component that renders any valid AppSpec (Track 2,
+`software-hybrid-declarative-redesign`). Builds on the Phase-1 pure helpers and vendored
+`@sovereign-os/ui` + `os` SDK. Wired into NO routes yet (Phase 3 serves it), so it cannot
+disturb existing behavior. No version bump, no deploy.
+
+### Added
+
+- `components/software/appspec/AppSpecRenderer.tsx` — the top component. Props `{ spec, os,
+  identity }` DEPENDENCY-INJECT the governed `os` client and the resolved identity (no global
+  `useIdentity`), so it is testable and reusable in both the OS same-origin serve context and an
+  ejected app. Builds the left nav from `spec.sections`, filtered by `roleGate` via the existing
+  `roleAtLeast` ladder; a section the viewer's role can't reach is not shown (advisory — the data
+  layer is the real gate). A `null` identity (loading/signed-out) hides gated sections and shows
+  them as LOCKED nav entries, never crashes. COMPOSITION: renders inside the vendored `AppShell`
+  (nav + active section body) — the spec's sections map 1:1 onto `AppShell.nav`.
+- One renderer per view kind, each owning loading/error/empty HONESTLY (Spinner / Alert `error` /
+  Alert `info`), all reusing the Phase-1 `render-logic` helpers:
+  - `TableViewRenderer` — `os.datasets.query` → `resolveColumns` (by NAME) → `applyView`
+    (search/filter/sort/paginate); `formatCell` per column; a `badge` format wraps in `<Badge>`;
+    search `<Input>` + filter `<Select>`/`<Input>` (range as `min-max`) + click-to-sort headers + pager.
+  - `DetailViewRenderer` — query, pick a row by `keyField` (a `<Select>`), show `fields` as a label/value list.
+  - `MetricChartRenderer` — `os.metrics.query`; renders with ECharts (an ALREADY-present
+    dependency — tree-shaken like `dashboards/PanelChart.tsx`, no new dep) for line/bar/area, a
+    summed big-number for `kpi`, and an HONEST table fallback when the result has no chartable measure.
+  - `FormViewRenderer` — renders `fields` as inputs; on submit calls `os.records.add`; shows the
+    governed result or the honest `Forbidden` reason verbatim (writes are envelope-gated) — success
+    is never fabricated; a `demo-seed` result is labelled as not-really-saved.
+  - `MarkdownViewRenderer` — the repo has NO markdown dependency (none added); renders content as
+    pre-formatted `white-space: pre-wrap` text (the Software tab's existing prose treatment), no XSS surface.
+- `lib/software/appspec/render-select.ts` — pure, DOM-free section selection the renderer and tests
+  share: `visibleSections(spec, role)` (role-filtered via `roleAtLeast`; null role → ungated only) and
+  `pickSection(spec, activeId, role)` (defaults to the first VISIBLE section; never lands a viewer on an
+  unreachable section; `undefined` when nothing is visible).
+- Tests: `render-select.test.ts` (8 new, all green) — ladder filtering, null-role safety, default pick,
+  unreachable-section fallback, empty-sections safety. The JSX is covered by `tsc --noEmit` + `next build`
+  (the 0.6.115 pattern — no React test renderer in this project).
+
+## [os-ui 0.6.116] — 2026-08-12 — Declarative AppSpec Phase 1 (schema + validators + pure render logic; not yet wired)
+
+First foundation slice of the declarative AppSpec (Track 2, `software-hybrid-declarative-redesign`).
+A NEW, self-contained module under `os-ui/lib/software/appspec/` — it wires into nothing yet
+(Phases 2–5 add the renderer, serving route, authoring tools and eject), so it cannot change
+existing behavior. No version bump, no deploy.
+
+### Added
+
+- `appspec/schema.ts` — the closed AppSpec grammar as a HAND-WRITTEN validator (Zod is not a
+  repo dependency and was not added). `parseAppSpec(input)` returns `{ ok, spec } | { ok, issues }`
+  with typed `{ path, reason, fix }` issues over the tiny grammar (version/name/description/sections,
+  the `View` union: table/form/metric/detail/markdown, and the format/control/chart/roleGate enums).
+- `appspec/validate.ts` (`server-only`) — author-time semantic validation of the DESIGN.md
+  invariants against the REAL stores: dataset EXISTS (`peekDatasetMeta`) + GRANTED (`app.grants.data`),
+  a Personal owner-only WARNING (reusing `isPersonalDataGrantRisk`/`PERSONAL_DATA_GRANT_WARNING`),
+  every `columns[].field`/`keyField`/`filters[].field` present in the dataset's real columns
+  (the fix LISTS them), and metric EXISTS + GRANTED. Issues block; warnings allow; every store
+  peek is fail-soft.
+- `appspec/render-logic.ts` — pure, client-safe view logic the Phase-2 renderer and the tests
+  share: `resolveColumns` (map spec columns to live `QueryResult` indices by NAME),
+  `formatCell` (text/number/currency-eur/date/badge, locale-stable), and `applyView`
+  (generic search/filter/sort — numeric-aware for number/currency — and pagination).
+- Unscoped, non-throwing dataset store peeks for the validator: `peekDatasetTier`,
+  `peekDatasetColumns`, `peekDatasetMeasureNames` (`lib/data/store.ts`) and `peekMetricExists`
+  (`lib/metrics/store.ts`) — alongside the existing `peekDatasetMeta`.
+- Tests: `schema.test.ts`, `validate.test.ts`, `render-logic.test.ts` (41 new, all green).
+
+## [os-ui 0.6.115] — 2026-08-12
+
+Safety-net hardening from three build-path audits (build-agent guidance, build loop,
+data/deploy). Prompt/telemetry/guard fixes only — no version bump, no deploy.
+
+### Fixed
+
+Group A — build-agent guidance taught a broken (Next.js `app/`) layout that
+contradicted the real Vite `sovereign-app` scaffold (the same failure class as the
+just-fixed `useIdentity` bug):
+- **`chat-modes.ts` + `mcp-stages.ts` (via `modeDirective`) described a Next.js
+  App-Router `app/` layout, but the default template is Vite + React under `src/`.**
+  Rewrote `CODE_STRUCTURE_CONVENTION`, `BUILD_PRINCIPLES` item 3, and the PLAN/TEST
+  directives to the real `src/template/ · src/core/ · src/epics/<epic>/<story>/` layout
+  with `src/main.tsx`+`src/App.tsx` as the thin entrypoints — no `app/` dir anywhere.
+- **`build-brief.ts` told the model to `createOsClient()` (wrong: the SDK takes an
+  options object, and a client with no `appSlug` throws on every `os.records.*` call).**
+  Now teaches the ready singleton rule: `import { os } from '../../../core/store'` (created
+  once as `createOsClient(APP_SLUG)`); the `src/os.ts` factory is never called directly.
+- **Section auto-registration claim was unscoped.** Scoped it to `template==='sovereign-app'`
+  and stated the discovery rule (exact depth-4 `src/epics/<epic>/<story>/<PascalCase>.tsx`,
+  one page per story folder, `general/` skipped) across `chat-modes.ts`, `build-brief.ts`,
+  and the scaffold's own seeded `sections.tsx` comment + README (now "auto-generated on
+  commit; do not hand-edit", replacing the stale "add entries here").
+- **`(e.target as HTMLSelectElement).value` cast guidance** → `e.currentTarget.value`
+  (already typed by the vendored forwarded props; mirrors `Admin.tsx`).
+- **Removed the non-existent `nextjs-supabase` from the advertised template list**
+  (`platform-mcp.ts`) and the "Next.js + Supabase" stack line + `app/ stays thin` framing
+  (`build-brief.ts`, `platform-mcp.ts`).
+- Clarified `os.datasets.query(id,{nl})` answers across ALL the app's granted datasets
+  (the `id` is only used for the no-arg row preview).
+
+Group B — the build loop could not stop or give up:
+- **No server-side guard against an identical failing re-commit (the observed loop).**
+  The dedup ledger only short-circuits a prior SUCCESS, so a `commit` that failed the
+  compile gate re-ran the byte-identical rejected code up to the error-streak cap. Added an
+  opt-in same-signature WRITE guard (`agentic.ts` `writeToolNames`, wired as `['commit']` on
+  the build route via `runtime.ts`): a byte-identical failed re-commit is short-circuited
+  WITHOUT re-running and fed a stronger corrective note carrying the exact prior diagnostics
+  ("you MUST change the code before committing again"). Stops the loop at n=1. No tier
+  escalation added (build already runs on the reasoning tier).
+- **`compile-gate.ts formatGateError` now appends the type's REAL members** for a
+  `@sovereign-os/*` `TS2339`/`TS2305`/`TS2322` error (e.g. "accepts: tone (you used
+  'variant')"), best-effort and fail-soft — a blind retry becomes a first-try fix.
+- **Empty-changeset honesty:** a `build` turn that committed 0 files now prefixes the final
+  bubble text with "No files were committed this turn — the build did not land." so the UI
+  can't render a green success over a no-op build (`build-run.ts` `honestBuildFinalText`).
+
+Group C — "builds but shows no data":
+- **Granting an existing Personal dataset gave no warning** though a Personal
+  (`tier:'dataset'`) dataset is owner-only at runtime → other app users get a silent 403.
+  `SoftwareContextGrants.tsx` now shows an inline warning on a ticked personal-scoped DATA
+  grant ("Only you can read this dataset — promote it to Domain…"); display-only, no
+  governance change (`isPersonalDataGrantRisk` in `grant-granularity.ts`).
+- **Cross-origin session misconfig was silent.** `instrumentation.ts` now emits a LOUD
+  boot-time warning (nodejs runtime, telemetry only) when the OS host + apps domain share no
+  registrable parent so `sessionCookieDomain` is null (deployed apps would carry no session).
+- **Section-registration silent drop** (the generator fail-opens): `commitToApp` now surfaces
+  an audited build-activity hint when a `.tsx` under `src/epics/` looks like an intended page
+  but won't register (lowercase-first, wrong depth, or a 2nd page in a story folder) —
+  `unregisteredPageHints` in `sections-registry.ts`. Generator behavior unchanged.
+
+## [os-ui 0.6.114] — 2026-08-12
+
+### Fixed
+- **Role-gate build brief taught a broken `useIdentity()` shape, looping the build agent
+  on `TS2339: Property 'id' does not exist on type 'IdentityState'`.** The 0.6.113 role
+  guidance was ambiguous, so the model wrote `const { id } = useIdentity(); id.phase === 'ready'`
+  — but `useIdentity()` returns `IdentityState`, a discriminated union (`{phase:'loading'} |
+  {phase:'signed-out'} | {phase:'error',message} | {phase:'ready',user}`) with **no `id`
+  field**. All three brief surfaces (`build-brief.ts` OS_SDK_BRIEF, `chat-modes.ts`
+  CODE_STRUCTURE + BUILD directive, `platform-mcp.ts` build_software description) now teach
+  the exact copy-pasteable snippet (`const identity = useIdentity(); const user =
+  identity.phase === 'ready' ? identity.user : null; …`), mirror the scaffold's own
+  `Overview.tsx`, and warn "narrow on `.phase` first; never destructure `{id}`". Guardrail
+  tests pin it.
+- **`commit` falsely warned "dataset NO LONGER EXIST (likely deleted)" for a LIVE dataset.**
+  The software dataset-reference guard resolved `ds_…` ids with `getArtifact()`, whose
+  registry holds knowledge/metrics/dashboards/agents/software/bigbets — **not** datasets
+  (those live in `lib/data/store.ts`), so every referenced dataset resolved to null and was
+  flagged deleted. Added an unscoped `peekDatasetMeta(id)` existence+name peek against the
+  real dataset store (archived counts as existing); the guard now names a live-but-ungranted
+  dataset and only flags a truly-absent id as deleted.
+- **`get_software_status` said "runner unreachable / URL pending" while the pod was 1/1
+  Running.** The status reader emitted the stale `app.deploy` captured at `start_preview`
+  (pod not yet up) and never re-polled. It now calls `reconcileDeployStatus` at read time
+  (self-heals + sets `previewUrl` when the pod is running) and derives the honest note from
+  the fresh runner status: running → served URL, provisioned-not-running → "image build in
+  progress", genuinely offline → the unreachable note (fail-soft for a non-owner read). The
+  honesty rule is intact — it only stops saying "unreachable" when the runner is reachable.
+- **`list_capabilities` advertised `design_software`/`build_software` a client couldn't
+  call.** They ARE registered, callable MCP tools; the mismatch is pure client-manifest
+  staleness (a client fetches its tool list at connect). Added a terse `note` to the
+  `list_capabilities` result: reconnect the MCP server to refresh the tool list. A test pins
+  that every advertised name is a registered tool and the note is present.
+
+## [os-ui 0.6.113] — 2026-08-12
+
+### Fixed
+- **Build agent now knows the vendored-app API, so generated code compiles first try —
+  no more `react-router-dom` / `<AppShell>`-in-a-page reject loops.** Two failures seen
+  live building a real app: (1) `import { useNavigate } from 'react-router-dom'` →
+  `TS2307: Cannot find module` (there is no router in a Sovereign app — navigation is the
+  auto-registered section registry, `src/template/sections.tsx`); (2) a story page wrapped
+  its content in `<AppShell>…</AppShell>` → `TS2741: Property 'nav' is missing`
+  (`AppShell` is the TEMPLATE shell's job, `src/template/shell.tsx`; a page must return its
+  CONTENT — `<Section><Card>…` — mirroring `src/template/pages/Overview.tsx`). The build
+  brief now carries a tight, ACCURATE **Generated-app API contract** (grounded in the real
+  `lib/app-ui/*` + `lib/app-sdk/*` source): the **only 3 import sources** that exist
+  (`react`, `@sovereign-os/ui`, the OS `os` client) with an explicit ban on routers / any
+  3rd-party lib, the **exact `@sovereign-os/ui` signatures** (AppShell requires `nav` and is
+  template-only; `Alert` `variant`; `Badge` `tone`; `Select`/`Input` controlled `value`
+  +`onChange`), the **onChange DOM-event gotcha** (read
+  `(e.target as HTMLSelectElement).value`), and **pages return `<Section>` content, never
+  `<AppShell>`**. Hardened in `lib/software/build-brief.ts` (`OS_SDK_BRIEF`) and
+  `lib/software/chat-modes.ts` (`CODE_STRUCTURE_CONVENTION` + BUILD directive), so it rides
+  BOTH the UI build path and the MCP `build_software` path; mirrored terse into the
+  `build_software` tool description (`lib/software/platform-mcp.ts`) for external agents.
+- **Build agent no longer falsely refuses an un-built story as "already implemented".**
+  Asked to build a story that is NOT `status:'done'` and has no committed files, the agent
+  sometimes recited the acceptance criteria back and claimed *"already implemented,
+  committed, and live — no further build needed"*. The BUILD directive + brief now state:
+  **"done" is grounded in FACTS (status:'done' AND committed source files), never in the
+  spec** — the acceptance criteria describe what to BUILD, not evidence it was built — so an
+  un-built story must be **built** (`read_app_files` the `src/epics/<epic>/<story>/` path
+  first if unsure), never restated.
+- **Build agent now gates roles the RIGHT way — no more `role === 'admin'` hard-blocking a
+  real admin.** Generated apps invented checks like
+  `if (role !== 'admin') error('Only admins can…')`, which fails even for a higher role and
+  hard-blocks the user, and invented app-specific roles/permissions that don't exist in the
+  OS. The brief now teaches the REAL scaffolded pattern (grounded in `src/template/roles.ts`
+  + `src/template/identity.tsx`): get the user from `useIdentity()`, gate with
+  **`roleAtLeast(user.role, '<floor>')`** (a FLOOR, never an exact match) over the real OS
+  ladder (`creator < builder < domain_admin < admin`), only when the role is KNOWN (never
+  hard-fail while identity loads or `role` is null), and treat client checks as **advisory
+  UX** — hide/disable the control, not a scary blocking error (the OS data layer / OPA is the
+  real enforcement).
+- **Self-correction:** the BUILD directive now instructs the agent to FIX the exact
+  rejected diagnostics before re-committing and never resubmit unchanged code (an identical
+  rejected commit just loops).
+
+## [os-ui 0.6.112] — 2026-08-11
+
+### Fixed
+- **Choose Context now creates APP-READABLE datasets — "I granted it but the app can't
+  read it" is fixed.** An OS-built app reads its granted data AS WHOEVER opens it (the
+  ambient end-user session), not a fixed app principal. Choose Context's "create sample
+  data" created the dataset **Personal + private** (`dataset` tier), which `canView` makes
+  **owner-only** and Trino does not govern — so the app could be read ONLY by the dataset's
+  owner; every other domain user 403'd at `getDataset`→`canView`. `resolveDataPlanItem`
+  (`lib/software/data-plan-server.ts`) now, after landing bronze, **builds Silver + Gold**
+  from it (the SAME honest `commitLayerVersion` the Data tab / MCP `add_dataset_version`
+  use) and **promotes** the dataset to a **Domain `asset`** via the sanctioned publish
+  (`publishPromotionLive`), approving AS the app owner when they are **Builder+** — so
+  `canView` admits domain peers, Trino governs the asset, and the domain-schema FQN
+  resolves for ANY domain user. The app is then granted **read-only** on the now-Domain
+  dataset.
+- **Honesty fallback — no more silent owner-only grants.** When the caller is only a
+  **Creator** (cannot self-approve a promotion), the materialization backend is **offline**
+  (bronze did not land), or the **publish returns `{ok:false}`**, the dataset stays Personal
+  and the resolve returns a LOUD, explicit `warning` — "«…» was created in your PRIVATE
+  space and only YOU can read it — a Builder must promote it to the domain before the app
+  can read it for OTHER users." — surfaced in `DataPlanPanel`. It never pretends the app is
+  domain-readable when it is not.
+- **Build agent stops hallucinating "no dataset" when the data IS present.** The BUILD
+  directive (`lib/software/chat-modes.ts`), `build_software` description
+  (`lib/software/platform-mcp.ts`) and build brief (`lib/software/build-brief.ts`) now state
+  explicitly: when a "## Granted context" block WITH dataset columns is present, the data
+  need is already met and the agent MUST build against those columns — the grant IS the
+  authorization (resolved as you, DLS-scoped); it must NOT refuse or claim the app has no
+  data. Only when the granted-context block is genuinely empty of the dataset a story needs
+  does it stop, and then it points back to Choose Context rather than dead-ending.
+
+## [os-ui 0.6.111] — 2026-08-11
+
+### Fixed
+- **Science now auto-detects the ML task from the target column — content-first, dtype
+  as a tiebreaker.** A model to predict a continuous `duration_days` (a `double`) was set
+  to `binary_classification` and aborted training ("InferenceService not found"); in the
+  Simple user flow there is **no task selector** at all, so the assistant's wrong guess
+  could not be corrected by hand. The Design grounding layer now reads the target column's
+  real **type AND content** (one cheap, governed, DLS-scoped query — `count(*)`,
+  `count(distinct)`, `count(non-null)`, and for numeric targets whether every value is
+  integer-valued) and infers the task from the DATA: exactly two distinct values →
+  binary classification (any type — 0/1, true/false, Y/N); a numeric column with fractional
+  values or many distinct values → regression (the `duration_days` case); a small set of
+  string/integer categories → multiclass; a boolean → binary; a high-cardinality string
+  (likely an id) → left to the assistant. `validateDefinition` **uses** the inferred task
+  when the assistant omitted one and **overrides** a clearly-wrong one (classification on a
+  continuous target → regression; regression on a binary target → binary), flagging it
+  (`autoDetectedTask` + a plain-language reason). The Simple flow shows the resolved task
+  with that reason transparently on the Apply card and under the target picker (e.g. "Task:
+  Regression · auto-detected from target"). New pure module `lib/science/infer-task.ts`
+  (heuristic, fully unit-tested). Fail-soft throughout: a failed profile query degrades to
+  type-only inference, and an unknown case keeps the assistant's proposal. The 0.6.109
+  metric↔task backstop in `normalizeSpec` is left intact for the non-assistant / MCP path.
+
+## [os-ui 0.6.110] — 2026-08-11
+
+### Added
+- **Direct Kaniko digest-build path enabled on the STACKIT self-hosted overlay
+  (A3).** `values.stackit-selfhosted.yaml` now sets `softwareBuild.enabled: true`
+  + `namespace: agentic-apps`, which emits `SOFTWARE_BUILD_SERVICE=true` on os-ui
+  and activates the build-Job RBAC (`templates/software/apps-build.yaml`). os-ui
+  then submits an in-cluster Kaniko `batch/v1` Job per app commit that builds the
+  app's Dockerfile from its Forgejo tree at the commit SHA and pushes a
+  DIGEST-tagged image the runner serves pinned. `HARBOR_REGISTRY` is deliberately
+  **not** overridden — Kaniko pushes to the default `forgejo-http:3000/gitea_admin`
+  registry (nodes already trust it); `kanikoImage` inherits the chart default.
+  This is **additive + reversible**: the Forgejo-Actions build path still ships in
+  every app scaffold and existing live apps keep serving until they next commit;
+  set `softwareBuild.enabled: false` + `helm upgrade` to revert. Requires a
+  `helm upgrade` (chart change) to take effect.
+- **A bounded iteration budget for the Software Build chat (B2).** New
+  `SOFTWARE_BUILD_MAX_STEPS` config knob (default **24**), passed as
+  `maxIterations` to the agent run for **build mode only**. The Build route
+  previously passed none, so `runAgentic` fell back to its bare
+  `DEFAULT_MAX_ITERATIONS` (6) and a real build (orient → `get_dataset` → several
+  compile-checked commits) ran out of steps mid-way. Read-only modes
+  (plan/test/review) stay on the default. The token/budget caps in `runAgentic`
+  still apply.
+
+### Fixed
+- **Build failures no longer all lie as "LiteLLM unreachable" (B1).** The streamed
+  Build run's catch (`app/api/apps/[id]/chat/route.ts`) labelled *every* non-abort
+  exception a gateway outage. It now routes the thrown error through the existing
+  typed `classifyTeamError` (`lib/agents/build/phase-router.ts`) via the new
+  `lib/software/build-run.ts` helper: a model 400, a tool error, a compile error or
+  a repo error surface their **real** message, and only a genuine
+  ECONNREFUSED/ENOTFOUND/fetch-failed says unreachable. The real message is emitted
+  in a `{ type: 'error', message }` SSE event. A client-abort stays silent
+  (as-is), and an unconfigured assistant remains a soft note.
+
+## [os-ui 0.6.109] — 2026-08-11
+
+### Fixed
+- **Science serving deploy no longer CrashLoops on a runtime coin-flip (root-cause).**
+  The generated KServe `InferenceService` (`lib/science/deploy.ts`
+  `buildInferenceService`, sklearn + `protocolVersion: v2`) pinned **no runtime** and
+  relied on auto-selection. On the live cluster (KServe 0.15) TWO
+  ClusterServingRuntimes claim `sklearn` with identical `autoSelect: true, priority: 2`
+  (`kserve-mlserver`, the v2 one we want, and `kserve-sklearnserver`, v1+v2). Auto-select
+  binds the wrong one, whose container args (`--model_name=… --model_dir=…`) land in the
+  exec position → `exec: "--model_name=…": executable file not found` → predictor
+  CrashLoopBackOff → the model hangs "Publishing/Deploying" forever. We now set
+  `spec.predictor.model.runtime: 'kserve-mlserver'` **explicitly** in the generated
+  manifest (and mirrored the pin in the chart's `templates/science/kserve.yaml` sample +
+  `kserve-served-models.yaml`). We do **not** add a duplicate ClusterServingRuntime — the
+  runtime is KServe-shipped; the manifest pin is the real fix. (A)
+- **Honest training-failure surface.** When a training Job fails, the train poll route now
+  best-effort reads the `train` container's pod log tail and folds its **first real error
+  line** (the trainer's own `FATAL` or a Python exception) into the recorded
+  `lastTrainingError`, falling back to the generic k8s Job reason when no log is available.
+  Timeout-boxed + fully guarded — never blocks or throws. So the user sees the actual cause,
+  not "Back-off restarting failed container". (B)
+- **Task↔metric consistency guard.** `normalizeSpec` now refuses a classification metric
+  (auc/f1) on a regression task and a regression metric (rmse/mae/r2) on a classification
+  task with a friendly 400 steering to the right task — instead of the trainer silently
+  degrading `auc` to accuracy on a mislabeled continuous target. The trainer's `score()`
+  now also **fails loudly** when `auc` is requested on a non-binary target (was a silent
+  accuracy fallback). NOTE: the deeper target-column-dtype check (rejecting classification
+  on a clearly-continuous column) needs the column dtype, only available at the
+  Design/assistant grounding layer, and is deferred there. (C)
+- **Training-failure vs deploy-failure honesty.** In the fused "Train & launch", a failed
+  serving deploy now records the model as `deploy_failed` with the real (admin-directed)
+  reason instead of silently resting at `trained`. The user is no longer told "no model
+  artifact was produced" when the artifact exists and only the InferenceService failed —
+  the timeline shows a `publish` (deploy) failure, still retry-able. (D)
+
+## [os-ui 0.6.108] — 2026-08-11
+
+### Changed
+- **Software Build is now WRITE-ONLY over a frozen context (the core fix).** The Build
+  stage used to get the FULL software MCP surface (commit **plus** `list_datasets` /
+  `get_dataset` / `profile_dataset` / `query_data` / `design_*` …). But the granted
+  datasets' schema is ALREADY injected as static "## Granted context", so those extra
+  data-discovery tools only confused the build — the model wandered, re-queried, and
+  dead-ended mid-build on "no granted dataset". New `BUILD_MODE_TOOLS` (in
+  `lib/software/chat-modes.ts`) = the orientation set (`whoami` · `list_capabilities` ·
+  `get_guide` · `list_software` · `get_software` · `read_app_files` · `get_software_status`)
+  **plus `commit`** (the one write door) **plus `get_dataset`** (fallback, see below), and
+  **nothing else**. The chat route (`app/api/apps/[id]/chat/route.ts`) now wires build mode
+  to `BUILD_MODE_TOOLS`; read-only modes keep `READ_ONLY_MODE_TOOLS`. Context is
+  bound/created in **Choose Context**; Build writes code against the frozen schema.
+  - `get_dataset` is kept as a deliberate fallback because `ColumnDoc` carries **no
+    per-column SQL type** (only name + description — `lib/data/dataset-schema.ts`); the
+    injected schema lists column names + docs (only *measures* carry a type), so Build can
+    still fetch a granted dataset's exact column types when needed. Scoped to the app's own
+    grants, so it is not a discovery back-door.
+- **Choose Context: "Link existing" vs "Create new" is now explicit and legible.** The
+  stage presents two clearly-labelled paths per data need — **(1) Link an existing dataset**
+  (bind; the app reads it in place, governed; best for read-only shared data) and **(2)
+  Create a new dataset** (the app's own — empty or with AI sample rows; best when the app
+  owns/writes data or you want dummy rows to build against) — with one line of guidance on
+  when to pick which. Copy/presentation only (`SoftwareBuilder.tsx` ContextStage +
+  `DataPlanPanel.tsx`); no backend change.
+- **MCP + guide parity.** `build_software`'s description, the BUILD directive
+  (`chat-modes.ts` → surfaced via MCP `stageDirective`) and `software.guide.md` now state
+  that context is bound/created in **Choose Context** (`design_software` grants +
+  `create_dataset`) and that **build writes code against the already-granted context — it
+  does not discover or query data**. Tool NAMES unchanged; guidance/description only. (Also
+  corrected the guide's stale "standard tier" note for Build → reasoning.)
+
+### Deferred
+- **"Create a new dataset *based on an existing one*" (derive/copy).** Not shipped: the
+  data-plan resolve path (`SuggestedDataset` → `resolveDataPlanItem`) has no source-id /
+  schema-or-row copy surface, so deriving-from-existing needs real data-copy backend work.
+  The clear Link-vs-Create choice + guidance ship now; derive-from-existing is a follow-up.
+
+## [os-ui 0.6.107] — 2026-08-11
+
+### Fixed
+- **Software Build now runs on the REASONING model (root-cause fix).** The build's
+  code-generation loop was silently running on the platform assistant/**standard** model:
+  `runTabAgent` hardcoded `resolveAssistantModelId()` for both plan and act and **ignored**
+  the per-stage tier `modelRoleForMode` computed in the route. So the 0.6.95 "all stages
+  reasoning" change never reached the actual build — code was written by the weak tier,
+  tripped the compile gate on trivial errors (e.g. TS null-narrowing), and only escalated to
+  reasoning after repeated failures ("passing on to Reasoning Model"). `runTabAgent` now
+  accepts an optional `model`; the Build route passes the reasoning tier; the redundant
+  standard→reasoning escalation is removed. Context window + token budget follow the model
+  that actually runs. Other tab assistants are unchanged (default = platform assistant model).
+
+## [os-ui 0.6.106] — 2026-08-11
+
+### Changed
+- **Software:** renamed the 3rd builder stage `Create Context` → `Choose Context` (label +
+  all prose/docs/tutorials/MCP stage descriptions). Behaviour unchanged; internal id stays `context`.
+
+## [os-ui 0.6.105] — 2026-08-11
+
+**Software builder stage restructure.** The Software guided flow is re-shaped from five stages (Define · Design · Build · Test · Publish) to five differently-organised stages: **Define App · Design Epics · Create Context · Build App · Test & Publish**, with tighter gating so the flow reflects real progress. Owner-directed.
+
+- **Renames are display-only; internal ids stay stable** (the OS scope-vocabulary pattern). `SwStageId` keeps `define`/`design`/`build`/`publish`; only their labels moved (Define→**Define App**, Design→**Design Epics**, Build→**Build App**). The standalone `test` stage id is **retired from the flow** and merged into `publish`; the assistant/MCP `test` verb (`verify_software`, `stage="test"`) is a separate vocabulary and is unchanged.
+- **NEW "Create Context" stage (id `context`), inserted at position 3** — the app's context resolution now lives in one place. `SoftwareContextGrants` (bind an existing connection / data / knowledge / files / metrics) **moved out of Define** into Create Context, and the `DataPlanPanel` (create-new datasets: empty / AI-sample, 0.6.101) **moved out of Design** into Create Context. Define App is now purpose + template only; Design Epics is epics/stories/specs only.
+- **MERGE: Test + Publish → one "Test & Publish" stage.** Its body hosts both the Test verification surface (LLM-verify built stories vs spec + the live-pod preview) and the Publish/deploy controls (request_deploy / approve / self-serve go-live). Both flows kept working.
+- **Tighter gating (stage state machine, `components/software/stages.ts` `SwCtx` + `lib/core/stages.ts`):**
+  - **Create Context** is enterable once Design Epics has a backlog; its ✓ = every data-needing story is resolved (a dataset bound/created, or no story needs data — the same honest `unresolvedDataNeedWarning` signal, now labelled "Create Context").
+  - **Build App** is gated on **a specced backlog AND a resolved context** — empty design ⇒ can't Build; an unresolved data need ⇒ can't Build (guiding gate, mirrors the design-before-build gate).
+  - **Test & Publish** is blocked until **at least one user story is actually BUILT** — real code committed for it (a story marked `done` by a successful build commit), not merely that the user clicked into Build. Reaching Test/Publish with an empty app is blocked with a friendly reason. (Owner: "you can go to Test and Build without writing a single line of code, which does not make sense.")
+- **MCP parity + copy.** The Platform MCP stage descriptions are renumbered/relabelled to the new five governed stages (`lib/software/platform-mcp.ts`, `mcp-stages.ts`) — **tool names are stable** (`create_software`/`design_software`/`build_software`/`verify_software`/`request_deploy`…); only the STAGE labels/descriptions changed. Create Context has no dedicated MCP verb this wave — it is expressed through `design_software`'s `grants` (bind-existing); a fuller `resolve_context` verb is a deliberate follow-up. Tutorial + guide + anchor copy updated (`lib/tutorials/content/software.ts`, `anchors.ts` adds `software.context`, `lib/tabs/guides/software.guide.md`).
+- **Deliberately deferred:** generalising **create-new** to the non-dataset kinds (metrics/files/knowledge/connections). Bind-existing already covers them via `SoftwareContextGrants`; datasets get create-new via `DataPlanPanel`. The seam is left clean.
+
+Stage-model tests updated to the new flow (`lib/software/stages-model.test.ts`): empty app can't enter Test & Publish; after one story is built it can; Build gated on design-spec + resolved context.
+
+## [os-ui 0.6.104] — 2026-08-11
+
+Metric tiles are readable again: the tile face no longer shows the domain-namespaced Cube **member** (`<VIEW>.<measure>`, e.g. `AGENTIC_LEADER_Q3_2026__SERVICE_PERFORMANCE.open_cases_count`) — just the clean metric **name** (+ description). The full member and the source dataset moved to the name's hover title for discoverability.
+
+## [os-ui 0.6.103] — 2026-08-11
+
+Three fixes to adding components to a **Big Bet** (the solution-design workspace — an interplay graph of referenced artifacts), all reported by the owner while building one out.
+
+- **Graph nodes now show the artifact NAME, not just the type.** Before, an agent node and a knowledge node looked identical — each showed only its TYPE ("Agent"/"Knowledge"), so you couldn't tell components apart. The interplay canvas (`components/bigbets/InterplayCanvas.tsx`) now renders each node's real **name** (from the bet view's `labels`/`meta` map) as the PRIMARY text, with the type as the glyph + a small caption. A new pure, unit-tested resolver (`resolveNodeLabel` in `lib/bigbets/interplay-layout.ts`) returns the name when known and a short id-tail fallback when not (redaction "Members only" wins), so an unresolved ref is still distinguishable rather than collapsing to its type. On-brand (calm, no purple; truncated to fit the box).
+- **"Anchor" → "Business Process"; the anchor links a WORKFLOW; placeholders.** The Anchor concept is renamed to **Business Process** in the Big Bet UI (band label in `interplay-layout.ts` `BAND_LABEL`, the canvas band tag, the wizard step + copy + chip). The rename is **DISPLAY-ONLY** — the load-bearing internal names (`role: 'anchor-workflow'`, `blueprint.anchorWorkflowRefId`, `bandFor`, the `setAnchor`/`set_bet_workflow` surfaces) are unchanged, per the OS scope-vocabulary pattern. Step 1's picker now clearly prompts to **link an existing Workflow** (it was labelled "Attach an existing Knowledge") and deep-links "Create a new Workflow →" to `/workflows`. **Placeholder components** are new: add a named stand-in (`ComponentRef.placeholder` + `placeholderName`, a synthetic `placeholder:*` artifactId, no real artifact) to any wizard step; it renders distinctly in the graph (dashed/faded, a PLACEHOLDER tag) and in the component list; a **"Create real <kind>"** button (`createFromPlaceholder` in `lib/bigbets/store.ts`) scaffolds the real artifact through that tab's OWN governed create flow (reuse, not a fork), **rebinds the ref in place** (the ref id is stable, so interplay edges + the Business-Process anchor survive), and deep-links the user to that tab (prefilled with the name) to finish it. Wired end-to-end for all nine kinds — the rebind is real; the deep-link is the finish hand-off.
+- **Software App attachment is enabled.** The picker no longer shows "Software app listing is coming — attach it from its own tab…". The server/MCP always accepted a software id; only the UI listing was missing. Software is now listed in the available-components route (`app/api/big-bets/[id]/components/available/route.ts`) via the tab's own async `listAppsForUser(user)` gate (domain-scoped, same visibility as every other kind — the sync reader seam couldn't wire it because that gate is async, so the already-async route lists it directly), and chosen apps attach exactly like knowledge/agents. Only `connection` remains deferred in the picker.
+
+Unit tests: the node-label resolver, the placeholder→real rebind (edges + anchor survive), the workflow-anchor attach, and the software-app attach path.
+
+## [os-ui 0.6.102] — 2026-08-11
+
+Self-serve go-live for My Software: a **Builder deploying their OWN Personal-tier app now publishes in one action** — `requestDeploy` auto-approves (folds request+approve) instead of opening a review card the builder would then approve themselves, so no separate approval or admin is needed. Still fully security-gated: it only self-serves on a **passing security scan** with **no ungranted-dataset warning** (either falls through to the Builder review card). Shared/Domain/Company tiers keep the review gate, and promotion to a higher tier stays separately role-gated. Also moved the dev-default-secret boot guard from module-load into `instrumentation.register()` (real server start) so it never bakes into a prerendered page.
+
+## [os-ui 0.6.101] — 2026-08-11
+
+Software builder gains an **explicit data-resolution step**: the Design assistant now proposes a **data plan** and each data need is resolved UP FRONT — bind an existing dataset, create a new **empty** one (schema only), or create one with **AI-generated realistic sample rows** — instead of the build discovering the need mid-flight and failing with a cryptic empty commit. (The trigger: a story needed employee data, the app had zero granted datasets, and the build model refused with an empty commit + a generic "commit needs at least one file" — the owner never asked for an "employee dataset", so the need must surface + be resolved during Design, not at build.)
+
+- **The Design assistant proposes a DATA PLAN (`suggestedDatasets`):** a new suggestion field (`lib/software/data-plan.ts` `SuggestedDataset` = `{ name, purpose?, columns: [{name,type}], fill: 'empty'|'dummy', rows? }`) validated in `normalizeAssistantReply` — a real, non-empty column list is REQUIRED; a malformed item is dropped; an unknown `fill` defaults to `empty`. The Design system prompt (`app/api/apps/[id]/assistant/route.ts`) now identifies the app's data ENTITIES from the stories/specs and, per need, PREFERS binding a suitable existing dataset via `suggestedGrants` (never duplicating one) and otherwise proposes a create-new dataset with an inferred schema.
+- **Three resolve actions:** (a) **bind existing** stays the existing `suggestedGrants` apply path; (b) **create empty** and (c) **create dummy** go through the new server twin `lib/software/data-plan-server.ts` `resolveDataPlanItem` → REUSES `createDataset` (personal lane) + `landGridAsBronze` (the SAME bronze ingest a file upload uses: CSV → data-runner → `iceberg.personal_<uid>.bronze_<slug>`, bronze stays raw / all_varchar) → then GRANTS the dataset to the app (read-only) so the build sees its schema (the 0.6.97 granted-only context). Create-dummy generates realistic rows via the reasoning model, **bounded** (default 25, cap 100), folded into the ingest grid and **actually persisted** — never fabricated at read time — and the dataset is labelled `[sample data]` so it is never mistaken for production. Materialization fails soft to schema-only (offline / model-down).
+- **Self-contained resolution UI (`components/software/DataPlanPanel.tsx`):** a decoupled panel (per-item empty/dummy choice + Create&grant + honest status) mounted into `StageAssistantChat` via a generic `renderDataPlan` render-prop, so a follow-up wave can lift the whole data-resolution surface into its own "Create Context" stage without untangling it from Design.
+- **The build gate now reads honestly:** `unresolvedDataNeedWarning` (`data-plan.ts`) detects the no-data case (zero granted datasets AND a story whose text/spec implies a data entity) and injects a loud, NAMED, actionable warning into the build brief up front (`app/api/apps/[id]/chat/route.ts`) — "N stories need data, but no dataset is bound … resolve it in Design, then build" — mirroring the 0.6.97 ungranted-dataset guard (a warning, not a false-positive-prone hard block). The MCP empty-commit message (`lib/software/platform-mcp.ts`) also now points at data-resolution-in-Design instead of only "populate the files array".
+
+## [os-ui 0.6.100] — 2026-08-11
+
+Science launch now shows the **real** publish failure everywhere and the launch assistant is grounded in it — and the actual publish bug is diagnosed as a **cluster serving-runtime misconfiguration**, not os-ui code. (The live trigger: a user launched a model on a small, clean dataset; it got through Training, died at Publishing with a generic "Couldn't finish launching. failed", and the assistant literally said it couldn't see the logs and asked the user to paste the error. Meanwhile the only KServe predictor in the cluster, `sample-sklearn-predictor`, was CrashLoopBackOff-ing with `exec: "--model_name=sample-sklearn": executable file not found in $PATH`.)
+
+- **Real publish root cause = cluster serving runtime, not os-ui (`SCIENCE-KSERVE-FIX.md`):** os-ui builds a correct DECLARATIVE InferenceService (`lib/science/deploy.ts` → `buildInferenceService`: `spec.predictor.model` sklearn + `protocolVersion: v2` + `modelClass: mlserver_sklearn.SKLearnModel`, NO container command) — verified against the chart's own sample. The malformed `--model_name` exec is the signature of KServe falling back to its built-in v1 `sklearnserver` runtime because the intended v2 `kserve-mlserver` `ClusterServingRuntime` (a bootstrap prerequisite — grep confirms NO ServingRuntime ships in this repo) is missing/wrong on the cluster. Documented the exact `kubectl apply` for the runtime + how to Helm-manage/remove the stale `sample-sklearn` demo. os-ui was NOT guess-patched.
+- **os-ui now DETECTS + surfaces the crash honestly (`lib/science/deploy.ts`):** `readDeploy` probes the predictor pod (`predictorCrashReason`) and promotes a CrashLoopBackOff to a terminal `failed` even while the ISVC still reports "progressing" (the crash never shows in ISVC conditions). New `isServingRuntimeMisconfigured` / `humanizeDeployReason` / `SERVING_RUNTIME_MISCONFIGURED_MESSAGE` wrap the malformed-command reason in an admin-directed message. The Launch UI (`components/science/builder/LaunchStep.tsx`) replaces the generic "Couldn't finish launching" with a stage-specific header — **"Serving runtime misconfigured — see your platform admin"** for this case — and disables the (pointless) Retry until an admin fixes it.
+- **Launch-stage assistant is now grounded in the real launch signals (`lib/science/launch-grounding.ts`, `app/api/science/assistant/route.ts`):** mirroring 0.6.99's Design grounding, `collectLaunchGrounding` gathers THIS model's captured `lastTrainingError`/`lastDeployError`, the last **30** lines of the REAL training run log (the `train` init-container stdout/stderr via a new plain-text `k8sText` reader + `trainingLogs`), and the live KServe status — rendered by `renderLaunchGrounding` (bounded, DLS/edit-scope respected by the route, never fabricated). The launch system prompt now tells the assistant it HAS the logs and must diagnose + suggest one next step (and flag the admin-fix case) instead of asking the user to paste the error. The Launch panel's auto-explain now calls this grounded launch stage (the old `stage:'train'|'deploy'`→`text` call never worked).
+- **Tests:** `lib/science/deploy.test.ts` (+6) — the misconfig detector/humanizer, `predictorCrashReason`, and `readDeploy` promoting a crash-looping predictor to `failed` with the admin message while leaving a healthy-progressing ISVC alone; `lib/science/training.test.ts` (+2) — `trainingLogs` returns the pod's train-container tail and is honest (no pod/log/unreachable ⇒ `''`); new `lib/science/launch-grounding.test.ts` (+5) — the grounding carries the real error + log lines, flags the serving-runtime case as an admin fix, and is honest when there are no signals.
+
+## [os-ui 0.6.99] — 2026-08-11
+
+Science Design assistant now grounds in dataset **columns + sample values** (DLS-scoped, validated) so it can recommend target/inputs; the dataset/target/inputs dropdowns are **always visible** with the assistant on top, and an applied suggestion **physically populates them**. (The trigger: the Design assistant was blind while helping you *choose* — it saw the visible dataset list and only the already-selected dataset's column names, never types or actual VALUES, so it couldn't genuinely recommend the right dataset/predictor/inputs before one was picked; and those controls were hidden behind a "pick a dataset yourself" manual toggle.)
+
+- **The assistant can now SEE columns + values (`lib/science/assistant-grounding.ts`):** a new `designGrounding(user, selectedDatasetId)` builds the Design context turn from the caller's REAL, DLS-scoped feed — every visible dataset with its real columns as `name:type` (read AS the caller through the governed `describe`, so masks/view-rights apply), plus a small sample of REAL rows (first `GROUNDING_SAMPLE_ROWS = 5`) of the SELECTED dataset via the SAME governed preview path the Data tab uses (`previewSql` → `queryRun`, so row filters + column masks ride along). Context is bounded: columns for up to `GROUNDING_MAX_DATASETS = 25` datasets (`GROUNDING_MAX_COLS = 40` each, cells clipped), sample VALUES for the selected dataset only — selecting a different one the assistant proposed re-grounds with its values next turn. New `datasetColumnsTyped` / `datasetSample` helpers; nothing is fabricated (unreadable/unbuilt ⇒ honest "no rows/columns yet"). The Design system prompt now tells the assistant it has columns/types/values and should use them to pick the right dataset, target and inputs. The existing server-side `validateDefinition` still refuses a hallucinated dataset/column so no Apply card renders.
+- **Always-visible controls, assistant on top, suggestions populate the dropdowns (`components/science/ModelBuilder.tsx`, `NewModel.tsx`):** removed the `manualOpen` gate — the Design stage for a new model now renders the assistant as a calm panel ON TOP, then the dataset / predictor(target) / inputs controls ALWAYS below it. An applied suggestion (`createFromDefinition` → `prefill`) now physically populates ALL THREE: the DATASET selection drives the picker + fires the column fetch (new `selectDataset` with a `keepChoices` path), and the proposed target + inputs land pre-selected — the user SEES the assistant's choice and can tweak anything before creating. Prefill is identity-guarded so a re-render never clobbers subsequent manual edits.
+- **Tests:** extended `lib/science/assistant-grounding.test.ts` — `datasetColumnsTyped` returns real columns WITH types and `[]` for a dataset the caller can't see; `datasetSample` returns real rows and `null` (never fabricated) for an invisible dataset; `designGrounding` lists visible datasets with `name:type` and sample VALUES for the selected one, omits values when none selected, and is honest when the caller has no datasets.
+
+## [os-ui 0.6.98] — 2026-08-11
+
+Graceful artifact-lifecycle spine — a lifecycle transition (promote/demote/archive/delete) should WARN before it breaks dependents, and dependents should DEGRADE with an honest message instead of white-screening a tab. (The live trigger: a user demoted a Shared dataset that a metric, a dashboard and an app depended on — Metrics + Dashboards threw client-side exceptions and the app got an opaque Forbidden.)
+
+- **`dependentsOf` — one cross-tab dependency primitive (`lib/core/dependents.ts`):** a server-side, read-only, unscoped walk over the existing reference edges that returns every artifact which would lose access if a given one were demoted/archived/deleted. Edges covered: dataset → dashboards (a panel charts the dataset's metric member), dataset → apps (`isGranted(app.grants,'data',id)`), dataset → agents (per-item `grants.data`), metric → dashboards (a panel uses that metric's member), and knowledge/file/connection → apps + agents via grants. Deduped, fail-soft (unknown id ⇒ empty, never throws), and unit-tested per edge. Client-safe shape + summary in `lib/core/dependents-shared.ts`.
+- **Warn-then-ALLOW on every lifecycle transition, wired ONCE:** a new `GET /api/artifacts/{id}/dependents` preflight feeds the ONE shared `ConfirmDialog`, which now renders a direction-aware, NON-BLOCKING line — demote/archive/delete → "Used by N metrics, M dashboards, K apps — this will break their access"; promote/certify → "… will re-point to the promoted copy once it materializes." Because it lives in the shared dialog + the three shared lifecycle controls (`LifecycleActions`, `DemoteButton`, `PromoteButton`), every tab that drives them inherits it; the transition is never gated on the warn.
+- **`SourceUnavailable` degradation applied to Metrics + Dashboards:** a new reusable `components/core/SourceUnavailable.tsx` (backed by the pure predicate `lib/core/source-availability.ts`) renders a calm inline "source dataset unavailable — it was demoted to Personal, archived, or deleted" state for the AFFECTED tile only. A dashboard panel whose metric members no longer resolve to a live metric degrades that panel (instead of firing a doomed query / dereffing an undefined metric), and a metric tile whose source dataset fell out of the visible set degrades that tile — the rest of the surface stays live. Belt-and-suspenders with the `app/error.tsx` boundary; the actual derefs are guarded, not just caught.
+
+## [os-ui 0.6.97] — 2026-08-11
+
+App data-access correctness — an OS-built app should only ever reference datasets it can actually reach, and denials should read like a person wrote them.
+
+- **Nav-label humanize (pt1):** PascalCase / ALL-CAPS story-folder names in the app nav are now humanized into readable labels.
+- **`os.records.*` auto read+write by default (revocable):** an app now has automatic read AND write to its OWN records store out of the box — `os.records.add/list/get/export` work right after a normal deploy, with no separate write-approval step. The default is enforced in the one write gate (`envelopeAllowsRecordTool`): the app's own record writes (`add_record`/`export_records`) are allowed unless the owner explicitly REVOKES them (`app.recordWritesRevoked`), at which point writes fall back to the Builder-approved deploy envelope (the prior behaviour). This only ever affects the app's OWN records — it never widens access to any dataset/knowledge/file/connection.
+- **Friendly, cause-aware grant denials:** a grant denial now NAMES the real artifact instead of showing an opaque id, and distinguishes the two real causes. If the dataset EXISTS but isn't granted → `«Service Centers» (ds_09qqomar3y)` + "grant it in Software → <app> → Context". If the dataset NO LONGER EXISTS (a hard-coded id that was deleted — ungrantable, so "grant it" is wrong) → "references dataset ds_… which no longer exists (it may have been deleted) — rebuild against a current dataset or restore the deleted one." Name resolution is server-side via `getArtifact` and fails soft (never throws).
+- **Granted-only dataset references, guarded at commit AND deploy:** the build/design context was already granted-only (the model is only ever shown the schemas/ids of datasets in `app.grants` — added a test that proves an ungranted-but-visible dataset never leaks). New pure, unit-tested helpers (`referencedDatasetIds` / `ungrantedDatasetRefs`, `lib/software/dataset-refs.ts`) scan committed code for `ds_…` references and flag any not in `app.grants.data`. This is surfaced as an unmissable WARNING (not a hard block — the scanner reads code as text, so a hard block risks false positives) in BOTH places: on the commit's audited activity/detail, and on the deploy review card (a deploy that references ungranted/deleted datasets can no longer auto-deploy silently — it re-opens the review gate). The build brief + data-plane contract now state explicitly: only reference dataset ids in the granted-context block; never hard-code a `ds_…` id that isn't granted.
+
+## [os-ui 0.6.96] — 2026-08-10
+
+An OS-built app's OWN write data now persists durably. The app's write door — `os.records.*` (list/get/add/export) — is backed by a new OS-side app-records store, so records survive even though the default app template is a static SPA with no backend of its own (previously the record tools fell back to honestly-labelled demo-seed and nothing persisted). The store reuses the existing OpenSearch durable-mirror pattern (a new `os-app-records` index + in-memory cache with hydrate-on-first-use and fire-and-forget write-through — no new infra), degrading to in-memory when OpenSearch is off. Records are scoped My + Domain (owner sees their own; a same-domain peer sees the app's owning-domain records; other domains see nothing) and are isolated per app. Writes stay envelope-gated in the routes; results are honestly labelled `source: os-records-store`. Both record doors (the app's own by-slug records routes and the agent MCP-tool route) thread the caller identity through so every read/write is scoped to what that user may see. The build guidance now makes it explicit that app-internal/persistent data uses `os.records.*` and that an app must never create OS datasets for its own writes (datasets are read-only).
+
+## [os-ui 0.6.95] — 2026-08-10
+
+Software tab now runs the reasoning model on ALL stages, including Build (code generation). Build was previously pinned to the standard tier, which proved too weak for getting the vendored SDK/UI surface and governance right in one pass — the recurring compile-gate rejections. Build now starts on reasoning (the ci-repair escalation becomes a safety net rather than the norm). An admin per-stage model override is the planned follow-up.
+
+## [os-ui 0.6.94] — 2026-08-10
+
+Build stage de-noise: the primary Build button now stays visible and live as you move between user stories — ticked features win, otherwise it builds the story you clicked (only when that story has a Design spec), instead of greying out after a build clears the checkboxes. The per-step build activity is no longer interleaved in the chat transcript; it lives collapsed under the Build-status block below the button, showing just the latest step as a one-liner and expanding on demand — or automatically when a run actually fails.
+
+## [os-ui 0.6.93] — 2026-08-10
+
+Design assistant: every suggestion card now has a Decline action (not just Add); and proposing/creating epics & stories now includes and persists their features, NFRs, rules and epic requirements in one step (full tree, not just titles); Build stage now shows a bold, clear "stories need features & requirements — add them in Design" callout with a Back-to-Design button instead of confusing small print.
+
+## [os-ui 0.6.92] — 2026-08-10
+
+App-SDK build fix: datasets.query/metrics.query now return a typed QueryResult ({columns, rows, rowCount}) instead of unknown (normalized in the SDK client + vendored types), and the build brief teaches the real Badge `tone` API + query-result usage — killing the recurring TS18046/Badge-variant compile-gate rejections in generated apps.
+
+## [os-ui 0.6.91] — 2026-08-10
+
+Talk-to-Data answers now auto-render an ECharts graph when the result is chartable (Bar/Line/Pie/Table toggle, inline), built only from the returned rows with honest numeric parsing + truncation labeling; table fallback for non-chartable results.
+
+## [os-ui 0.6.90] — 2026-08-10
+
+Software Design-stage UX: guided artifact ladder (Epics→Requirements→Stories→Features/NFRs/Rules) with orientation + progress checklist; never-a-dead-end assistant that proposes the next step (incl. features & requirements, not just stories); roomy auto-growing editors replacing the cramped text boxes.
+## [os-ui 0.6.89] — 2026-08-10
+
+Behavior-preserving refactors: hoisted the shared esbuild VFS resolver; lifted fat route handlers (software/apps tool+chat) into lib + unified cleanTurns; repointed metrics/dashboards off data-tab internals via the data barrel. No behavior change.
+
+## [os-ui 0.6.88] — 2026-08-09
+
+Security/governance hardening: agent authz fails closed when OPA unreachable (opaFailOpen-gated like the data spine); SSRF deny for metadata/loopback literals; first-run credential gate on 5 governance routes; boot guard on dev-default secrets in production; server-derived subject for files/retrieve; grants-context fallback + unified honest agent safety-preset copy.
+
+## [os-ui 0.6.87] — 2026-08-08
+
+Codebase cleanup (behavior-preserving): removed 21 verified-dead symbols/files, dropped stray exports, collapsed no-ops, deduped helpers, and corrected stale docs/comments across data/metrics/dashboards/connections/files/knowledge/software/agents/governance/mcp. No behavior change.
+
+## [os-ui 0.6.86] — 2026-08-07
+
+### Changed
+- **Docs + MCP truth-sync for 0.6.83–0.6.85:** `build_gold_join` accepts own personal
+  datasets, `define_metric` dimensions parity + upsert, guide/tutorials/tab-context updated for
+  curated-from-own-data + metric dimensions + dashboards-on-your-metrics.
+  - `build_gold_join` (MCP) description + `datasetId` pick guidance now state a join partner is a
+    governed asset/product OR your OWN personal (My-tier) dataset built to Silver/Gold — each still
+    re-resolved through the canView guard, the CTAS still runs AS you.
+  - `define_metric` (MCP) already exposed `dimensions`; its description now documents the
+    define-is-an-upsert-by-name semantics (re-defining the same name updates in place) and that
+    dimensions persist + rehydrate on edit.
+  - Tab-context + guide files (`data`, `metrics`, `dashboards`) reconciled: curated-from-own-data,
+    metric dimensions/upsert, and dashboards on your own metrics (My · Domain · Company picker).
+  - Hand-authored guide (`docs/Sovereign-Agentic-OS-Guide.md`) Data / Metrics / Dashboards
+    sections + Golden path 1 updated; Data / Dashboards tutorials updated for the new journeys.
+
+## [os-ui 0.6.85] — 2026-08-07
+
+### Changed
+- **Dashboard panel metric picker — grouped by My / Domain / Company, name-only chips,
+  hover details.** The palette of selectable metrics (a panel still charts ONE Cube view) is
+  now sliced into **My · Domain · Company** sections using the tier each metric carries
+  (threaded through via new pure helpers `groupMetricsByTier` / `metricTierSections` in
+  `components/dashboards/shared.ts`; empty tiers render nothing — no bare headers). Each chip
+  shows the metric **name only**; the source dataset (friendly `datasetName`, never the raw
+  `UPPER_SNAKE` view id), a composite/formula flag, its scope and its description live in a
+  **hover + focus popover** with an **"Open in Metrics"** link to `/metrics?focus=<id>`
+  (plain CSS hover-card — keyboard accessible, never a browser dialog).
+- **Honest picker label.** The misleading `Governed metrics on <RAW_VIEW> — click to chart`
+  caption (which showed the raw view identifier and wrongly called My-tier metrics
+  "governed") is replaced with a calm **"Charting from _\<friendly dataset name>_ — pick one
+  or more metrics (multi-select)"**. Tier is now explicit via the grouping, so "governed" is
+  dropped; the view→friendly-name mapping is the new `viewDatasetName` helper. The
+  single-view constraint and its empty-state are kept (reworded honestly). Multi-select, the
+  single-view narrowing, the group-by/time controls and the preview query path are unchanged
+  — this is presentation only.
+- **Metrics tab tiles — name-only with dataset on hover.** The tile face drops the muted
+  `datasetName` line; the source dataset moves to a hover `title` + `aria-label` on the
+  member line, keeping it discoverable without cluttering the card. The bold metric name,
+  value and tier/DomainTag badge are unchanged.
+
+## [os-ui 0.6.84] — 2026-08-07
+
+### Fixed
+- **BUG A — Metric edit now hydrates its saved dimensions and no longer 409s "already
+  defined" on a re-save.** Two coupled defects: (1) the activated slice-by dimensions were
+  never persisted onto the `Measure` (`measureFromForm` ignored `form.dimensions`) nor
+  rehydrated (`formFromMeasure` hardcoded `dimensions: []`), so re-opening Edit showed no
+  dimensions activated; (2) the save path always ran `defineMeasure`, which was create-only
+  and rejected an edit re-save of the same (frozen) measure name with `Measure '…' already
+  defined` (409). Fix: `Measure` gains an optional `dimensions` (a curation hint, kept off
+  `sameMeasure`/convergence); `measureFromForm` persists them and `formFromMeasure`
+  re-activates them; `parseMeasure` round-trips the field through the store (serialize
+  already dumps the whole measure); and `defineMeasure` is now an UPSERT keyed by the
+  measure name — the same name updates in place (preserving the display `label`), a new name
+  appends. There is never two same-named measures on one dataset, so this is the correct
+  edit-in-place semantic.
+- **BUG B — Dashboard "group by" shows dimensions again.** While designing the FIRST panel
+  of a new dashboard, the group-by picker was empty. Root cause was NOT the registry (both
+  ingested and curated Gold return dimensions correctly): the panel builder bound its
+  dimension palette to the dashboard's committed view, which is empty until the first panel
+  is added, so `viewMeta` never resolved. Fix: `PanelBuilder` derives an `effectiveView`
+  from the selected metric when no view is bound yet, and keys the group-by palette, live
+  preview and metric filter off it — the single-view guard still holds once a view binds.
+  (A and B did NOT share a root cause.)
+- **BUG C — "Suggest quality rules" for curated datasets.** Investigation (systematic
+  debugging) found the suggester is layer-agnostic and already proposes the standard
+  `not_null`/`unique`/`accepted_values`/`range` rules for a curated Gold-only dataset (it
+  profiles whatever built layer `builtLayerFqn` resolves — the composed Gold — exactly like
+  an ingested Silver/Gold; verified live in the #236 fix: 300 rows → 9 suggestions, and by
+  repro here). "Zero rules" is the honest empty-state when the curated Gold isn't
+  built/queryable yet, which is already surfaced with a machine-readable reason. Added a
+  regression test pinning curated-Gold-only → standard rule classes so the guarantee can't
+  silently regress.
+- **BUG D — Metric-tile title is fully visible, bold and prominent.** The tile name used a
+  single-line `nowrap` + ellipsis, so a longer metric name clipped out of the tile. It now
+  renders at 19px/700, wrapping to a two-line clamp (full text on hover) with the tier badge
+  top-aligned — surgical to the metric tile, other artifact tiles keep the shared treatment.
+
+## [os-ui 0.6.83] — 2026-08-07
+
+### Fixed
+- **Curated datasets can now be composed from your OWN personal (My-tier) datasets.**
+  The Compose / Gold-join source picker (`listJoinable`) previously excluded every
+  personal-tier dataset outright (`tier === 'dataset'`), so a participant could not build a
+  curated dataset from their own data — they had to promote each source to Domain first.
+  Now a personal dataset is reusable **by its owner** (owner-only `canView` already isolates
+  it; Shared/Company tiers stay open to all who can view). A new `reuseSourceFqn` resolver
+  points a personal source at the owner's personal lane (`personal_<owner>.<layer>_<slug>`)
+  instead of the domain schema, so the join hits the real table instead of `TABLE_NOT_FOUND`;
+  the build already runs AS the owner when the target is a personal lane. Materialization
+  (Silver/Gold built) is still required. Asset/product resolution is byte-identical.
+
+## [os-ui 0.6.82] — 2026-08-06
+
+### Fixed
+- **Connections integrity wave 2 — the functional-audit MODERATE/MINOR fixes.** Follow-up
+  to 0.6.81's CRITICAL wave; makes the half-wired connector templates actually usable and
+  closes the remaining honesty/governance gaps in the Connections tab.
+  - **Configurable half-wired templates (M2).** `POST /api/connections` and the MCP
+    `create_connection` tool now forward the non-secret config blocks the store already
+    supported: Atlassian **account email** (Basic auth cannot authenticate without it),
+    OData **OAuth-CC token URL**, the Airflow **auth kind / Basic username / trigger
+    allowlist**, and — the big one — the Workday **RaaS report catalog** (each report IS an
+    entity, so a Workday connection had no data until now). `ConnectorWizard` renders
+    metadata-driven fields per template, including an add/remove **report-list editor** for
+    Workday RaaS.
+  - **Operational adopt gate (M1).** Adoption no longer hard-requires
+    `EXTERNAL_CONNECTORS_ENABLED` — a new `adoptionEnabledFor(template)` gates on
+    *(flag OR operational)*, so operational exposures (Salesforce/Kajabi/OData/Workday),
+    which are user-facing without the flag, are adoptable, and warehouse adoption still
+    requires the flag with an honest reason.
+  - **Exposure recompile on domain move (M4).** `moveConnectionsDomain` now recompiles the
+    OPA exposure bundle when it moves a warehouse/operational connection, so
+    `data.governance.tables` (and the action intersection) re-key under the new domain
+    instead of leaving stale old-domain grants.
+  - **Egress-request ordering (M5).** The custom-connector builder files the egress request
+    *before* the create, so the auto-request fires in exactly the case it exists for (the
+    create 403s on the not-yet-allowlisted host); on refusal the user is told to retry after
+    approval instead of losing the request.
+  - **Honest test-connection (M7).** The warehouse test returns `ok:false` + `untested` when
+    the catalog is not queryable or the platform has no safe live probe (config-valid is not
+    connectivity-verified); the generic fallback no longer writes `health:healthy` on a mere
+    credential-presence + unauthenticated HEAD — it reports `ok:false` + `untested`.
+  - **Honest data-usage labeling (M8).** "Use as data source" runs the offline mock (the live
+    dlt/Drive sync client is not wired), so the connection record now carries
+    `dataUsageMode:'offline-mock'` and the UI badges/panel say "(mock)" — a fabricated count
+    is never presented as a real ingest.
+  - **Credential rotation (M13).** New `rotate-credential` action + generic Reconnect/Rotate
+    affordance: `rotateConnectionCredential` writes a new secret over the same vault ref,
+    re-fingerprints, and clears a stale `needs-reconnect` to `untested` — keeping grants +
+    exposures (no delete+recreate). Service connections only; Drive/Notion use Connect,
+    warehouse re-registers.
+  - **MCP lifecycle twins (m3).** `retire_connection` (archive/unarchive/delete),
+    `configure_connection` (rename/move/demote/capabilities), and `revoke_action_adoption`
+    — the MCP peers of the connection-detail controls, each running the SAME edit-scoped lib
+    as the UI.
+  - **Minor sweeps.** generic-api/generic-mcp install guides (m2); operational connections
+    included in the `catalogRefresh` sweep (m5); `createExposureSet` refuses a non-warehouse/
+    non-operational connection (m6); rewrote the stale "three genuinely-wired connectors"
+    comments + pruned 74 dead imports in `discovery-connection-tools.ts` (m1); reconciled the
+    promote-floor doc drift — the connection Personal→Shared floor is `domain_admin`, the
+    security-correct floor the code enforces (m4).
+
 ## [os-ui 0.6.81] — 2026-08-06
 
 ### Fixed

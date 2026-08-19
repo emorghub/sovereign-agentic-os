@@ -31,16 +31,15 @@ export function isReadOnlyMode(mode: ChatRunMode): boolean {
 export type SwModelRole = 'reasoning' | 'standard';
 
 /**
- * The MODEL TIER per software run mode (Software tab tier policy). Reasoning is used in
- * exactly the reasoning-heavy places — PLAN (the Design spec/plan drafting + design
- * conversation), TEST (verify each story/feature against its spec) and REVIEW (reason
- * about what shipped). BUILD — the actual code GENERATION — stays STANDARD: the whole
- * point is the standard model does the bulk file writing; codegen is never auto-escalated
- * to reasoning. (The batch build's plan/sequence + built-vs-pending verification are the
- * reasoning-shaped work; they live in Design/Test which are pinned to reasoning.)
+ * The MODEL TIER per software run mode (Software tab tier policy). ALL software stages —
+ * PLAN (Design spec/plan), BUILD (code generation), TEST (verify each story/feature) and
+ * REVIEW — run on the REASONING model. Code generation is reasoning-heavy in practice
+ * (getting the vendored SDK/UI surface + governance right in one pass), and the standard
+ * model proved too weak for it, so Build is no longer pinned to standard. (An admin
+ * per-stage override is planned; until then this is the fixed default.)
  */
-export function modelRoleForMode(mode: ChatRunMode): SwModelRole {
-  return mode === 'build' ? 'standard' : 'reasoning';
+export function modelRoleForMode(_mode: ChatRunMode): SwModelRole {
+  return 'reasoning';
 }
 
 /** A short, honest UI note for the tier a stage runs on. */
@@ -63,6 +62,24 @@ export const READ_ONLY_MODE_TOOLS = [
 ];
 
 /**
+ * The BUILD tool allowlist — WRITE-ONLY over a FROZEN context (0.6.108). Build writes code
+ * against the schema that Choose Context already froze into the static "## Granted context"
+ * block; it does NOT discover or query data. So Build gets the orientation set
+ * (READ_ONLY_MODE_TOOLS) PLUS the ONE write door `commit` — and DELIBERATELY excludes the
+ * data-discovery/query/design surface (`list_datasets` / `profile_dataset` / `query_data` /
+ * `design_software` / `create_dataset` / `start_preview` / `request_deploy`). Those live in
+ * Choose Context, where context is bound/created — handing them to Build made the model wander,
+ * re-query and dead-end mid-build on "no granted dataset" instead of just writing the code.
+ *
+ * `get_dataset` is KEPT here as a deliberate fallback: the injected column schema carries
+ * names + descriptions but NO per-column SQL type (ColumnDoc has no type field — see
+ * lib/data/dataset-schema.ts; only measures carry a type), so the build model can still fetch
+ * a granted dataset's full detail when it needs the exact column type. It is scoped to the
+ * app's own grants, so this is not a discovery back-door.
+ */
+export const BUILD_MODE_TOOLS = [...READ_ONLY_MODE_TOOLS, 'get_dataset', 'commit'];
+
+/**
  * BUILD PRINCIPLES — five one-line rules, aligned 1:1 with the five TEST dimensions
  * (Functionality · User Experience · Code Structure · Security · Documentation). Injected
  * into the BUILD and Design spec-drafting prompts so what we build is what we later verify.
@@ -71,51 +88,92 @@ export const READ_ONLY_MODE_TOOLS = [
 export const BUILD_PRINCIPLES = [
   '1. Functionality — deliver every feature/NFR/rule in the story spec; real data or a real error, never a fake.',
   '2. User Experience — honest loading/empty/error states, OS chrome + primitives, no dead ends.',
-  '3. Code Structure — implementations under template/·core/·epics/<epic>/<story>/; app/ stays thin router entrypoints.',
+  '3. Code Structure — implementations under src/template/·src/core/·src/epics/<epic>/<story>/; src/main.tsx+src/App.tsx stay thin entrypoints.',
   '4. Security — respect OS identity + My/Domain scope; stamp owner+domain on write, never widen visibility client-side.',
   '5. Documentation — comment non-obvious logic and record design decisions so the code explains itself.',
 ].join('\n');
 
 /**
  * The generated-app CODE STRUCTURE convention — the folder layout every build must honor.
- * It mirrors the epic/story spec so code maps 1:1 to the backlog, while keeping the app a
- * valid Next.js App-Router build (pages/route handlers MUST live under `app/`, so `app/`
- * stays a THIN router layer that imports the real logic from the structured folders).
+ * It mirrors the epic/story spec so code maps 1:1 to the backlog. The default template
+ * (`sovereign-app`) is a VITE + React + TS SPA: everything lives under `src/`, and
+ * `src/main.tsx`+`src/App.tsx` are the THIN entrypoints that mount the template Shell —
+ * there is NO Next.js `app/` directory.
  */
 export const CODE_STRUCTURE_CONVENTION = [
   '## Generated-app code structure (honor this on every build)',
-  'Organize code to mirror the epic/story spec. Real logic lives in structured folders;',
-  '`app/` holds only thin Next.js App-Router entrypoints that import from them.',
+  'This is a Vite + React + TypeScript SPA — ALL code lives under `src/`. Organize it to',
+  'mirror the epic/story spec. Real logic lives in structured folders; the two entrypoints',
+  '(`src/main.tsx` → `src/App.tsx`) stay thin and only mount the template Shell.',
   '',
-  '  template/                     FIXED scaffold: identity, roles, scope, admin shell,',
-  '                                layout. Do NOT change unless a developer overrides it.',
-  '  core/                         Overarching custom functionality + SHARED backend/data',
+  '  src/template/                 FIXED scaffold: identity, roles, scope, admin shell,',
+  '                                the AppShell layout + section registry. Do NOT change',
+  '                                unless a developer overrides it.',
+  '  src/core/                     Overarching custom functionality + SHARED backend/data',
   '                                (store, utils, shared components). The default Sovereign',
-  '                                app uses the GOVERNED DATA PLANE (OS SDK), not Supabase.',
-  '  epics/<epicKey>/general/      Epic-wide shared code (used by ≥2 stories of the epic).',
-  '  epics/<epicKey>/<storyKey>/   THAT story\'s feature code + its own backend/data.',
-  '  app/                          THIN entrypoints ONLY — pages + route handlers that',
-  '                                import implementations from template/·core/·epics/…',
+  '                                app uses the GOVERNED DATA PLANE (OS SDK).',
+  '  src/epics/<epicKey>/general/  Epic-wide shared code (used by ≥2 stories of the epic).',
+  '  src/epics/<epicKey>/<storyKey>/  THAT story\'s feature code + its own backend/data.',
+  '  src/main.tsx, src/App.tsx     THIN entrypoints ONLY — they boot React and mount the',
+  '                                template Shell. No business logic here.',
   '',
-  'RULES: write each story\'s implementation under epics/<epic>/<story>/; put anything shared',
-  'across stories in core/ (or epics/<epic>/general/ if epic-local). Never put real logic in',
-  'app/ — only a page/handler that renders/calls the structured implementation. Keep template/',
-  'intact.',
+  'RULES: write each story\'s implementation under src/epics/<epic>/<story>/; put anything',
+  'shared across stories in src/core/ (or src/epics/<epic>/general/ if epic-local). Never put',
+  'real logic in the entrypoints — keep src/main.tsx + src/App.tsx thin and src/template/ intact.',
+  '',
+  '## Generated-app API contract — the tiny surface that exists (breaking it FAILS the compile gate)',
+  'There are ONLY 3 import sources in a story/feature page. Import from nothing else:',
+  "  1. `react`               — hooks only (useState, useEffect, useCallback, …).",
+  "  2. `@sovereign-os/ui`    — the vendored primitives (exact list below).",
+  "  3. `../../../core/store` — the ready OS client singleton `os` ({ os } — 3 `../` up from",
+  '                             src/epics/<epic>/<story>/ to src/core/store).',
+  'NEVER import anything else — no `react-router-dom` / any router, no axios/fetch-wrapper, no 3rd-party',
+  'UI / date / query / chart lib. They are NOT installed; the import fails `TS2307 Cannot find module` and',
+  'the commit is REJECTED. (Live failure seen: `import { useNavigate } from \'react-router-dom\'`.)',
+  '',
+  '## The `os` client — use the SLUG-BOUND SINGLETON, never construct one in a page:',
+  "  import { os } from '../../../core/store'   // 3 `../` up from src/epics/<epic>/<story>/",
+  'The scaffold creates it ONCE in src/core/store.ts as `createOsClient(APP_SLUG)`, so the app',
+  'slug is baked in and `os.records.*` works. Do NOT call `createOsClient` yourself in a page — a',
+  'client built without the slug throws on every os.records.* call. The factory in src/os.ts is',
+  'internal to the scaffold and is never called directly from feature code.',
+  '',
+  'NAVIGATION = the section registry, NOT a router. A feature is just a DEFAULT-exported page component under',
+  'src/epics/<epic>/<story>/; the OS auto-registers it into src/template/sections.tsx (see below). There is',
+  'no client-side router: no `<Link>`, no `useNavigate`, no `<Routes>`/`<Route>`.',
+  '',
+  'A STORY PAGE RETURNS ITS CONTENT — `<Section title="…"><Card>…</Card></Section>` — and NEVER renders',
+  '`<AppShell>`. The template shell (src/template/shell.tsx) already wraps every section in AppShell; a page',
+  'that returns `<AppShell>…</AppShell>` fails `TS2741: Property \'nav\' is missing` and is REJECTED. Mirror',
+  'the shape of src/template/pages/Overview.tsx exactly. (Live failure seen: a page wrapped in <AppShell>.)',
   '',
   '## UI primitives — import ONLY these from `@sovereign-os/ui` (nothing else is exported):',
   '  AppShell · Button · Card · Badge · Input · Textarea · Select · Table · Section · Panel · Alert · Spinner · cx',
   'Importing any component NOT in this list (Modal, Dialog, Tabs, Tooltip, Grid, Flex, Icon, …) makes the',
-  'build FAIL to compile — compose from the primitives above or plain HTML/CSS instead. Correct usage:',
+  'build FAIL to compile — compose from the primitives above or plain HTML/CSS instead. EXACT signatures',
+  '(props not listed are the native HTML element\'s — Section/Card/Table/Panel are div/table wrappers):',
+  '  • `<AppShell nav={…} …>` — TEMPLATE-ONLY; it REQUIRES `nav` (NavItem[]). NEVER use it in a page.',
+  '  • `<Section title="…">…</Section>` — the page\'s top-level block (`title` optional). Card/Panel wrap content.',
   '  • `<Alert variant="info|success|warning|error">…</Alert>` for notices/errors; `<Spinner />` while loading.',
-  '  • Multi-line text is `<Textarea rows={3} …/>` — NOT `<Input as="textarea">`.',
-  '  • `<Select>` renders a native <select>: pass `<option value=…>` CHILDREN (no `options=` prop).',
+  '  • `<Badge tone="default|ok|warn|err|muted">` — tone, NEVER `variant` (Badge has no `variant`/`info` tone).',
+  '  • `<Button variant="primary|ghost" size="md|sm" onClick={…}>` — primary is the default.',
+  '  • `<Input value={v} onChange={e => …}/>` (controlled text) and `<Textarea rows={3} …/>` for multi-line —',
+  '    NOT `<Input as="textarea">`.',
+  '  • `<Select value={v} onChange={e => …}>` renders a native <select>: pass `<option value=…>` CHILDREN',
+  '    (no `options=` prop).',
+  '  • `<Table><thead/><tbody/></Table>` — compose the usual table rows inside.',
+  'EVENT HANDLERS: the vendored Input/Select/Textarea forward native props, so `onChange` is already typed —',
+  'read `e.currentTarget.value` (no `as` cast needed; mirror src/template/pages/Admin.tsx).',
   '',
-  '## Story pages are AUTO-REGISTERED — just write the page:',
-  'Create each story page as `src/epics/<epic>/<story>/<Name>.tsx` with a DEFAULT-exported React component.',
-  'The OS regenerates `src/template/sections.tsx` from these page files on every commit, so the page appears',
-  'in the nav automatically — do NOT hand-edit sections.tsx (the generated registry overwrites your edits).',
-  'One page component per story folder becomes one nav section (its label is the story-folder name); shared or',
-  'helper code goes in `epics/<epic>/general/` or a nested subfolder so it is not mistaken for a page.',
+  '## Story pages are AUTO-REGISTERED (sovereign-app only) — just write the page:',
+  'For the default `sovereign-app` template, create each story page at EXACTLY',
+  '`src/epics/<epic>/<story>/<PascalCase>.tsx` (depth 4, filename starts UPPERCASE) with a',
+  'DEFAULT-exported React component. The OS regenerates `src/template/sections.tsx` from these',
+  'page files on every commit, so the page appears in the nav automatically — do NOT hand-edit',
+  'sections.tsx (it is auto-generated and your edits are overwritten). Discovery rules: ONE',
+  'PascalCase page per story folder becomes one nav section (a 2nd page in the same folder is',
+  'ignored); a lowercase-first filename (e.g. `index.tsx`) is NOT registered; the `general/`',
+  'folder is skipped (put shared/helper code there or in a nested subfolder).',
 ].join('\n');
 
 /**
@@ -137,17 +195,22 @@ export const DATA_PLANE_CONTRACT = [
   '  add/export run live ONLY when this app\'s APPROVED deploy envelope permits them; otherwise the OS',
   '  answers 403 and the SDK throws Forbidden with the reason. There is NO os.datasets.update, no',
   '  os.files.create, no os.knowledge.write — datasets/metrics/knowledge/files are reads. Do not invent methods.',
+  '  ALL app-internal / persistent data goes through os.records.* (the app\'s OWN governed store, persisted',
+  '  durably OS-side). NEVER create an OS dataset for the app\'s own writes — datasets are read-only and it fails.',
   '',
   'GROUND RULES — this app can only reach the artifacts in its grants (see "## Granted context"):',
   '  • The granted dataset SCHEMA above is AUTHORITATIVE over the story-spec field names: if the',
   '    spec mentions fields the schema lacks (status, tenant, SKU, …), do NOT invent them — build with',
   '    the real columns and note the gap in your result.',
-  '  • Read a granted dataset via os.datasets.query(\'<granted id>\', { limit: n }) — the governed',
-  '    preview. It returns { columns: string[], rows: string[][] }; rows are ARRAYS in column order —',
-  '    zip each row with `columns` before use (do NOT assume object keys).',
+  '  • os.datasets.query AND os.metrics.query resolve to a typed `QueryResult`:',
+  '    { columns: string[]; rows: string[][]; rowCount: number; answer?; sql? } — rows are ARRAYS in',
+  '    column order (do NOT assume object keys). Read a scalar as `Number(r.rows?.[0]?.[0] ?? 0)` — no cast.',
   '  • os.datasets.query(id, { nl }) routes to the ask surface, which is scoped to THIS app\'s granted',
   '    datasets ONLY; a natural-language query about anything else is refused.',
   '  • Never call list routes expecting the user\'s full catalog — the app sees only its grants.',
+  '  • ONLY reference the dataset ids in "## Granted context" above. NEVER hard-code a `ds_…` id that',
+  '    is not in that granted list — an ungranted id fails at runtime (Forbidden) and is flagged at',
+  '    commit + deploy. Have no granted dataset? Ask for the grant; do not invent an id.',
   '',
   'A gate rejection lists errors across ALL files in the merged tree — fix EVERY listed file, not only',
   'the one you just wrote, then re-commit.',
@@ -171,11 +234,24 @@ export function modeDirective(mode: ChatRunMode, appId: string): string[] {
         BUILD_PRINCIPLES,
         '',
         'Place planned files per the code-structure convention (implementations under',
-        'template/·core/·epics/<epic>/<story>/; app/ = thin router entrypoints only).',
+        'src/template/·src/core/·src/epics/<epic>/<story>/; src/main.tsx+src/App.tsx = thin entrypoints only).',
       ];
     case 'build':
       return [
-        '## Mode: BUILD (execute end-to-end)',
+        '## Mode: BUILD (write code against the frozen granted context)',
+        'Context (datasets, knowledge, metrics, connections) was bound or created earlier in',
+        'CHOOSE CONTEXT; its schema is already injected below as "## Granted context". BUILD',
+        'WRITES CODE against that frozen schema — do NOT discover, list or query data here (those',
+        'tools live in Choose Context, not Build).',
+        'DATA IS PRESENT ⇒ BUILD IT. If a "## Granted context" block WITH dataset columns appears',
+        'below, the data need is ALREADY MET — you MUST build against those columns. Do NOT refuse,',
+        'stall, or claim "the app has no dataset / no granted data" — that block IS the grant, it',
+        'was resolved AS you (DLS-scoped). Reasoning yourself into "I should not read this data" is',
+        'a bug: the grant is the authorization. ONLY when there is genuinely NO "## Granted context"',
+        'block (or it lists no dataset the story needs) do you stop — and then say in ONE line "go to',
+        'Choose Context and bind or create the dataset for this story," never dead-end. Never invent',
+        'an id or wander looking for data.',
+        '',
         `To build: generate the files, then call \`commit\` with THIS appId (${appId}) to`,
         'write them (re-parsed on every commit), `start_preview` for the private sandbox, and',
         '`request_deploy` to open the Builder review gate. When you make a design decision or',
@@ -191,7 +267,36 @@ export function modeDirective(mode: ChatRunMode, appId: string): string[] {
         'build did not land and why, so the turn is honestly marked failed and can be retried.',
         'Commits are COMPILE-CHECKED server-side: a commit that does not compile is rejected with',
         'the exact diagnostics (file:line + TS code) and nothing is written — fix them and',
-        're-commit; never end the turn with known-red diagnostics.',
+        're-commit; never end the turn with known-red diagnostics. If a commit is REJECTED, FIX',
+        'those exact diagnostics before re-committing — never resubmit the same unchanged code (an',
+        'identical rejected commit just loops).',
+        '',
+        '"DONE" IS GROUNDED IN FACTS, NEVER IN THE SPEC. A story counts as implemented ONLY if it is',
+        "marked status:'done' AND committed source files implement it (visible in the file tree /",
+        '`read_app_files`). The acceptance-criteria / spec text says what to BUILD — it is NOT evidence',
+        'that anything was built. So when asked to build a story that is NOT marked done and has no',
+        'implementing files, BUILD IT — never reply "already implemented / committed / live / no further',
+        'build needed" and never recite the acceptance criteria back as proof. Restating the spec is not',
+        'a build. If unsure whether code exists, `read_app_files` the story\'s src/epics/<epic>/<story>/',
+        'path first, then build what is missing.',
+        '',
+        'ROLES & PERMISSIONS — use the scaffolded helpers, never invent a check. `useIdentity()`',
+        '(src/template/identity.tsx) returns IdentityState, a DISCRIMINATED UNION with a `.phase` field',
+        "({phase:'loading'} | {phase:'signed-out'} | {phase:'error',message} | {phase:'ready',user}). It has",
+        'NO `id` field — never `const { id } = useIdentity()`, never `.id`, and never touch `.user` without',
+        "narrowing on `.phase === 'ready'` first. Copy this exactly (mirror src/template/pages/Overview.tsx):",
+        '  const identity = useIdentity();',
+        "  const user = identity.phase === 'ready' ? identity.user : null;",
+        "  const canEdit = !!user && roleAtLeast(user.role, 'domain_admin');",
+        "Gate with `roleAtLeast(user.role, '<floor>')` from src/template/roles.ts — NEVER an exact match like",
+        "`role === 'admin'` (that wrongly EXCLUDES higher roles and hard-blocks a real admin). The OS",
+        'ladder is creator < builder < domain_admin < admin; map story language ("admins/managers can X")',
+        "to `roleAtLeast(user.role, 'domain_admin')` (or 'builder' for a lighter gate). Do NOT invent",
+        "app roles/permissions ('manager', 'Assign-Case permission') — they do not exist in the OS. Only",
+        "gate when the role is KNOWN (phase 'ready'); while loading, or when role is null, treat it as",
+        'not-yet-known, NOT denied — never hard-fail. Client checks are ADVISORY UX: HIDE or DISABLE the',
+        'control for users who lack the role (a quiet, friendly state), never a scary blocking error —',
+        'real enforcement is the OS data layer (OPA on the governed data plane); the JS gate is a courtesy.',
         '',
         'Build to these PRINCIPLES (they map 1:1 to how Test verifies you):',
         BUILD_PRINCIPLES,
@@ -210,7 +315,7 @@ export function modeDirective(mode: ChatRunMode, appId: string): string[] {
         'Verify across these FIVE named dimensions, reporting PASS or FAIL for EACH:',
         '  • Functionality  — every feature/NFR/rule in the spec is actually implemented; real data or a real error, never a fake.',
         '  • User Experience — honest loading/empty/error states, OS chrome + primitives, no dead ends.',
-        '  • Code Structure  — logic lives under template/·core/·epics/<epic>/<story>/; app/ is thin router entrypoints only.',
+        '  • Code Structure  — logic lives under src/template/·src/core/·src/epics/<epic>/<story>/; src/main.tsx+src/App.tsx are thin entrypoints only.',
         '  • Security        — OS identity respected, My/Domain scoping enforced (owner+domain stamped, visibility never widened).',
         '  • Documentation   — non-obvious logic is commented and design decisions are recorded.',
         '',

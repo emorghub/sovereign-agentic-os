@@ -3,7 +3,7 @@
  */
 import yaml from 'js-yaml';
 import type { Dataset, Measure, MeasureFilter, RollingWindow } from '../data/index.ts';
-import { MEASURE_TYPES, type MeasureType, cubeViewName, slug } from '../data/metrics.ts';
+import { MEASURE_TYPES, type MeasureType, cubeViewName, slug } from '@/lib/data';
 import { assertFormulaRefs, compileFormula } from './formula.ts';
 
 /**
@@ -24,7 +24,7 @@ import { assertFormulaRefs, compileFormula } from './formula.ts';
  * read-only, so Data owns the base cube and Metrics owns the measures layer on top.
  */
 
-export type { MeasureType } from '../data/metrics.ts';
+export type { MeasureType } from '@/lib/data';
 
 /** The comparison operators the guided (no-code) filter offers. Each compiles to a
  *  governed SQL predicate on the cube (never hand-typed SQL). */
@@ -146,10 +146,28 @@ function windowFor(form: MetricForm): RollingWindow | undefined {
  *  optional groups add filters / rolling_window / format / drill_members / a ratio sql.
  *  A COMPOSITE formula (`form.formula`, aggregation 'number') compiles to the same
  *  `{measure}`-reference sql the ratio uses; pass `siblings` (the dataset's existing
- *  measures) to validate its references — refs must exist and be basic metrics. */
+ *  measures) to validate its references — refs must exist and be basic metrics.
+ *
+ *  DISPLAY NAME: when the user's typed name differs from its machine slug (e.g. "Revenue"
+ *  vs "revenue", "Monthly Revenue" vs "monthly_revenue"), the original is persisted as
+ *  `label` so the tile, the registry and the detail header all show the human name the
+ *  author chose — not a lowercased slug. The Cube member (which uses the slug) is FROZEN
+ *  and unaffected. */
 export function measureFromForm(form: MetricForm, siblings?: Measure[]): Measure {
   if (!form.name.trim()) throw new MetricError('a metric needs a name');
   if (!isMeasureType(form.aggregation)) throw new MetricError(`unknown aggregation '${form.aggregation}'`);
+
+  const humanName = form.name.trim();
+  const machineName = measureName(humanName);
+
+  /** Set the display `label` when the human name the author typed is richer than the
+   *  machine slug — so tiles show "Monthly Revenue" not "monthly_revenue". The label is
+   *  the ONLY thing that changes on a rename (the member stays frozen), so it's safe to
+   *  set it here without touching the Cube identity. */
+  function applyLabel(m: Measure): Measure {
+    if (humanName !== machineName) m.label = humanName;
+    return m;
+  }
 
   // Composite formula — the general case of the two-term ratio below.
   if (form.formula && form.formula.trim()) {
@@ -159,14 +177,15 @@ export function measureFromForm(form: MetricForm, siblings?: Measure[]): Measure
     const compiled = compileFormula(form.formula);
     if (siblings) assertFormulaRefs(compiled.refs, siblings);
     const m: Measure = {
-      name: measureName(form.name),
+      name: machineName,
       type: 'number',
       sql: compiled.sql,
       formula: form.formula.trim(),
     };
     if (form.format) m.format = form.format;
     if (form.description && form.description.trim()) m.description = form.description.trim();
-    return m;
+    setDimensions(m, form);
+    return applyLabel(m);
   }
 
   const isRatio = form.aggregation === 'number';
@@ -182,7 +201,7 @@ export function measureFromForm(form: MetricForm, siblings?: Measure[]): Measure
     ? `1.0 * {${form.ratio!.numerator.trim()}} / {${form.ratio!.denominator.trim()}}`
     : form.aggregation === 'count' ? '' : form.column.trim();
 
-  const m: Measure = { name: measureName(form.name), type: form.aggregation, sql };
+  const m: Measure = { name: machineName, type: form.aggregation, sql };
 
   if (form.filter && form.filter.column.trim()) {
     m.filters = [{ sql: filterSql(form.filter) }];
@@ -194,7 +213,17 @@ export function measureFromForm(form: MetricForm, siblings?: Measure[]): Measure
     m.drillMembers = form.drillMembers.filter((d) => d.trim());
   }
   if (form.description && form.description.trim()) m.description = form.description.trim();
-  return m;
+  setDimensions(m, form);
+  return applyLabel(m);
+}
+
+/** Ride the author's ACTIVATED slice-by dimensions onto the measure (deduped, trimmed).
+ *  A curation hint that round-trips through Edit — kept OFF `sameMeasure`/`richKey` so it
+ *  never affects the form/agent/YAML convergence gate. Empty ⇒ field stays absent
+ *  (byte-stable for every metric defined before dimensions were persisted). */
+function setDimensions(m: Measure, form: MetricForm): void {
+  const dims = (form.dimensions ?? []).map((d) => d.trim()).filter((d, i, a) => d && a.indexOf(d) === i);
+  if (dims.length > 0) m.dimensions = dims;
 }
 
 /** Inverse of {@link filterSql} — parses back exactly the predicate shapes it emits. */
@@ -225,7 +254,9 @@ export function formFromMeasure(m: Measure): MetricForm {
     name: m.name,
     aggregation: isMeasureType(m.type) ? m.type : 'count',
     column: isRatio || m.type === 'count' ? '' : m.sql,
-    dimensions: [],
+    // Re-activate the slice-by dimensions the author saved, so Edit re-opens with the
+    // same dimensions selected (round-trips setDimensions above). Absent ⇒ none.
+    dimensions: m.dimensions ? [...m.dimensions] : [],
   };
   if (m.formula) {
     // Composite metric — the SOURCE formula rides on the measure, so it round-trips

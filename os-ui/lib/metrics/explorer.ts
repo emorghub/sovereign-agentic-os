@@ -2,21 +2,23 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import type { Dataset, Measure, RollingWindow } from '../data/index.ts';
-import { type DelegatedToken, propagate } from '../data/identity.ts';
+import { type DelegatedToken, propagate } from '@/lib/data';
 import { dimensionMember, measureMember } from './model.ts';
-import { goldMartFqn, viewMembers } from '../data/metrics.ts';
+import { goldMartFqn, viewMembers } from '@/lib/data';
 
 /**
  * The metric explorer — pick a metric + dimensions to slice, no SQL, per-viewer RLS.
  *
- * R3 is the whole point here: the query is resolved at Cube under the VIEWER'S identity
+ * R3 is the whole point here: the query is resolved under the VIEWER'S identity
  * (`securityContext`), never a shared service identity, so two people exploring the same
- * metric see DIFFERENT rows. We derive the security context from the same delegated
+ * metric see DIFFERENT rows. Since the metrics→Trino migration (Phase 1) the live read
+ * path is governed Trino SQL run AS the viewer — Cube is off the metric read path (it
+ * only serves dashboards now). We derive the security context from the same delegated
  * token the agent `metrics` tool uses ({@link propagate}), so the explorer and the agent
- * are the same row-filtered query. Pure: the Cube load is injected, unit-tested with an
+ * are the same row-filtered query. Pure: the executor is injected, unit-tested with an
  * in-memory executor that honours the security context.
  *
- * Analysts can `dropToSql` to the Cube SQL API / Trino for ad-hoc work beyond the metric.
+ * Analysts can `dropToSql` to Trino for ad-hoc work beyond the metric.
  */
 
 export type Granularity = 'day' | 'week' | 'month' | 'quarter' | 'year';

@@ -35,6 +35,9 @@ export type K8sClient = (
   body?: unknown,
 ) => Promise<{ status: number; body: Record<string, unknown> }>;
 
+/** Plain-text k8s reader — matches `lib/infra/k8s.ts` `k8sText(path)` (pod logs). */
+export type K8sTextClient = (path: string) => Promise<{ status: number; text: string }>;
+
 /** The cluster wiring the Job needs — injected from `config` (no secrets inline). */
 export type TrainingRuntime = {
   namespace: string;
@@ -301,6 +304,59 @@ export async function podPendingReason(
     const conds = (st.conditions as { type?: string; status?: string; message?: string }[] | undefined) ?? [];
     const unsched = conds.find((c) => c.type === 'PodScheduled' && c.status === 'False');
     if (unsched?.message) return unsched.message;
+  }
+  return '';
+}
+
+/**
+ * The last N lines of a training run's REAL logs — the `train` init container's stdout/stderr
+ * (where the sklearn traceback / Trino read error lands). Best-effort + honest: we resolve the
+ * Job's pod (label `job-name=<job>`), then read that container's `/log` tail; ANY miss (no pod,
+ * log not yet available, unreachable API, or a pod that never scheduled) returns '' so the caller
+ * grounds in "no logs captured" instead of a fabricated trace. The default `logs` binding is the
+ * plain-text in-cluster reader; `pods` is the JSON reader — both injected for `node --test`.
+ */
+export async function trainingLogs(
+  jobName: string,
+  namespace: string,
+  tailLines: number,
+  pods: K8sClient,
+  logs: K8sTextClient,
+): Promise<string> {
+  const list = await pods('GET', `/api/v1/namespaces/${namespace}/pods?labelSelector=job-name%3D${jobName}`);
+  if (list.status !== 200) return '';
+  const items = (list.body?.items as Record<string, unknown>[] | undefined) ?? [];
+  // Prefer the most recent pod (a re-run may leave an older one behind).
+  const pod = items[items.length - 1];
+  const name = ((pod?.metadata as { name?: string } | undefined)?.name) ?? '';
+  if (!name) return '';
+  const tail = Math.max(1, Math.min(200, Math.floor(tailLines)));
+  const res = await logs(
+    `/api/v1/namespaces/${namespace}/pods/${name}/log?container=train&tailLines=${tail}`,
+  );
+  if (res.status !== 200 || !res.text.trim()) return '';
+  // Keep only the last `tail` lines (the API honors tailLines, but guard against a chatty stream).
+  return res.text.trim().split('\n').slice(-tail).join('\n');
+}
+
+/**
+ * Extract the first REAL error line from a training-log tail — the trainer's own message
+ * (`fail(...)` prints `trainer: FATAL <msg>`) or the last line of a Python traceback — so the
+ * route can record the ACTUAL cause instead of the generic k8s Job reason ("BackoffLimitExceeded"
+ * / "Back-off restarting failed container"). Pure + honest: returns '' when the log has no
+ * recognizable error signal (the caller then keeps the k8s reason). Prefers the trainer's own
+ * `FATAL`/`ERROR:` marker, else the final Python exception line.
+ */
+export function firstTrainerError(log: string): string {
+  const lines = log.split('\n').map((l) => l.trim()).filter(Boolean);
+  // The trainer's own honest failure marker takes priority (`trainer: FATAL <msg>`).
+  for (const l of lines) {
+    const m = l.match(/trainer:\s*(?:FATAL|ERROR:?)\s*(.+)$/i);
+    if (m) return m[1].trim();
+  }
+  // Otherwise the final Python exception line (e.g. "ValueError: ...") from a traceback.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^[A-Za-z_][\w.]*(Error|Exception|Warning):\s+/.test(lines[i])) return lines[i];
   }
   return '';
 }

@@ -142,7 +142,10 @@ export function boundExecutor(base: ToolExecutor, bound: Record<string, unknown>
   };
 }
 
-const LLM_TIMEOUT_MS = Number(process.env.LLM_CHAT_TIMEOUT_MS ?? '') || 90_000;
+// 240s default: Build runs on the REASONING model (0.6.107), which can take well over the
+// old 90s to generate a full multi-file commit in one act — a shorter cap aborted the fetch
+// mid-generation and surfaced as "the model did not respond in time" with nothing streamed.
+const LLM_TIMEOUT_MS = Number(process.env.LLM_CHAT_TIMEOUT_MS ?? '') || 240_000;
 
 /**
  * A LiteLLM-backed `LlmCall`. Sends OpenAI-shaped chat completions through the
@@ -336,6 +339,14 @@ export type RunTabAgentInput = {
   /** Progress hook — called once with the plan text as soon as PLAN completes. */
   onPlan?: (plan: string) => void;
   /**
+   * Optional MODEL override (a LiteLLM model_name, e.g. `roleModel('reasoning')`).
+   * When set, BOTH plan and act run on it — the Software Build passes the reasoning
+   * tier here so code GENERATION runs on the strong model, not the platform
+   * assistant/standard default. Unset ⇒ the platform assistant model (unchanged for
+   * every other tab assistant).
+   */
+  model?: string;
+  /**
    * BOUNDED reasoning escalation (opt-in). A LiteLLM model_name (e.g.
    * `roleModel('reasoning')`) the ACT loop switches to ONCE if a tool keeps failing on
    * a shape error. The Software Build stage passes it so a STANDARD-tier build that
@@ -345,6 +356,12 @@ export type RunTabAgentInput = {
   escalateActModel?: string;
   /** Called once when escalation fires — the build route renders it as a labelled activity line. */
   onEscalate?: (info: { tool: string; from: string; to: string; failures: number }) => void;
+  /**
+   * WRITE tools whose FAILED calls must never re-run byte-identically (the build-loop guard).
+   * The Software Build passes `['commit']` so a compile-gate rejection is never re-committed
+   * unchanged. Unset ⇒ no guard (every other assistant is unchanged).
+   */
+  writeToolNames?: string[];
   /** Injected in tests; defaults to the live LiteLLM caller. */
   llm?: LlmCall;
 };
@@ -358,7 +375,12 @@ export async function runTabAgent(input: RunTabAgentInput): Promise<AgenticResul
   // config tiers as opaque ids the fake caller ignores.
   const injected = input.llm;
   const assistantId = injected ? config.litellmExecModel : resolveAssistantModelId();
-  const ctx = modelContext(assistantId);
+  // The model this run ACTUALLY executes on: an explicit override (the Software Build
+  // passes the reasoning tier) wins over the platform assistant default. Tests inject
+  // their own caller, so they keep the opaque exec id. The context window + budget +
+  // output cap all follow the model that runs, not a stale default.
+  const runModel = injected ? assistantId : (input.model ?? assistantId);
+  const ctx = modelContext(runModel);
   const allow = input.toolNames ? new Set(input.toolNames) : null;
   const specs = allow
     ? tabToolSpecs(input.user, input.tab).filter((t) => allow.has(t.name))
@@ -380,15 +402,16 @@ export async function runTabAgent(input: RunTabAgentInput): Promise<AgenticResul
     tools: specs,
     callTool,
     llm: injected ?? liteLlmCaller(),
-    planModel: injected ? config.litellmReasoningModel : assistantId,
-    actModel: assistantId,
+    planModel: injected ? config.litellmReasoningModel : runModel,
+    actModel: runModel,
     maxIterations: input.maxIterations,
-    budget: inputBudget(assistantId),
+    budget: inputBudget(runModel),
     maxOutputTokens: ctx.reservedOutput,
     onStep: input.onStep,
     onPlan: input.onPlan,
     escalateActModel: input.escalateActModel,
     onEscalate: input.onEscalate,
+    writeToolNames: input.writeToolNames,
   });
 }
 

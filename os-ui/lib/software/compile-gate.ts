@@ -7,6 +7,7 @@ import { readUiSource } from './app-ui-vendor.ts';
 import { readSdkSource } from './app-sdk-vendor.ts';
 import { detectPreviewShape } from './preview-shape.ts';
 import { getEsbuild, esbuildWasmReady } from './preview-runtime.ts';
+import { packageName, declaredDeps, makeVfsPlugin } from './vfs-resolve.ts';
 import type { ScaffoldFile } from './model.ts';
 
 /**
@@ -149,27 +150,6 @@ function rootDir(): string {
   return process.cwd();
 }
 
-/** The bare package name of an import specifier ('@scope/pkg/x' → '@scope/pkg'). */
-function packageName(spec: string): string {
-  const parts = spec.split('/');
-  return spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
-}
-
-/** The dependencies the app's own package.json declares (deps + devDeps). */
-function declaredDeps(tree: ScaffoldFile[]): Set<string> {
-  const pkg = tree.find((f) => f.path === 'package.json');
-  if (!pkg) return new Set();
-  try {
-    const parsed = JSON.parse(pkg.content) as {
-      dependencies?: Record<string, string>;
-      devDependencies?: Record<string, string>;
-    };
-    return new Set([...Object.keys(parsed.dependencies ?? {}), ...Object.keys(parsed.devDependencies ?? {})]);
-  } catch {
-    return new Set();
-  }
-}
-
 /** Packages the gate itself provides types/source for (never treated as unknowable). */
 const GATE_PROVIDED = new Set(['@sovereign-os/ui', '@sovereign-os/app-sdk', 'react', 'react-dom']);
 
@@ -277,36 +257,6 @@ function toDiagnostic(d: ts.Diagnostic): CompileDiagnostic {
 // -------------------------------------------------------------------- bundle pass ---
 
 const VFS = 'gate-vfs';
-const RESOLVE_TRIES = ['', '.ts', '.tsx', '.js', '.jsx', '/index.ts', '/index.tsx'] as const;
-
-/** Resolve a relative specifier against its importer inside the virtual tree. */
-function resolveRelative(spec: string, importer: string, files: Map<string, string>): string | null {
-  const stack: string[] = [];
-  for (const part of [...importer.split('/').slice(0, -1), ...spec.split('/')]) {
-    if (part === '.' || part === '') continue;
-    if (part === '..') stack.pop();
-    else stack.push(part);
-  }
-  const joined = stack.join('/');
-  for (const ext of RESOLVE_TRIES) {
-    const candidate = `${joined}${ext}`;
-    if (files.has(candidate)) return candidate;
-  }
-  return null;
-}
-
-/** esbuild loader per extension (bundle correctness only — output is discarded). */
-function loaderFor(path: string): 'ts' | 'tsx' | 'js' | 'jsx' | 'css' | 'json' | 'dataurl' | 'text' {
-  const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase();
-  if (ext === 'ts') return 'ts';
-  if (ext === 'tsx') return 'tsx';
-  if (ext === 'js') return 'js';
-  if (ext === 'jsx') return 'jsx';
-  if (ext === 'css') return 'css';
-  if (ext === 'json') return 'json';
-  if (ext === 'svg' || ext === 'png' || ext === 'jpg' || ext === 'gif') return 'dataurl';
-  return 'text';
-}
 
 /**
  * Bundle the SPA entry with esbuild-wasm over the virtual tree (app + vendored OS
@@ -321,47 +271,20 @@ async function bundleDiagnostics(tree: ScaffoldFile[], entry: string, deps: Set<
   for (const f of tree) files.set(f.path, f.content);
 
   const esb = await getEsbuild();
-  const plugin: import('esbuild-wasm').Plugin = {
-    name: 'gate-vfs',
-    setup(build) {
-      build.onResolve({ filter: /.*/ }, (args) => {
-        // The entry point itself.
-        if (args.kind === 'entry-point') return { path: args.path, namespace: VFS };
-        const spec = args.path;
-        // Absolute URLs (e.g. the theme's Google-Fonts @import) stay external — the
-        // browser fetches them at runtime, exactly as the real Vite build leaves them.
-        if (/^(https?:)?\/\//.test(spec) || spec.startsWith('data:')) return { external: true };
-        // Relative — resolve inside the virtual tree; a miss is the wrong-path error.
-        if (spec.startsWith('.') || spec.startsWith('/')) {
-          const hit = resolveRelative(spec.replace(/^\/+/, ''), spec.startsWith('/') ? '' : args.importer, files);
-          if (hit) return { path: hit, namespace: VFS };
-          return { errors: [{ text: `Cannot resolve '${spec}' from '${args.importer}' — the file does not exist in the app tree.` }] };
-        }
-        // React family — provided by the runtime, exactly like the Instant Preview.
-        const pkg = packageName(spec);
-        if (pkg === 'react' || pkg === 'react-dom') return { external: true };
-        // Vendored OS packages — resolve into the virtual vendor source.
-        if (pkg === '@sovereign-os/ui' || pkg === '@sovereign-os/app-sdk') {
-          const sub = spec.slice(pkg.length).replace(/^\/+/, '');
-          const base = `node_modules/${pkg}`;
-          const target = sub ? `${base}/${sub}` : `${base}/index.ts`;
-          for (const ext of RESOLVE_TRIES) {
-            const candidate = `${target}${ext}`;
-            if (files.has(candidate)) return { path: candidate, namespace: VFS };
-          }
-          return { errors: [{ text: `Cannot resolve '${spec}' — not part of the vendored ${pkg} package.` }] };
-        }
-        // Any other bare import must be a DECLARED dependency (the npm build would
-        // resolve it); an undeclared one is a hallucinated package — a real error.
-        if (deps.has(pkg)) return { external: true };
-        return { errors: [{ text: `'${spec}' is not a declared dependency of this app — add it to package.json or remove the import.` }] };
-      });
-      build.onLoad({ filter: /.*/, namespace: VFS }, (args) => ({
-        contents: files.get(args.path) ?? '',
-        loader: loaderFor(args.path),
-      }));
+  // Shared VFS resolver (see vfs-resolve.ts). The gate keeps its RICHER corrective
+  // error text (fed back to the agent loop); logic is identical to the runtime bundler.
+  const plugin = makeVfsPlugin({
+    namespace: VFS,
+    files,
+    deps,
+    messages: {
+      relativeMiss: (spec, importer) =>
+        `Cannot resolve '${spec}' from '${importer}' — the file does not exist in the app tree.`,
+      vendorMiss: (spec, pkg) => `Cannot resolve '${spec}' — not part of the vendored ${pkg} package.`,
+      undeclared: (spec) =>
+        `'${spec}' is not a declared dependency of this app — add it to package.json or remove the import.`,
     },
-  };
+  });
 
   try {
     const res = await esb.build({
@@ -505,16 +428,99 @@ export async function compileGate(tree: ScaffoldFile[], opts: CompileGateOpts = 
 // ------------------------------------------------------------------- Presentation ---
 
 /**
+ * Best-effort index of the vendored @sovereign-os/* surface, memoised for the process:
+ *   • `members`: for each exported Props type (`BadgeProps`, `SectionProps`, …), the CUSTOM
+ *     member names the component adds beyond the native HTML props (e.g. Badge → [tone]).
+ *   • `exports`: the named value exports of the package barrels (for TS2305 "no exported member").
+ * Parsed by regex from the same source `vendorFiles()` already loads — cheap, deterministic,
+ * and fail-soft: any slip yields an empty index so the formatter still renders plain diagnostics.
+ */
+let vendorApiMemo: { members: Map<string, string[]>; exports: string[] } | null = null;
+function vendorApi(): { members: Map<string, string[]>; exports: string[] } {
+  if (vendorApiMemo) return vendorApiMemo;
+  const members = new Map<string, string[]>();
+  const exportsSet = new Set<string>();
+  try {
+    for (const f of vendorFiles()) {
+      if (!/\.tsx?$/.test(f.path)) continue;
+      // `export type XProps = <native> & { a?: T; b: U };` → the custom members [a, b].
+      for (const m of f.content.matchAll(/export\s+type\s+(\w+)\s*=\s*[^{;]*\{([^}]*)\}/g)) {
+        const name = m[1];
+        const names = [...m[2].matchAll(/([A-Za-z_$][\w$]*)\s*\??\s*:/g)].map((x) => x[1]);
+        if (names.length) members.set(name, names);
+      }
+      // Named value exports from the barrels: `export { A, B, type C } from '…'`.
+      for (const m of f.content.matchAll(/export\s*\{([^}]*)\}/g)) {
+        for (const raw of m[1].split(',')) {
+          const t = raw.trim();
+          if (!t || t.startsWith('type ')) continue; // skip type-only re-exports
+          exportsSet.add(t.replace(/\s+as\s+\w+$/, ''));
+        }
+      }
+    }
+  } catch {
+    /* fail-soft — an empty index just means no member hint */
+  }
+  vendorApiMemo = { members, exports: [...exportsSet].sort() };
+  return vendorApiMemo;
+}
+
+/**
+ * A best-effort, one-line HINT appended under a diagnostic that targets a `@sovereign-os/*`
+ * symbol — turns a blind retry into a first-try fix by listing what the type ACTUALLY offers.
+ * Handles TS2339 (`Property 'variant' does not exist on type '… & BadgeProps'`), TS2305
+ * (`Module '"@sovereign-os/ui"' has no exported member 'Modal'`) and TS2322 (a bad prop value,
+ * e.g. Badge `variant`). Returns '' when it cannot name a concrete member set — never throws.
+ */
+function memberHint(d: CompileDiagnostic): string {
+  try {
+    const msg = d.message;
+    const { members, exports } = vendorApi();
+    // TS2305: no exported member — list the real named exports of the package.
+    if (d.code === 2305 && /@sovereign-os\//.test(msg) && exports.length) {
+      const bad = /member '([^']+)'/.exec(msg)?.[1];
+      return `    → @sovereign-os/ui exports: ${exports.join(', ')}${bad ? ` (no '${bad}')` : ''}`;
+    }
+    // TS2339 / TS2322: a bad prop on a vendored component. The message references a Props
+    // type either by NAME (`BadgeProps`) or by its EXPANDED literal (`… & { tone?: … }`).
+    if (d.code === 2339 || d.code === 2322) {
+      const bad = /(?:Property|property) '([^']+)'/.exec(msg)?.[1];
+      // (a) named Props type → the vendored member index.
+      const propsType = /\b(\w+Props)\b/.exec(msg)?.[1];
+      const named = propsType ? members.get(propsType) : undefined;
+      if (propsType && named) {
+        return `    → ${propsType.replace(/Props$/, '')} accepts: ${named.join(', ')}${bad ? ` (you used '${bad}')` : ''}`;
+      }
+      // (b) expanded literal in the message: pull the custom members from the LAST `{ … }`
+      //     object-type block (tsc expands `& { tone?: BadgeTone }` inline for a UI primitive).
+      const blocks = [...msg.matchAll(/\{([^{}]*)\}/g)];
+      const last = blocks.length ? blocks[blocks.length - 1][1] : '';
+      const custom = [...last.matchAll(/([A-Za-z_$][\w$]*)\s*\??\s*:/g)].map((x) => x[1]);
+      if (custom.length) {
+        return `    → accepts: ${custom.join(', ')}${bad ? ` (you used '${bad}')` : ''}`;
+      }
+    }
+  } catch {
+    /* never throw from the formatter */
+  }
+  return '';
+}
+
+/**
  * Render gate diagnostics into the CORRECTIVE, machine-actionable error text the agent
  * loop feeds back (consistent with the 0.6.54 corrective-error contract): it names each
  * file+line+code, states nothing was written, and instructs a fix-and-recommit. Kept
- * terse + deterministic so it rides in a tool result without bloating the turn.
+ * terse + deterministic so it rides in a tool result without bloating the turn. For a
+ * @sovereign-os/* symbol error (TS2339/TS2305/TS2322) it appends the type's REAL members
+ * so the fix lands on the first retry, not the fifth (best-effort; never throws).
  */
 export function formatGateError(result: Extract<CompileGateResult, { gated: true; ok: false }>): string {
   const shown = result.diagnostics;
-  const lines = shown.map(
-    (d) => `  ${d.file}:${d.line}:${d.column}  ${d.code > 0 ? `TS${d.code}` : 'bundle'}: ${d.message.split('\n')[0]}`,
-  );
+  const lines = shown.map((d) => {
+    const head = `  ${d.file}:${d.line}:${d.column}  ${d.code > 0 ? `TS${d.code}` : 'bundle'}: ${d.message.split('\n')[0]}`;
+    const hint = memberHint(d);
+    return hint ? `${head}\n${hint}` : head;
+  });
   const more = result.total > shown.length ? `\n  …and ${result.total - shown.length} more.` : '';
   return [
     `commit rejected: ${result.total} compile error${result.total === 1 ? '' : 's'} — NOTHING was written.`,

@@ -383,6 +383,29 @@ softwareRunner:
   runnerImage: "traefik/whoami:latest"   # teaching default; a built app overrides via runImage
   # ingressClass / tlsIssuer fall back to the ingress.* values (nginx / letsencrypt-prod).
 
+# Software DIRECT BUILD SERVICE (deploy redesign Phase B) — ON for STACKIT. os-ui
+# submits an in-cluster Kaniko batch/v1 Job per app commit that builds the app's
+# Dockerfile from its Forgejo git tree at the commit SHA and pushes a DIGEST-tagged
+# image the runner then serves pinned (no :latest roll dance). Flipping `enabled`
+# DORMANT / UNFINISHED — the Kaniko digest build service (Path B). Kept OFF for the
+# cohort (2026-08-11 decision): apps build+serve via the Forgejo Actions path (Path A),
+# which is PROVEN working end-to-end on this cluster (fresh app → Actions build → push
+# forgejo-http:3000/<slug>:latest → runner deploys → pod 1/1 Running).
+#
+# Path B was NEVER exercised and has a CHAIN of latent bugs found in live validation —
+# do NOT flip `enabled: true` until ALL are fixed (that's the deferred 0.6.111 wave):
+#   1. PSS — `softwareRunner.podSecurityStandard: baseline` (apps ns renders `restricted`;
+#      Kaniko needs baseline). The value is the durable lever (a manual relabel is reverted
+#      by helm). Cleaner: a dedicated build namespace at baseline, runtime ns stays restricted.
+#   2. kaniko image — needs a SHELL for the docker-config init → `…executor:vX-debug`.
+#   3. CODE fix in lib/software/build-service.ts — the -debug image's ENTRYPOINT is a shell,
+#      so the MAIN kaniko container needs `command: ["/kaniko/executor"]` (or split images).
+#   4. (likely next) registry push auth to forgejo-http:3000 from the Kaniko pod.
+# Kaniko itself is barely maintained — reconsider BuildKit/buildah when finishing Path B.
+softwareBuild:
+  enabled: false
+  namespace: agentic-apps
+
 queryTool:
   image:
     repository: ghcr.io/aborek/sovereign-os/query-tool

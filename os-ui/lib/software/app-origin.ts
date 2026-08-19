@@ -6,6 +6,7 @@ import { config } from '@/lib/core/config';
 import { isAllowedAppOrigin } from '@/lib/core/cors';
 import { getAppBySlugInternal } from '@/lib/software/apps';
 import { isGranted, type ContextKind } from '@/lib/core/context-grants';
+import { getArtifact } from '@/lib/core/artifacts';
 
 /**
  * LEAST-PRIVILEGE for APP ORIGINS. Generated apps run under the user's ambient
@@ -104,6 +105,16 @@ export function appSlugFromRequest(req: Request): string | null {
     if (slug) return slug;
   }
 
+  // TODO(appspec-grant-scope): a DECLARATIVE app served same-origin at `/apps/<slug>` is NOT
+  // matched here — its referer path is `/apps/<slug>`, not `/api/apps/runtime/<slug>` — so its
+  // governed reads skip `checkAppGrant`. The security review deemed this ACCEPTABLE (not a
+  // cross-user leak: `checkAppGrant` only NARROWS an already-RLS-scoped read; the viewer's own
+  // canView still governs). Threading `/apps/<slug>` here would add the app-grant intersection as
+  // defense-in-depth, BUT this function is a shared primitive every governed read route attributes
+  // through, and a spec app only ever reads its granted artifacts anyway — so the change is
+  // cross-cutting and low-value. Deferred deliberately: prefer not to alter a security primitive's
+  // matching across all routes in this wave. Revisit if `/apps/<slug>` ever reads UNgranted ids.
+
   return null;
 }
 
@@ -111,17 +122,57 @@ export function appSlugFromRequest(req: Request): string | null {
 export type AppGrantCheck = { allowed: boolean; reason: string };
 
 /**
- * The honest, actionable denial message naming the app + the artifact and pointing at
- * the Software tab grant flow. Shared by the single-artifact check and the route 403s.
+ * The honest, actionable denial message — it distinguishes the TWO real causes of a
+ * runtime `Forbidden` on a dataset the app references, because the fix differs:
+ *
+ *   • CASE 1 — the artifact EXISTS but is NOT granted. Name it by its REAL name —
+ *     `«Service Centers» (ds_09qqomar3y)` — and point at the grant flow. (The opaque
+ *     id alone was the confusion the owner flagged.)
+ *   • CASE 2 — the artifact does NOT exist (getArtifact ⇒ null): almost always a
+ *     DELETED dataset whose id the app hard-coded. Telling the user to "grant it" is
+ *     wrong — it isn't in the grantable list because it's gone. Say it no longer
+ *     exists and tell them to rebuild against a current dataset or restore the deleted
+ *     one.
+ *
+ * `getArtifact` runs server-side; any lookup ERROR fails soft to CASE 2's shape with
+ * the bare id (a lookup failure must never make the denial itself throw).
  */
-export function appGrantDenial(slug: string, kind: ContextKind, artifactId: string): string {
+export async function appGrantDenial(slug: string, kind: ContextKind, artifactId: string): Promise<string> {
   const noun =
     kind === 'data' ? 'dataset' :
     kind === 'metrics' ? 'metric' :
     kind === 'knowledge' ? 'knowledge item' :
     kind === 'files' ? 'file' : 'connection';
+  let name: string | null = null;
+  let resolved = false;
+  try {
+    const art = await getArtifact(artifactId);
+    resolved = true;
+    name = art?.name ?? null;
+  } catch {
+    /* lookup failed — treat as unresolved (CASE 2), bare id */
+  }
+  // CASE 2 — the artifact is gone (or unresolvable): rebuild/restore, NOT "grant it".
+  if (resolved && name === null) {
+    return (
+      `This app (${slug}) references ${noun} ${artifactId} which no longer exists ` +
+      `(it may have been deleted). Rebuild the story against ${
+        kind === 'data' ? 'a dataset' : `a ${noun}`
+      } that currently exists, or restore the deleted ${noun}.`
+    );
+  }
+  if (!resolved) {
+    return (
+      `This app (${slug}) references ${noun} ${artifactId}, which could not be resolved ` +
+      `(it may have been deleted). Rebuild the story against ${
+        kind === 'data' ? 'a dataset' : `a ${noun}`
+      } that currently exists, or restore the deleted ${noun}.`
+    );
+  }
+  // CASE 1 — exists but not granted: name it + point at the grant flow.
+  const named = name ? `«${name}» (${artifactId})` : artifactId;
   return (
-    `This app (${slug}) is not granted ${noun} ${artifactId}. ` +
+    `This app (${slug}) is not granted ${noun} ${named}. ` +
     `Grant it in the OS Software tab → ${slug} → Context.`
   );
 }
@@ -147,7 +198,7 @@ export async function checkAppGrant(
     };
   }
   if (isGranted(app.grants, kind, artifactId)) return { allowed: true, reason: '' };
-  return { allowed: false, reason: appGrantDenial(slug, kind, artifactId) };
+  return { allowed: false, reason: await appGrantDenial(slug, kind, artifactId) };
 }
 
 /**

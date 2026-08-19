@@ -9,202 +9,18 @@ import { scheduleRepairCheck } from '@/lib/software/ci-repair';
 import { getSnapshot } from '@/lib/software/snapshot';
 import { diffTrees, type FileChange } from '@/lib/software/build-changeset';
 import { runTabAgent, renderAssistantText } from '@/lib/assistant/runtime';
-import { AssistantNotConfiguredError } from '@/lib/assistant/complete';
+import { cleanTurns } from '@/lib/assistant/turns';
+import { buildRunError, buildMaxIterations, honestBuildFinalText } from '@/lib/software/build-run';
 import { toolCallToLine, gateLineFromStep, committedSummaryLine, type ActivityLine } from '@/lib/software/build-activity';
-import { asChatRunMode, isReadOnlyMode, modeDirective, modelRoleForMode, tierNote, READ_ONLY_MODE_TOOLS, type ChatRunMode } from '@/lib/software/chat-modes';
-import { defineContextBlock, specPromptLines as specLines } from '@/lib/software/define-context';
+import { asChatRunMode, isReadOnlyMode, modelRoleForMode, tierNote, READ_ONLY_MODE_TOOLS, BUILD_MODE_TOOLS, type ChatRunMode } from '@/lib/software/chat-modes';
+import { appContext } from '@/lib/software/build-brief';
+import { unresolvedDataNeedWarning } from '@/lib/software/data-plan';
 import { resolveGrantedContext } from '@/lib/software/grants-context';
 import type { BuildTarget } from '@/lib/software/build-target';
 
 export const dynamic = 'force-dynamic';
 
 type Msg = { role: 'user' | 'assistant'; content: string };
-
-/**
- * A concise, ACCURATE description of the OS-client SDK surface + the `vite-os`
- * scaffold conventions, injected into the build brief for governed frontend apps
- * (template `vite-os`). It is grounded in the REAL SDK (`lib/app-sdk/client.ts`):
- * every method below exists — do NOT let the model invent others. Data and auth
- * come from the OS over its governed routes, never a custom backend the app ships.
- */
-const OS_SDK_BRIEF = [
-  '## This app is a GOVERNED FRONTEND over the OS API (vite-os)',
-  'This is a Vite + React + TypeScript + Tailwind + shadcn/ui SPA. It has NO custom',
-  'backend and NO database of its own: all data and identity come from the Sovereign',
-  'OS over its governed, OPA-checked, RLS/DLS-filtered routes. The app reaches them',
-  'ONLY through the OS-client SDK, imported as `@sovereign-os/app-sdk`.',
-  '',
-  'Create the client once and reuse it:',
-  "  import { createOsClient } from '@sovereign-os/app-sdk';",
-  '  const os = createOsClient(); // same-origin ambient session (the preview case)',
-  '',
-  'The COMPLETE SDK method surface (use ONLY these — do not invent methods):',
-  '  os.whoami()                     -> the signed-in principal { user: {...} | null }',
-  '  os.context()                    -> granted context: { connections, data, knowledge, files, metrics }',
-  '                                     (each an array of { id, name, scope?, folder? })',
-  '  os.datasets.list()              -> datasets the user may see',
-  '  os.datasets.get(id)             -> one dataset',
-  '  os.datasets.query(id, q?)       -> q = { nl } (natural-language question, governed NL->SQL)',
-  '                                     or omit for a governed row preview ({ limit }).',
-  '                                     RAW SQL IS REFUSED (throws UnsupportedQuery).',
-  '  os.metrics.list()               -> metrics the user may see',
-  '  os.metrics.query(id, q?)        -> slice a metric: q = { dimensions?, timeDimension?, granularity?, filters? }',
-  '  os.knowledge.search(q)          -> KnowledgeHit[] from the DLS-scoped knowledge index',
-  '  os.files.list()                 -> files the user may see',
-  '  os.files.get(id)                -> one file',
-  '',
-  'Honesty + errors (from the SDK): a failed governed call throws a typed error —',
-  'NotAuthenticated (401), Forbidden (403, carries the server reason), UnsupportedQuery,',
-  'or OsError. NEVER catch these and substitute mock/placeholder data: surface the real',
-  'state (loading / empty / the error message). Real data or a real error, never a fake.',
-  '',
-  'Scaffold conventions: entry `src/main.tsx` -> `src/App.tsx`; the client factory lives',
-  'in `src/os.ts`. The OS design system is vendored as `@sovereign-os/ui` — its theme is',
-  'imported once in `src/index.css` (`@import \'@sovereign-os/ui/theme.css\'`) and the app is',
-  'wrapped in its `AppShell` with the OS primitives (Section, Card, Table, Badge). Tailwind is',
-  'still available in `src/index.css` for custom work. Build output is `dist/`, served by nginx',
-  'on port 8080. Keep imports pointing at `@sovereign-os/app-sdk` + `@sovereign-os/ui` and',
-  'follow the existing file layout.',
-].join('\n');
-
-/**
- * The per-app BUILD CHAT (Software golden path §2) — now genuinely AGENTIC. It
- * runs the shared PLAN → ACT → deploy(gated) harness scoped to the `software` MCP
- * tools: it plans with the reasoning tier, then acts with the exec tier, calling
- * the SAME governed pipeline the UI + MCP use — `commit` (scaffold + commit to
- * Forgejo → auto-MCP → CI scan), `start_preview`, and `request_deploy` (which
- * opens the Builder review gate; it never goes live on its own). THIS app's full
- * context (design decisions, data model, docs, repo, and its appId) is injected
- * so the agent builds coherently; the running conversation is persisted under the
- * app (home of record).
- */
-function appContext(
-  app: {
-    id: string;
-    name: string;
-    description?: string;
-    purpose?: string;
-    template: string;
-    subdomain: string;
-    repo: { fullName: string };
-    designDecisions: string;
-    dataDescriptions: string;
-    docs: string;
-    epics?: { id: string; title: string; stories: { id: string; title: string; asA: string; iWant: string; soThat: string; acceptance: string; spec?: { features?: string[]; nfrs?: string[]; rules?: string[] } }[] }[];
-  },
-  mode: ChatRunMode,
-  target: BuildTarget | null,
-  grantedContext: string,
-): string {
-  // Governed OS frontends: every Vite-based scaffold (vite-os, sovereign-app,
-  // website, empty) — the vendored SDK/UI brief applies to all of them.
-  const isGovernedFrontend = ['vite-os', 'sovereign-app', 'website', 'empty'].includes(app.template);
-  const isSovereignApp = app.template === 'sovereign-app';
-  const stackLine =
-    app.template === 'api-service'
-      ? 'It is an APIs-only service (zero-dependency Node HTTP server, NO user interface) that lives in its own Forgejo repo'
-      : isGovernedFrontend
-        ? 'It is a Vite + React governed OS-frontend app that lives in its own Forgejo repo'
-        : 'It is a Next.js + Supabase app that lives in its own Forgejo repo';
-  const lines = [
-    `You are the build assistant for the "${app.name}" application (appId: ${app.id}).`,
-    stackLine,
-    `(${app.repo.fullName}) and ships via Forgejo Actions → Harbor → Argo CD to`,
-    `${app.subdomain}.`,
-    // The full Define context (template + name + description + purpose) grounds every
-    // code change — features are built from what the app IS, never invented.
-    '',
-    defineContextBlock(app),
-  ];
-
-  // The REAL granted context (DLS-scoped): the granted datasets' columns, knowledge,
-  // metrics, files and connections, so generated code targets the real data plane —
-  // exact column names + metric members, never invented. Empty grants ⇒ '' (skipped).
-  if (grantedContext) lines.push('', grantedContext);
-
-  // Governed-frontend apps talk to the OS only through the OS-client SDK — teach
-  // the harness the real SDK surface + scaffold conventions so generated code is
-  // grounded (never invents methods, never fabricates data).
-  if (isGovernedFrontend) {
-    lines.push('', OS_SDK_BRIEF);
-  }
-  // The Sovereign standard app carries a skeleton contract (also in ## Docs below):
-  // keep it intact and extend it section-by-section.
-  if (isSovereignApp) {
-    lines.push(
-      '',
-      '## Sovereign standard app — skeleton contract + code structure',
-      'This app is a Sovereign standard app. Its code MIRRORS the epic/story spec:',
-      '  • src/template/ — the FIXED scaffold: OS-delegated identity (template/identity.tsx —',
-      '    no local accounts/passwords, ever), the scope helpers (template/scope.ts — every',
-      '    record carries owner + domain), roles, app-meta, the AppShell layout (template/',
-      '    shell.tsx), the section registry (template/sections.tsx) and the Admin/Overview',
-      '    pages. NEVER remove it.',
-      '  • src/core/ — overarching custom functionality + the SHARED governed data plane',
-      '    (core/store.ts — the OS SDK, NOT Supabase) and shared pages.',
-      '  • src/epics/<epic>/<story>/ — where each built story\'s feature code + its data go;',
-      '    src/epics/<epic>/general/ for epic-wide shared code.',
-      '  • src/App.tsx / src/main.tsx — THIN entrypoints ONLY (they mount the template Shell).',
-      'To add a feature: create src/epics/<epic>/<story>/<Name>.tsx and register ONE entry in',
-      'src/template/sections.tsx (nav + routing). Keep template/ intact and the entrypoints',
-      'thin. See ## Docs for the full skeleton guide and the code-structure convention.',
-    );
-  }
-
-  // The `## Mode: …` directive (plan/build/test/review) — pure, unit-tested.
-  lines.push('', ...modeDirective(mode, app.id));
-
-  // The targeted scope from the epic/story tree: a single story (the classic
-  // target), an EPIC (work its stories in order), or nothing (= whole app).
-  if (target?.kind === 'story') {
-    const epic = app.epics?.find((e) => e.id === target.epicId);
-    const st = epic?.stories.find((s) => s.id === target.storyId);
-    if (st) {
-      lines.push(
-        '',
-        '## Target story (THIS story is the scope)',
-        `EPIC: ${epic?.title || '(untitled)'}`,
-        `Story: ${st.title || '(untitled)'}`,
-        `As a ${st.asA || '…'}, I want ${st.iWant || '…'}, so that ${st.soThat || '…'}.`,
-        st.acceptance ? `Acceptance: ${st.acceptance}` : '',
-        ...specLines(st.spec),
-        'Focus this turn on exactly this story; deliver its features to spec.',
-      );
-    }
-  } else if (target?.kind === 'epic') {
-    const epic = app.epics?.find((e) => e.id === target.epicId);
-    if (epic) {
-      lines.push(
-        '',
-        '## Target EPIC (THIS epic is the scope)',
-        `EPIC: ${epic.title || '(untitled)'}`,
-        'Its stories, in order:',
-        ...epic.stories.map((s, i) => {
-          const acceptance = s.acceptance ? ` Acceptance: ${s.acceptance}` : '';
-          const spec = specLines(s.spec);
-          const specSuffix = spec.length ? ` [${spec.join(' | ')}]` : '';
-          return `${i + 1}. ${s.title || '(untitled)'} — as a ${s.asA || '…'}, I want ${s.iWant || '…'}, so that ${s.soThat || '…'}.${acceptance}${specSuffix}`;
-        }),
-        mode === 'build'
-          ? 'Work the stories IN ORDER, each to its acceptance criteria; state clearly which you delivered this turn.'
-          : 'Cover every story of this EPIC in your response.',
-      );
-    }
-  }
-
-  lines.push(
-    '',
-    '## Design decisions',
-    app.designDecisions || '(none yet)',
-    '',
-    '## Data descriptions',
-    app.dataDescriptions || '(none yet)',
-    '',
-    '## Docs',
-    app.docs || '(none yet)',
-  );
-  return lines.join('\n');
-}
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   let user;
@@ -243,10 +59,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return NextResponse.json({ error: (e as Error).message }, { status: (e as { status?: number }).status ?? 404 });
   }
 
-  const clean = messages
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
-    .slice(-20)
-    .map((m) => ({ role: m.role, content: m.content.trim() }));
+  const clean = cleanTurns(messages);
   if (clean.length === 0) return NextResponse.json({ error: 'No message to send' }, { status: 400 });
 
   // Snapshot the app's committed tree BEFORE the run so we can surface the exact
@@ -256,10 +69,16 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   // Resolve the app's granted context ONCE (async, DLS-scoped as the caller) before the
   // streamed run, so the build agent gets the real data plane it was granted. Empty ⇒ ''.
   const grantedContext = await resolveGrantedContext(app.grants, user);
-  // Per-stage MODEL TIER (Software tab policy): plan (Design) / test / review run on the
-  // REASONING model — the spec-drafting, verification and review reasoning; build (code
-  // GENERATION) runs on STANDARD — the standard model does the bulk file writing and is
-  // NEVER auto-escalated to reasoning. See lib/software/chat-modes.ts modelRoleForMode.
+  // DATA-RESOLUTION GATE (0.6.101): if the app has ZERO granted datasets yet a story implies
+  // a data need, warn LOUDLY + up front in the brief so the build agent stops with an honest,
+  // actionable message ("resolve it in Design") instead of the cryptic empty commit. A warning,
+  // not a hard block — the signal is conservative, so a good build is never rejected on it.
+  const dataNeedWarning = unresolvedDataNeedWarning(app.epics ?? [], app.grants.data.length);
+  // MODEL TIER (Software tab policy, 0.6.107): EVERY stage — plan (Design), Build (code
+  // GENERATION), test and review — runs on the REASONING model. `modelRoleForMode` returns
+  // 'reasoning' for all modes; this is now PASSED to runTabAgent (previously computed but
+  // dropped, so the build silently ran on the platform assistant/standard model — the
+  // "why is a basic feature so hard to build" root cause). See lib/software/chat-modes.ts.
   const model = roleModel(modelRoleForMode(mode));
 
   /**
@@ -292,35 +111,44 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       // persistence + backward-compat.
       let finalText = '';
       let changes: FileChange[] = [];
-      // The tier this turn ran on for the UI note — starts at the mode's tier and is
-      // upgraded to reasoning if a bounded escalation fires (honestly reflected).
-      let ranRole = modelRoleForMode(mode);
+      // The tier this turn ran on for the UI note — the mode's tier (reasoning for
+      // every Software stage), which is what the run actually executes on now.
+      const ranRole = modelRoleForMode(mode);
       try {
         const result = await runTabAgent({
           user,
           tab: 'software',
           messages: clean,
-          extraContext: appContext(app, mode, target, grantedContext),
+          extraContext:
+            appContext(app, mode, target, grantedContext) +
+            (dataNeedWarning ? `\n\n## Unresolved data need (RESOLVE IN DESIGN FIRST)\n${dataNeedWarning}` : ''),
           // This run is scoped to THIS app: bind its appId into every tool call so the
           // model never has to repeat it (an omitted/empty id is filled in, not 404'd —
           // the `commit({})` → not_found fix) and a mismatched id is rejected loudly.
           boundArgs: { appId: app.id },
-          // Plan/test/review are read-only — enforced by the harness, not just the prompt.
-          toolNames: isReadOnlyMode(mode) ? READ_ONLY_MODE_TOOLS : undefined,
-          // BUILD only: if the STANDARD tier cannot complete its commit (a repeated
-          // tool-shape error), retry ONCE on the reasoning model — bounded, labelled.
-          escalateActModel: mode === 'build' ? roleModel('reasoning') : undefined,
-          onEscalate: ({ tool }) => {
-            ranRole = 'reasoning';
-            send({
-              type: 'activity',
-              line: {
-                tool,
-                text: `standard model could not complete the ${tool} — retrying once on the reasoning model`,
-                isError: false,
-              },
-            });
-          },
+          // EVERY stage (incl. Build code-generation) runs on the reasoning tier. Passing
+          // it here is the fix: runTabAgent used to ignore the computed tier and run on the
+          // platform assistant/standard model. No standard→reasoning escalation is needed
+          // now — the run already starts on the strongest tier.
+          model,
+          // TOOL ALLOWLIST per mode (harness-enforced, not just prompted):
+          //  • plan/test/review — READ_ONLY_MODE_TOOLS (no write).
+          //  • build — BUILD_MODE_TOOLS: WRITE-ONLY (orientation + `commit`), no data
+          //    discovery/query/design. Context is bound/created in Choose Context and frozen
+          //    into the injected schema; the extra data tools only confused the build (0.6.108).
+          //  • any other writable mode — undefined (full surface).
+          toolNames: isReadOnlyMode(mode) ? READ_ONLY_MODE_TOOLS : mode === 'build' ? BUILD_MODE_TOOLS : undefined,
+          // BUILD-LOOP GUARD (0.6.115): a `commit` that fails the compile gate must never
+          // re-run byte-identically. Passing the write tool here makes the harness short-
+          // circuit an identical failed re-commit with a stronger corrective note (stops
+          // the observed loop at n=1). Only build writes, so only build arms the guard.
+          writeToolNames: mode === 'build' ? ['commit'] : undefined,
+          // ITERATION BUDGET (0.6.110): BUILD gets a real tool-call-round budget
+          // (softwareBuildMaxSteps, default 24) — a build needs many steps (orient →
+          // get_dataset → several compile-checked commits). Passing nothing let runAgentic
+          // fall back to its bare DEFAULT_MAX_ITERATIONS (6), so a real build ran out of
+          // steps mid-way. Read-only modes stay on the default (undefined ⇒ short + read-only).
+          maxIterations: buildMaxIterations(mode),
           onPlan: (plan) => send({ type: 'plan', text: plan }),
           onStep: (step) => {
             // The verify-before-commit COMPILE GATE runs inside commitToApp, so it is
@@ -338,6 +166,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
         finalText = result.finalText;
         // Diff the committed tree after the run (build mode only ever writes).
         if (mode === 'build') changes = diffTrees(before, getSnapshot(app.id));
+        // EMPTY-CHANGESET HONESTY (0.6.115): a build turn that committed 0 files did NOT
+        // land — prefix the bubble text authoritatively so the UI can't render a green
+        // success over an empty changeset (no false "done" on a no-op build).
+        finalText = honestBuildFinalText(mode, changes.length, finalText);
         // A closing activity line summarizing the real committed changeset.
         const summary = mode === 'build' ? committedSummaryLine(app.name, changes) : null;
         if (summary) send({ type: 'activity', line: { tool: 'commit', text: summary, isError: false } });
@@ -349,14 +181,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
           scheduleRepairCheck(app.id);
         }
       } catch (e) {
-        if (e instanceof AssistantNotConfiguredError) {
-          content = `(${e.message})`;
-        } else {
-          content =
-            (e as Error).name === 'AbortError'
-              ? '(the build assistant is still warming up — the model did not respond in time. Your message is saved; send it again in a few seconds.)'
-              : '(build assistant offline — LiteLLM unreachable. Your message is saved under the app; the design decisions and data model are captured on this page.)';
-        }
+        // HONEST failure (0.6.110): route the thrown error through the typed classifier
+        // instead of blanket-labelling every non-abort exception "LiteLLM unreachable".
+        // A model 400, a tool/compile/repo error now surfaces its REAL message; only a
+        // genuine gateway outage says unreachable. Client-abort stays silent (no error
+        // event). See lib/software/build-run.ts.
+        const { content: errContent, errorMessage } = buildRunError(e);
+        content = errContent;
+        if (errorMessage) send({ type: 'error', message: errorMessage });
       }
 
       // Persist the running conversation under the app (home of record).

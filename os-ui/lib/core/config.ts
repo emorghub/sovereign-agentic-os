@@ -63,6 +63,14 @@ export function parseModelPrices(raw: string): Record<string, ModelPrice> {
   }
 }
 
+/**
+ * The insecure placeholder secret shipped for local dev / clone-and-run. It is
+ * the fallback for OS_SESSION_SECRET and OS_MCP_TOKEN_SECRET. A boot-time guard
+ * (`assertNoDevDefaultSecretsInProd`) REFUSES to start with this value under
+ * NODE_ENV=production — see below.
+ */
+export const DEV_DEFAULT_SECRET = 'dev-only-insecure-session-secret-change-me-in-prod';
+
 export const config = {
   // sample-agent (LangGraph RAG): GET {SAMPLE_AGENT_URL}/ask?q=...
   sampleAgentUrl: base(env('SAMPLE_AGENT_URL', 'http://sample-agent:8000')),
@@ -186,6 +194,10 @@ export const config = {
   // the offline tree, before/after changesets and repo-heal restore FULL source.
   // Degrades to the in-process snapshot when OpenSearch is off.
   appFilesIndex: env('APP_FILES_INDEX', 'os-app-files'),
+  // App-RECORDS index (Software golden path — the app's OWN write data). Durable
+  // mirror of an OS-built app's `os.records.*` writes, so a static SPA (no backend
+  // of its own) still persists records; degrades to in-memory when OpenSearch is off.
+  appRecordsIndex: env('APP_RECORDS_INDEX', 'os-app-records'),
   // Dataset registry index (Data tab). Best-effort durable mirror of the
   // in-process dataset store so seeded datasets/metrics survive an os-ui restart;
   // degrades to in-memory when OpenSearch is off.
@@ -218,18 +230,12 @@ export const config = {
   // seeded users { id, name, password, domain, role }. OS_SESSION_SECRET signs
   // the session cookie (HMAC-SHA256). Both are server-only. Replace this whole
   // block with Ory (Kratos/Hydra) later without touching the consumers. -------
-  sessionSecret: env(
-    'OS_SESSION_SECRET',
-    'dev-only-insecure-session-secret-change-me-in-prod',
-  ),
+  sessionSecret: env('OS_SESSION_SECRET', DEV_DEFAULT_SECRET),
   usersSeed: env('OS_USERS', ''),
   // Signs the per-user bearer token for the remote MCP endpoint (/api/mcp).
   // Server-only. Falls back to the session secret so the endpoint works out of
   // the box; set OS_MCP_TOKEN_SECRET in prod to rotate MCP tokens independently.
-  mcpTokenSecret: env(
-    'OS_MCP_TOKEN_SECRET',
-    env('OS_SESSION_SECRET', 'dev-only-insecure-session-secret-change-me-in-prod'),
-  ),
+  mcpTokenSecret: env('OS_MCP_TOKEN_SECRET', env('OS_SESSION_SECRET', DEV_DEFAULT_SECRET)),
 
   // ---- Outbound email (OPTIONAL). Transactional mail (email verification today;
   // user invites later) goes through a small, dependency-free PLUGGABLE mailer
@@ -290,6 +296,13 @@ export const config = {
   softwareBuildEnabled: env('SOFTWARE_BUILD_SERVICE', '') === 'true',
   softwareBuildNamespace: env('SOFTWARE_BUILD_NAMESPACE', 'agentic-apps'),
   kanikoImage: env('KANIKO_IMAGE', 'gcr.io/kaniko-project/executor:v1.23.2'),
+  // Software BUILD chat: max PLAN→ACT tool-call rounds for a build turn (only). A
+  // build legitimately needs many steps (orient → get_dataset → several commits, each
+  // re-parsed + compile-checked), yet the chat route passed no cap, so runAgentic used
+  // its bare DEFAULT_MAX_ITERATIONS (6) and a real build ran out of steps mid-way. 24
+  // gives it room while staying bounded — the token/budget caps in runAgentic still
+  // apply. Read-only modes (plan/test/review) keep the default (short + read-only).
+  softwareBuildMaxSteps: Number(env('SOFTWARE_BUILD_MAX_STEPS', '')) || 24,
 
   // Hermes autonomous runtime (Layer 1, opt-in). GATED OFF by default — the chart
   // sets HERMES_ENABLED=true only when `hermes.enabled` is on (never in base/kind).
@@ -643,3 +656,42 @@ export const config = {
 } as const;
 
 export type AppConfig = typeof config;
+
+/**
+ * Boot-time FAIL-CLOSED guard: under a real production runtime the platform must
+ * NOT come up signing sessions / MCP tokens with the shipped dev placeholder
+ * secret — that would let anyone forge a session cookie.
+ *
+ * IMPORTANT: this is keyed on `NODE_ENV === 'production'`, NOT on
+ * `config.deploymentProfile`. The live deploy runs `OS_PROFILE=local` yet with
+ * `NODE_ENV=production` (Next.js production build), so a profile-keyed guard would
+ * be inert exactly where it matters. Live env carries REAL secrets, so this never
+ * crashes prod; local dev (NODE_ENV!=='production') keeps the convenient default.
+ *
+ * Exported for direct unit testing; also invoked once at module load below.
+ */
+export function assertNoDevDefaultSecretsInProd(cfg: {
+  sessionSecret: string;
+  mcpTokenSecret: string;
+}): void {
+  if (process.env.NODE_ENV !== 'production') return;
+  // `next build` evaluates server modules with NODE_ENV=production but does NOT
+  // need a runtime secret; only the running server does. Skip the build phase so
+  // a secret-less CI build still succeeds — the guard fires at real boot.
+  if (process.env.NEXT_PHASE === 'phase-production-build') return;
+  const offenders: string[] = [];
+  if (cfg.sessionSecret === DEV_DEFAULT_SECRET) offenders.push('OS_SESSION_SECRET');
+  if (cfg.mcpTokenSecret === DEV_DEFAULT_SECRET) offenders.push('OS_MCP_TOKEN_SECRET');
+  if (offenders.length > 0) {
+    throw new Error(
+      `Refusing to boot in production with the insecure dev-default secret for: ${offenders.join(', ')}. ` +
+        'Set a strong, unique value for each (these sign session cookies + MCP tokens).',
+    );
+  }
+}
+// NOTE: the boot assertion is invoked from `instrumentation.ts` `register()` (real
+// server start, nodejs runtime only) — NOT here at module load. Running it at module
+// load also fires during `next build` static prerender (where there is no runtime
+// secret) and inside edge middleware; with an app-level error boundary present, that
+// build-time throw gets BAKED into the prerendered page and can't be cleared by
+// rotating the runtime secret. `register()` runs only when the server actually boots.

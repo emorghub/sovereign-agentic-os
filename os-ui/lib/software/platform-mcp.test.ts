@@ -83,6 +83,20 @@ test('DEVELOPER MODE: commit is role-gated to builder/admin AND labelled — a C
   assert.match(commit?.description ?? '', /BYPASS/i);
 });
 
+test('build_software description carries the vendored-API + done-is-facts guardrails (MCP parity)', () => {
+  const build = PLATFORM_MCP_TOOLS.find((t) => t.name === 'build_software')?.description ?? '';
+  // Vendored-API landmine: no router, page never renders AppShell.
+  assert.match(build, /react-router-dom/, 'names the banned router import');
+  assert.match(build, /NEVER renders `<AppShell>`/i, 'forbids AppShell in a page');
+  assert.match(build, /Overview\.tsx/, 'points at the example page to mirror');
+  // Done = facts, not spec.
+  assert.match(build, /"DONE" = status:'done' AND committed files/i, 'done is grounded in facts');
+  assert.match(build, /already implemented/i, 'names the false "already implemented" refusal');
+  // Roles: roleAtLeast floor, not exact-match.
+  assert.match(build, /roleAtLeast\(user\.role/, 'gates with the roleAtLeast floor helper');
+  assert.match(build, /role === 'admin'/, 'names the exact-match anti-pattern to avoid');
+});
+
 test('commit with NO appId returns a corrective 400 (not a confusing not_found)', async () => {
   // The build agent (standard model) emitted `commit({})` live — empty args. Without a
   // guard this reached the store as a lookup for an empty id and answered `not_found:
@@ -152,4 +166,42 @@ test('TEST: verify_software returns the 5-dimension directive + normalizes findi
   assert.equal(res.refinements.length, 1);
   assert.equal(res.refinements[0].storyId, 's1');
   assert.equal(res.refinements[0].dimension, 'ux');
+});
+
+// -------------------------------- advertised templates + src/ framing (0.6.115 A5) --
+
+test('build_software description: uses the Vite src/ layout, never "app/ stays thin" (A5)', () => {
+  const build = PLATFORM_MCP_TOOLS.find((t) => t.name === 'build_software');
+  assert.ok(build, 'build_software tool exists');
+  assert.match(build!.description, /src\/epics\/<epic>\/<story>\//, 'story code goes under src/epics/');
+  assert.match(build!.description, /src\/App\.tsx\/main\.tsx stay thin/, 'entrypoints framing, not app/');
+  assert.doesNotMatch(build!.description, /app\/ stays thin/, 'no stale "app/ stays thin"');
+});
+
+test('create_software description: does NOT advertise the non-existent nextjs-supabase template (A5)', () => {
+  const create = PLATFORM_MCP_TOOLS.find((t) => t.name === 'create_software');
+  assert.ok(create, 'create_software tool exists');
+  assert.doesNotMatch(create!.description, /nextjs-supabase/, 'nextjs-supabase not advertised');
+  assert.match(create!.description, /sovereign-app/, 'still advertises the real default');
+});
+
+// -------------------------------- declarative-first framing (0.6.136) --------------
+
+test('create_software description: is DECLARATIVE-FIRST — spec is the default, code is the gated advanced path', () => {
+  const create = PLATFORM_MCP_TOOLS.find((t) => t.name === 'create_software')?.description ?? '';
+  assert.match(create, /DEFAULT `kind: 'spec'`/, "spec is named the default kind");
+  assert.match(create, /DISABLED by default/i, 'the coded path is called out as disabled by default');
+  assert.match(create, /platform admin/i, 'coded is platform-admin-gated');
+});
+
+test('set_app_spec description: enumerates BOTH pattern shelves + theme/functions/custom + author=publish', () => {
+  const spec = PLATFORM_MCP_TOOLS.find((t) => t.name === 'set_app_spec')?.description ?? '';
+  // VIEW shelf (more than the old 4) + INTERACTIVE shelf, sourced from patterns.ts.
+  assert.match(spec, /records-table/, 'view pattern listed');
+  assert.match(spec, /chart-explorer/, 'a non-flagship VIEW pattern is now listed');
+  assert.match(spec, /approval-queue/, 'an INTERACTIVE pattern is listed');
+  assert.match(spec, /theme/, 'app-wide theme.css mentioned');
+  assert.match(spec, /functions/, 'governed DSL functions mentioned');
+  assert.match(spec, /custom/i, 'the sandboxed custom block is mentioned');
+  assert.match(spec, /author = PUBLISH|snapshots a version/i, 'author = versioned publish');
 });

@@ -19,6 +19,9 @@ import BuilderModeToggle from '@/components/core/BuilderModeToggle';
 import StageAssistantChat from '@/components/core/StageAssistantChat';
 import SoftwareContextGrants from './SoftwareContextGrants';
 import BuildChat, { type FileChange } from './BuildChat';
+import AppSpecComposer, { type ComposerApp } from './appspec/AppSpecComposer';
+import VersionHistory from '@/components/lifecycle/VersionHistory';
+import type { AppSpec as AppSpecValue } from '@/lib/software/appspec/schema';
 import type { ViewMode } from '@/lib/core/view-mode';
 import {
   contextAccessCap,
@@ -26,15 +29,18 @@ import {
   type ContextGrants as ContextGrantsValue,
   type ContextKind,
 } from '@/lib/core/context-grants';
+import { normalizeAgentGrants, type AppAgentGrant } from '@/lib/software/app-agent-grants';
 import {
   applyPurposeSuggestion,
   applyGrantsSuggestion,
   applyEpicsSuggestion,
   applyStoriesSuggestion,
+  applyEpicRequirementsSuggestion,
   applySpecSuggestion,
   type SuggestedGrant,
   type SuggestedEpic,
   type SuggestedStoriesForEpic,
+  type SuggestedEpicRequirements,
   type RawImprovementSuggestion,
 } from '@/lib/software/assistant-suggestions';
 import {
@@ -48,6 +54,7 @@ import {
   refinementsToBuild,
   type Improvement,
 } from '@/lib/software/improvements';
+import DataPlanPanel from './DataPlanPanel';
 import RefinementList, { type RefineHandlers } from './RefinementList';
 import { buildableBatch } from './refinement-view';
 import StageConversation from '@/components/core/StageConversation';
@@ -55,7 +62,7 @@ import { initialStageState, canEnter, isSatisfied, markDone, type StageState } f
 import { anchorAttr, ANCHORS } from '@/lib/tutorials';
 import { buildStatusRail } from '@/lib/software/build-activity';
 import { type BuildTarget } from '@/lib/software/build-target';
-import { everyStoryHasSpec, specHasContent, type StorySpec } from '@/lib/software/story-spec';
+import { everyStoryHasSpec, specHasContent, storiesMissingSpec, designLadder, type StorySpec } from '@/lib/software/story-spec';
 import {
   BUILD_BATCH_CAP,
   pruneSelection,
@@ -64,6 +71,7 @@ import {
   toggleGroup as toggleGroupSel,
 } from '@/lib/software/build-selection';
 import { defineContextNote } from '@/lib/software/define-context';
+import { unresolvedDataNeedWarning } from '@/lib/software/data-plan';
 import { modelRoleForMode, tierNote } from '@/lib/software/chat-modes';
 import TeamPanel from '@/app/(build)/software/TeamPanel';
 import DesignEpicDetail from './DesignEpicDetail';
@@ -97,12 +105,21 @@ export type SoftwareApp = {
   purpose: string;
   epics: Epic[];
   grants: ContextGrantsValue;
+  /** The sixth Choose-Context type (Phase 4b): granted agents (their own list). Legacy apps load `[]`. */
+  agents?: AppAgentGrant[];
   owner: string;
   domain: string;
   visibility: Visibility;
   mode: 'live' | 'offline';
-  /** Phase D: 'image' (default) served by a per-app image, or 'runtime' served by the OS. */
-  serveMode?: 'image' | 'runtime';
+  /**
+   * How the app is served: 'image' (default, per-app image), 'runtime' (OS bundles the tree), or
+   * 'spec' (AppSpec Phase 4 — the OS renders a declarative spec same-origin, no code/pod).
+   */
+  serveMode?: 'image' | 'runtime' | 'spec';
+  /** The declarative AppSpec (present only for a spec app) — the LIVE, published spec the OS serves. */
+  spec?: AppSpecValue;
+  /** The AUTOSAVED candidate spec (os-ui 0.6.135) — what the composer edits; Publish promotes it to `spec`. */
+  draftSpec?: AppSpecValue;
   repo: { fullName: string; htmlUrl: string; seeded: string[] };
   subdomain: string;
   pipeline: Record<string, string>;
@@ -123,6 +140,8 @@ export type SoftwareApp = {
 type Connection = { id: string; name: string; principal: string; visibility: Visibility; tools: Tool[] } | null;
 
 const MODE_KEY = 'software.viewMode';
+/** The Build-stage Simple⇄Developer split for a declarative (spec) app — its own persisted key. */
+const SPEC_BUILD_MODE_KEY = 'software.specBuildMode';
 /** A stable empty selection set (Design passes this — it has no build-select). */
 const EMPTY_SET: ReadonlySet<string> = new Set<string>();
 /** The context kinds the Software Define stage offers. */
@@ -194,6 +213,11 @@ export default function SoftwareBuilder({
   const [toolOut, setToolOut] = useState('');
   const [toolNote, setToolNote] = useState('');
   const [confirmDemote, setConfirmDemote] = useState(false);
+
+  // A DECLARATIVE (spec) app has no code files, so it has no top-level code/Developer
+  // view — only the staged flow (Define→Design→Context→Build→Test&Publish). Used to
+  // hide the top-level BuilderModeToggle + DeveloperSurface for spec apps (os-ui 0.6.139).
+  const isSpecApp = app.serveMode === 'spec';
 
   // Simple ⇄ Developer view mode (persisted per user, defaults to Simple).
   const [viewMode, setViewMode] = useState<ViewMode>('simple');
@@ -316,18 +340,36 @@ export default function SoftwareBuilder({
   // Real app state, defaulted for backward-compat (pre-Define/Design apps).
   const epics = app.epics ?? [];
   const grants = useMemo(() => normalizeContextGrants(app.grants), [app.grants]);
+  const agentGrants = useMemo(() => normalizeAgentGrants(app.agents), [app.agents]);
 
   // The live ctx the stage gates/✓ read — REAL app state, never faked.
   const committed = app.pipeline.forgejo === 'ok' || app.repo.seeded.length > 0;
+  // Choose Context is RESOLVED when no data-needing story is left ungrounded — i.e. the
+  // 0.6.101 build-gate warning is empty (a dataset is bound, or no story implies a data
+  // need). This is the SAME honest signal Build reads, so the gate and the stage agree.
+  const contextResolved = unresolvedDataNeedWarning(epics, grants.data.length) === '';
+  // At least one story is ACTUALLY BUILT — real code committed for it (status `done`, set
+  // by a successful build commit, never by hand). The Test & Publish entry gate.
+  const anyStoryBuilt = epics.some((e) => (e.stories ?? []).some((s) => s.status === 'done'));
   const ctx: SwCtx = {
     named: !!app.name.trim(),
     hasPurpose: !!(app.purpose ?? '').trim(),
     hasDesign: epics.some((e) => (e.stories?.length ?? 0) > 0),
     designSpecComplete: everyStoryHasSpec(epics),
+    contextResolved,
     committed,
+    anyStoryBuilt,
     previewed: !!app.deploy.previewUrl || previewAck,
     deployed: app.deploy.releases > 0,
     live: app.deploy.state === 'live',
+    // Declarative (no-code) apps map their data INSIDE the composer, so Build isn't
+    // hard-gated on Choose Context the way a coded app is (a form-only app needs no dataset).
+    isSpec: app.serveMode === 'spec',
+    // A spec app reaches Test & Publish the moment a draft OR a live spec exists (os-ui 0.6.135) —
+    // it never sets the code-app `anyStoryBuilt` signal, so this is its stage-entry gate.
+    hasDraftOrSpec: !!(app.draftSpec || app.spec),
+    // A spec app has PUBLISHED once a LIVE spec exists (the spec-app equivalent of `live`).
+    specPublished: !!app.spec,
   };
 
   // Open on the FIRST INCOMPLETE stage that is reachable — a fresh app lands on
@@ -338,7 +380,7 @@ export default function SoftwareBuilder({
     return firstIncomplete ? { ...base, current: firstIncomplete.id } : base;
   });
 
-  async function saveDesign(patch: { purpose?: string; epics?: Epic[]; grants?: ContextGrantsValue }): Promise<void> {
+  async function saveDesign(patch: { purpose?: string; epics?: Epic[]; grants?: ContextGrantsValue; agents?: AppAgentGrant[] }): Promise<void> {
     setMsg('');
     try {
       const res = await fetch(`/api/apps/${app.id}`, {
@@ -540,7 +582,9 @@ export default function SoftwareBuilder({
   // can never disagree. A live/serving app shows all upstream stages complete;
   // a real failure surfaces the same marked stage in both surfaces.
   const pipe = useMemo(
-    () => derivePipelineView(app.pipeline, { state: app.deploy.state, releases: app.deploy.releases, serveMode: app.serveMode }),
+    // A declarative (spec) app has no image/runtime pipeline; pass undefined so the view falls back
+    // to the plain pipeline reflection rather than the image/runtime-specific derivations.
+    () => derivePipelineView(app.pipeline, { state: app.deploy.state, releases: app.deploy.releases, serveMode: app.serveMode === 'spec' ? undefined : app.serveMode }),
     [app.pipeline, app.deploy.state, app.deploy.releases, app.serveMode],
   );
 
@@ -563,11 +607,18 @@ export default function SoftwareBuilder({
           {app.mode === 'offline' ? <span className="badge muted">git not ready</span> : null}
         </div>
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <BuilderModeToggle
-            mode={viewMode}
-            onChange={setModePersisted}
-            developerHint="The raw app files + build/deploy console"
-          />
+          {/* The top-level Simple⇄Developer toggle drives the RAW CODE-FILES view
+              (DeveloperSurface). A declarative (spec) app has no code files, so that
+              view is meaningless and confusing — for spec apps the ONLY "Developer"
+              surface is the Build-stage manual composer. Hide the top-level toggle
+              (and its code view below) for spec apps; keep it for coded apps. */}
+          {!isSpecApp ? (
+            <BuilderModeToggle
+              mode={viewMode}
+              onChange={setModePersisted}
+              developerHint="The raw app files + build/deploy console"
+            />
+          ) : null}
           {canEdit ? (
             <button
               className="btn sm"
@@ -595,12 +646,21 @@ export default function SoftwareBuilder({
               compact
             />
           ) : null}
+          {/* When the app is PUBLISHED (a live spec exists), always offer an obvious way
+              to open the running app — no matter which stage you're on (os-ui 0.6.139). */}
+          {isSpecApp && app.spec ? (
+            <a className="btn sm" href={`/apps/${app.slug}`} target="_blank" rel="noreferrer" title="Open the running app in a new tab">
+              Open app ↗
+            </a>
+          ) : null}
           <Link className="sw-quiet-link" href="/software">All software</Link>
         </div>
       </div>
       {app.description ? <p className="sw-app-lead">{app.description}</p> : null}
 
-      {viewMode === 'developer' ? (
+      {/* Coded apps only: the top-level Developer view is the raw code-files surface.
+          Spec apps never reach it (the toggle is hidden) and always render the staged flow. */}
+      {!isSpecApp && viewMode === 'developer' ? (
         <DeveloperSurface app={app} canEditCode={canEditCode} deployMsg={deployMsg} toolOut={toolOut} msg={msg} />
       ) : (
         <StageShell
@@ -609,14 +669,16 @@ export default function SoftwareBuilder({
           ctx={ctx}
           onState={setStage}
           ariaLabel="Software stages"
+          // A declarative (spec) Build stage owns its OWN "Test & Publish →" affordance
+          // (SpecBuildStage), so suppress the shell footer's duplicate next-button there
+          // (os-ui 0.6.138 — the double Test & Publish button). Coded apps keep the footer.
+          hideNextFor={app.serveMode === 'spec' ? ['build'] : undefined}
         >
           {stage.current === 'define' ? (
             <DefineStage
               app={app}
-              grants={grants}
               canEdit={canEdit}
               onSavePurpose={(purpose) => saveDesign({ purpose })}
-              onSaveGrants={(g) => saveDesign({ grants: g })}
             />
           ) : null}
 
@@ -624,58 +686,84 @@ export default function SoftwareBuilder({
             <DesignStage
               app={app} epics={epics} canEdit={canEdit} onSave={(next) => saveDesign({ epics: next })} onReload={onReload}
               refinements={improvements} refineHandlers={refineHandlers} storyTitleOf={storyTitleOf}
+              onGoContext={canEnter(SW_STAGES, 'context', ctx) ? () => setStage((s) => ({ ...s, current: 'context' })) : undefined}
+            />
+          ) : null}
+
+          {stage.current === 'context' ? (
+            <ContextStage
+              app={app} epics={epics} grants={grants} agentGrants={agentGrants} canEdit={canEdit}
+              contextResolved={contextResolved}
+              onSaveGrants={(g) => saveDesign({ grants: g })}
+              onSaveAgents={(a) => saveDesign({ agents: a })}
+              onReload={onReload}
+              onGoBuild={canEnter(SW_STAGES, 'build', ctx) ? () => setStage((s) => ({ ...s, current: 'build' })) : undefined}
+              onGoDesign={() => setStage((s) => ({ ...s, current: 'design' }))}
             />
           ) : null}
 
           {stage.current === 'build' ? (
-            <BuildStage
-              app={app} epics={epics} canEditCode={canEditCode} onBuilt={onReload}
-              target={target} setTarget={setTarget}
-              onSaveEpics={canEdit ? (next) => saveDesign({ epics: next }) : undefined}
-              onGoDesign={() => setStage((s) => ({ ...s, current: 'design' }))}
-              improvements={improvements}
-              refineHandlers={refineHandlers}
-              storyTitleOf={storyTitleOf}
-            />
+            app.serveMode === 'spec' ? (
+              // DECLARATIVE app — the Build stage is a no-code COMPOSE editor (pattern-first
+              // authoring + live preview + governed save) instead of the code-build chat.
+              <SpecBuildStage app={app} epics={epics} user={user} onSaved={onReload} onGoContext={() => setStage((s) => ({ ...s, current: 'context' }))} onGoPublish={() => setStage((s) => ({ ...s, current: 'publish' }))} />
+            ) : (
+              <BuildStage
+                app={app} epics={epics} canEditCode={canEditCode} onBuilt={onReload}
+                target={target} setTarget={setTarget}
+                onSaveEpics={canEdit ? (next) => saveDesign({ epics: next }) : undefined}
+                onGoDesign={() => setStage((s) => ({ ...s, current: 'design' }))}
+                improvements={improvements}
+                refineHandlers={refineHandlers}
+                storyTitleOf={storyTitleOf}
+              />
+            )
           ) : null}
 
-          {stage.current === 'test' ? (
-            <TestStage
-              app={app} epics={epics} surface={surface} pipe={pipe}
-              busy={busy} onPreview={() => deployAction('preview')}
-              deployMsg={deployMsg}
-              offlineAck={previewAck} onOfflineAck={() => { setPreviewAck(true); setStage((s) => markDone(s, 'test')); }}
-              connTools={connection?.tools ?? app.mcpTools}
-              improvements={improvements}
-              onAddImprovements={addImprovements}
-              onGoBuild={() => setStage((s) => ({ ...s, current: 'build' }))}
-              onGoDesign={() => setStage((s) => ({ ...s, current: 'design' }))}
-              refineHandlers={refineHandlers}
-              storyTitleOf={storyTitleOf}
-            />
+          {/* Test & Publish — the MERGED stage: the Test verification + live-pod surface
+              above the governed Publish / deploy / go-live controls. Both flows kept intact.
+              A DECLARATIVE (spec) app takes the dedicated Publish surface instead (os-ui 0.6.135):
+              Publish promotes the autosaved draft to live + snapshots a version — no pods/repo. */}
+          {stage.current === 'publish' && app.serveMode === 'spec' ? (
+            <SpecPublishStage app={app} user={user} onReload={onReload} onGoBuild={() => setStage((s) => ({ ...s, current: 'build' }))} />
           ) : null}
-
-          {stage.current === 'publish' ? (
-            <PublishStage
-              app={app} surface={surface} user={user} pipe={pipe}
-              connTools={connection?.tools ?? app.mcpTools}
-              reviewCard={reviewCard}
-              publishLabel={publishLabel} publishDisabled={publishDisabled} inReview={inReview}
-              onPublish={() => deployAction()} deployMsg={deployMsg}
-              toolOut={toolOut} toolNote={toolNote} onCallTool={callTool}
-              onOpenRepo={() => {
-                // Open the EXTERNAL browsable repo URL directly — Forgejo's console is a
-                // full app whose root-relative assets/redirects break inside the embedding
-                // proxy (the 404 the user hit). The htmlUrl is now the external host.
-                if (app.repo.htmlUrl) window.open(app.repo.htmlUrl, '_blank', 'noreferrer');
-                else if (app.repo.fullName) openTool('forgejo', `${app.name} · repo`, app.repo.fullName);
-              }}
-              canPromoteUI={canPromoteUI} onPromote={promote}
-              canDemoteUI={canDemoteUI} demoteLabel={demoteLabel} confirmDemoteLabel={confirmDemoteLabel}
-              confirmDemote={confirmDemote} setConfirmDemote={setConfirmDemote} onDemote={demote}
-              busy={busy} onLifecycle={lifecycle} msg={msg} onHealRepo={healRepo}
-              canEdit={canEdit} onSetServeMode={setServeMode}
-            />
+          {stage.current === 'publish' && app.serveMode !== 'spec' ? (
+            <>
+              <TestStage
+                app={app} epics={epics} surface={surface} pipe={pipe}
+                busy={busy} onPreview={() => deployAction('preview')}
+                deployMsg={deployMsg}
+                offlineAck={previewAck} onOfflineAck={() => { setPreviewAck(true); setStage((s) => markDone(s, 'publish')); }}
+                connTools={connection?.tools ?? app.mcpTools}
+                improvements={improvements}
+                onAddImprovements={addImprovements}
+                onGoBuild={() => setStage((s) => ({ ...s, current: 'build' }))}
+                onGoDesign={() => setStage((s) => ({ ...s, current: 'design' }))}
+                refineHandlers={refineHandlers}
+                storyTitleOf={storyTitleOf}
+              />
+              <div className="section-title" style={{ marginTop: 24 }}>Publish &amp; go live</div>
+              <PublishStage
+                app={app} surface={surface} user={user} pipe={pipe}
+                connTools={connection?.tools ?? app.mcpTools}
+                reviewCard={reviewCard}
+                publishLabel={publishLabel} publishDisabled={publishDisabled} inReview={inReview}
+                onPublish={() => deployAction()} deployMsg={deployMsg}
+                toolOut={toolOut} toolNote={toolNote} onCallTool={callTool}
+                onOpenRepo={() => {
+                  // Open the EXTERNAL browsable repo URL directly — Forgejo's console is a
+                  // full app whose root-relative assets/redirects break inside the embedding
+                  // proxy (the 404 the user hit). The htmlUrl is now the external host.
+                  if (app.repo.htmlUrl) window.open(app.repo.htmlUrl, '_blank', 'noreferrer');
+                  else if (app.repo.fullName) openTool('forgejo', `${app.name} · repo`, app.repo.fullName);
+                }}
+                canPromoteUI={canPromoteUI} onPromote={promote}
+                canDemoteUI={canDemoteUI} demoteLabel={demoteLabel} confirmDemoteLabel={confirmDemoteLabel}
+                confirmDemote={confirmDemote} setConfirmDemote={setConfirmDemote} onDemote={demote}
+                busy={busy} onLifecycle={lifecycle} msg={msg} onHealRepo={healRepo}
+                canEdit={canEdit} onSetServeMode={setServeMode}
+              />
+            </>
           ) : null}
         </StageShell>
       )}
@@ -742,13 +830,11 @@ function DeveloperSurface({
 /* ─────────────────────────── Define ─────────────────────────── */
 
 function DefineStage({
-  app, grants, canEdit, onSavePurpose, onSaveGrants,
+  app, canEdit, onSavePurpose,
 }: {
   app: SoftwareApp;
-  grants: ContextGrantsValue;
   canEdit: boolean;
   onSavePurpose: (purpose: string) => void;
-  onSaveGrants: (grants: ContextGrantsValue) => void;
 }) {
   const [purpose, setPurpose] = useState(app.purpose ?? '');
   // When the assistant proposes a purpose, we stage it as a confirmable draft (never a
@@ -758,12 +844,6 @@ function DefineStage({
   useEffect(() => { setPurpose(app.purpose ?? ''); setSuggested(false); }, [app.purpose]);
   const surfaceLabel = [app.surface?.ui ? 'UI' : '', app.surface?.api ? 'API' : ''].filter(Boolean).join(' + ') || 'inferred on build';
 
-  // The context-grant safety ceiling for an app: builders may grant direct writes,
-  // everyone else caps at read+propose (writes held for approval). New grants START
-  // at read-only (the safe default) — the user raises each item to Read+propose /
-  // Read+write up to the ceiling when they actually need write access.
-  const cap = { ...contextAccessCap(canEdit ? 'read-write' : 'read-propose'), default: 'read-only' as const };
-
   const dirty = purpose !== (app.purpose ?? '');
 
   // Apply an assistant purpose suggestion → editable draft the user confirms.
@@ -771,20 +851,17 @@ function DefineStage({
     setPurpose(applyPurposeSuggestion(p));
     setSuggested(true);
   };
-  // Apply assistant grant suggestions → fold into the current grants (clamped to cap) + persist.
-  const applyGrants = (sg: SuggestedGrant[]) => onSaveGrants(applyGrantsSuggestion(grants, sg, cap));
 
-  const grantCount = SW_GRANT_KINDS.reduce((n, k) => n + (grants[k]?.length ?? 0), 0);
   const purposeSet = !!(app.purpose ?? '').trim();
 
-  // Structure — the app's spec being shaped: its purpose and the governed context it may
-  // use. This is the direct-manipulation twin of the conversation; the assistant's
-  // suggestions flow straight into these controls.
+  // Structure — the app's spec being shaped: its purpose only. The governed context it may
+  // use is resolved in its own Choose Context stage (moved out of Define in 0.6.105).
   const structure = (
     <>
       <label className="comp-label">Purpose</label>
       <p className="hint" style={{ marginTop: 0 }}>
-        What is this app for? One or two sentences — Define is complete once a purpose is set.
+        What is this app for? One or two sentences — Define App is complete once a purpose is set.
+        The governed context it may use is resolved next, in <strong>Choose Context</strong>.
       </p>
       <textarea
         value={purpose}
@@ -801,19 +878,6 @@ function DefineStage({
             : dirty ? <span className="muted" style={{ fontSize: 12 }}>Unsaved changes</span> : null}
         </div>
       ) : null}
-
-      <div className="section-title">Granted context (no raw credentials)</div>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Apps consume governed resources — OPA-scoped and run AS you, never raw secrets. Grant the
-        Connections, Data, Knowledge, Files and Metrics this app may use, at folder or item level.
-      </p>
-      <SoftwareContextGrants
-        value={grants}
-        onChange={onSaveGrants}
-        kinds={SW_GRANT_KINDS}
-        cap={cap}
-        canEdit={canEdit}
-      />
     </>
   );
 
@@ -824,13 +888,25 @@ function DefineStage({
           <>
             <span className="sc-scope">{app.name}</span>
             <span className="sc-hint">
-              id <code>{app.slug}</code> · template{' '}
-              <span className="badge muted" title="Chosen at creation — locked afterwards">
-                {TEMPLATE_LABEL[app.template] ?? app.template}
-              </span>{' '}
-              · surface <code>{surfaceLabel}</code>
+              id <code>{app.slug}</code> ·{' '}
+              {app.serveMode === 'spec' ? (
+                <>
+                  kind{' '}
+                  <span className="badge muted" title="A no-code app assembled from patterns — no template, no repo">
+                    Declarative (no-code)
+                  </span>
+                </>
+              ) : (
+                <>
+                  template{' '}
+                  <span className="badge muted" title="Chosen at creation — locked afterwards">
+                    {TEMPLATE_LABEL[app.template] ?? app.template}
+                  </span>{' '}
+                  · surface <code>{surfaceLabel}</code>
+                </>
+              )}
             </span>
-            <span className="sc-hint sc-spacer">Describe the app — the conversation shapes its purpose &amp; the context it may use.</span>
+            <span className="sc-hint sc-spacer">Describe the app — the conversation shapes its purpose.</span>
           </>
         }
         structure={structure}
@@ -838,17 +914,182 @@ function DefineStage({
           <StageAssistantChat
             appId={app.id}
             stage="define"
-            intro="Improve the purpose and suggest which governed context to grant."
-            starters={['Sharpen my purpose', 'What context should this app be granted?']}
+            intro="Improve the purpose of this app."
+            starters={['Sharpen my purpose', 'What should this app do?']}
             onApplyPurpose={canEdit ? applyPurpose : undefined}
-            onApplyGrants={canEdit ? applyGrants : undefined}
           />
         }
         outcome={
           <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
             <span className="comp-label" style={{ margin: 0 }}>Defined</span>
             <span className={`badge ${purposeSet ? 'ok' : 'muted'}`}>{purposeSet ? 'Purpose set' : 'Purpose pending'}</span>
-            <span className="badge muted">{grantCount} context grant{grantCount === 1 ? '' : 's'}</span>
+          </div>
+        }
+      />
+    </div>
+  );
+}
+
+/* ─────────────────────────── Choose Context ─────────────────────────── */
+
+/**
+ * The Choose Context stage (0.6.105) — resolve EVERY context need the app has, in one place:
+ *   • BIND an EXISTING artifact (connections / data / knowledge / files / metrics) via
+ *     SoftwareContextGrants — moved here from Define.
+ *   • CREATE-NEW a dataset (empty schema, or with AI sample rows) via DataPlanPanel —
+ *     moved here from Design (0.6.101). The Design assistant proposed the datasets; here
+ *     the user resolves each need.
+ *
+ * The data-needing stories cannot build until this stage is resolved (the same 0.6.101
+ * build-gate the Build stage reads). Create-new for the NON-dataset kinds is a deliberate
+ * FOLLOW-UP (bind-existing already covers them) — the seam is left clean here.
+ */
+function ContextStage({
+  app, epics, grants, agentGrants, canEdit, contextResolved, onSaveGrants, onSaveAgents, onReload, onGoBuild, onGoDesign,
+}: {
+  app: SoftwareApp;
+  epics: Epic[];
+  grants: ContextGrantsValue;
+  agentGrants: AppAgentGrant[];
+  canEdit: boolean;
+  /** True when every data-needing story has a bound/created dataset (or none needs data). */
+  contextResolved: boolean;
+  onSaveGrants: (grants: ContextGrantsValue) => void;
+  onSaveAgents: (agents: AppAgentGrant[]) => void;
+  onReload: () => void;
+  /** Navigate to Build (present only when Build is reachable). */
+  onGoBuild?: () => void;
+  /** Jump back to Design Epics (the empty-state pointer). */
+  onGoDesign: () => void;
+}) {
+  // The context-grant safety ceiling for an app: builders may grant direct writes,
+  // everyone else caps at read+propose (writes held for approval). New grants START
+  // at read-only (the safe default) — the user raises each item to Read+propose /
+  // Read+write up to the ceiling when they actually need write access.
+  const cap = { ...contextAccessCap(canEdit ? 'read-write' : 'read-propose'), default: 'read-only' as const };
+
+  // Apply assistant grant suggestions → fold into the current grants (clamped to cap) + persist.
+  const applyGrants = (sg: SuggestedGrant[]) => onSaveGrants(applyGrantsSuggestion(grants, sg, cap));
+
+  const grantCount = SW_GRANT_KINDS.reduce((n, k) => n + (grants[k]?.length ?? 0), 0);
+  const hasDesign = epics.some((e) => (e.stories?.length ?? 0) > 0);
+  // The honest data-need warning — empty when nothing to resolve (a dataset is bound, or no
+  // story implies a data need). The SAME signal the Build data-need gate reads. A declarative
+  // (spec) app gets no-code framing (read-tabs need data; input-only tabs don't) instead of the
+  // coded "no schema to write against" language.
+  const dataNeedWarning = unresolvedDataNeedWarning(epics, grants.data.length, app.serveMode === 'spec' ? 'spec' : 'code');
+
+  const nextSteps: { label: string; prompt?: string; onClick?: () => void }[] = [];
+  if (canEdit) {
+    nextSteps.push({ label: 'What context should this app be granted?', prompt: 'What governed context (connections, data, knowledge, files, metrics) should this app be granted, and what new datasets does it need?' });
+    if (contextResolved && onGoBuild) nextSteps.push({ label: 'Context resolved → go to Build', onClick: onGoBuild });
+  }
+
+  const structure = (
+    <>
+      {!hasDesign ? (
+        <div className="db-empty" style={{ padding: 18, border: '1px dashed var(--border)', borderRadius: 10, textAlign: 'center', marginBottom: 12 }}>
+          <p className="muted" style={{ margin: 0 }}>No stories yet — specify the app in Design Epics first, then resolve its context here.</p>
+          <button className="btn sm" style={{ marginTop: 10 }} onClick={onGoDesign}>Go to Design Epics →</button>
+        </div>
+      ) : null}
+
+      {/* Six-type Choose Context (Phase 4b). Per type, TWO unmistakable modes — pick EXISTING
+          governed context you're entitled to, OR create a fresh one (Data/Files/Knowledge land
+          in the App folder + are granted; Agents/Connections deep-link to their own tab). */}
+      <p className="ctx-choice-guide">
+        <strong>Give this app its context — six types.</strong> For each of{' '}
+        <strong>Data · Metrics · Files · Knowledge · Agents · Connections</strong>, either{' '}
+        <strong>＋ Add existing</strong> governed context you're entitled to, or <strong>＋ Create new</strong> —
+        the app reads it <em>in place</em>, OPA-scoped, run AS you, never raw secrets, never a copy.
+      </p>
+
+      <SoftwareContextGrants
+        value={grants}
+        onChange={onSaveGrants}
+        agentGrants={agentGrants}
+        onChangeAgents={onSaveAgents}
+        cap={cap}
+        canEdit={canEdit}
+        appId={app.id}
+        appName={app.name}
+        onReload={onReload}
+      />
+
+      {/* Create a new dataset WITH SAMPLE ROWS — the app's OWN dataset. The six-type surface
+          above creates EMPTY artifacts; this assistant-driven path adds AI sample rows to build
+          against. When a story needs data but nothing is bound, the assistant proposes datasets
+          and the DataPlanPanel (rendered in the conversation) creates each one empty or with rows. */}
+      <div className="comp-label" style={{ marginTop: 18 }}>Create a dataset with sample rows (the app’s own)</div>
+      <p className="hint" style={{ marginTop: 0 }}>
+        A fresh governed dataset in your personal lane — <strong>empty</strong> (schema only) or with AI{' '}
+        <strong>sample rows</strong>. Best when the app needs data it will <strong>populate or write</strong>, or
+        you want dummy rows to build against. Ask the assistant on the right and confirm each dataset it proposes.
+      </p>
+
+      {/* The data-need gate, surfaced honestly here — this is where you resolve it. */}
+      {dataNeedWarning ? (
+        <div className="build-blocked" style={{ marginTop: 12 }}>
+          <p className="bb-title">{app.serveMode === 'spec' ? 'Some tabs will need data.' : 'This app needs data before it can build.'}</p>
+          <p className="bb-body" style={{ whiteSpace: 'pre-wrap' }}>{dataNeedWarning}</p>
+          <p className="bb-body" style={{ marginTop: 8 }}>
+            Resolve each need above: <strong>Link</strong> an existing dataset if one fits, or ask the assistant
+            to propose a new one to <strong>Create</strong>.
+          </p>
+        </div>
+      ) : null}
+
+      <style jsx>{`
+        .ctx-choice-guide {
+          margin: 0 0 16px; font-size: 13px; line-height: 1.6; color: var(--text);
+          border: 1px solid var(--border); background: var(--panel); border-radius: 10px; padding: 12px 14px;
+        }
+        .build-blocked { border: 1px solid var(--gold-line); background: var(--gold-soft); border-radius: 12px; padding: 16px 18px; }
+        .bb-title { margin: 0 0 8px; font-size: 14.5px; font-weight: 700; line-height: 1.4; }
+        .bb-body { margin: 0; font-size: 13px; line-height: 1.6; color: var(--text); }
+      `}</style>
+    </>
+  );
+
+  return (
+    <div {...anchorAttr(ANCHORS.software.context)}>
+      <StageConversation
+        context={
+          <>
+            <span className="sc-scope">Choose Context</span>
+            <span className="sc-hint">resolve every context need — bind existing, or create new</span>
+            <span className={`badge ${contextResolved ? 'ok' : 'muted'}`}>{contextResolved ? 'Context resolved' : 'Data need unresolved'}</span>
+            <span className="sc-hint sc-spacer">Bind Connections · Data · Knowledge · Files · Metrics, or create the datasets your stories need.</span>
+          </>
+        }
+        structure={structure}
+        conversation={
+          <StageAssistantChat
+            appId={app.id}
+            stage="design"
+            intro="Suggest which governed context to grant, and propose new datasets to create for stories that need data."
+            starters={['What context should this app be granted?', 'What datasets does this app need?']}
+            onApplyGrants={canEdit ? applyGrants : undefined}
+            renderDataPlan={
+              canEdit
+                ? (datasets, dismiss) => (
+                    <DataPlanPanel
+                      appId={app.id}
+                      datasets={datasets}
+                      onResolved={() => onReload()}
+                      onDismiss={dismiss}
+                    />
+                  )
+                : undefined
+            }
+            nextSteps={nextSteps}
+          />
+        }
+        outcome={
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="comp-label" style={{ margin: 0 }}>Context</span>
+            <span className="badge muted">{grantCount} bound grant{grantCount === 1 ? '' : 's'}</span>
+            <span className={`badge ${contextResolved ? 'ok' : 'muted'}`}>{contextResolved ? 'Data needs resolved' : 'Data need pending'}</span>
           </div>
         }
       />
@@ -877,7 +1118,7 @@ function withStorySpec(epics: Epic[], epicId: string, storyId: string, spec: Sto
  * the SAME governed `onSave` (→ patchAppDesign).
  */
 function DesignStage({
-  app, epics, canEdit, onSave, onReload, refinements, refineHandlers, storyTitleOf,
+  app, epics, canEdit, onSave, onReload, refinements, refineHandlers, storyTitleOf, onGoContext,
 }: {
   app: SoftwareApp;
   epics: Epic[];
@@ -887,9 +1128,12 @@ function DesignStage({
   refinements: Improvement[];
   refineHandlers: RefineHandlers;
   storyTitleOf: (storyId: string) => string;
+  /** Navigate to Choose Context (present only when it's reachable) — the "looks ready" step. */
+  onGoContext?: () => void;
 }) {
   const applyEpics = (sug: SuggestedEpic[]) => onSave(applyEpicsSuggestion(epics, sug));
   const applyStories = (groups: SuggestedStoriesForEpic[]) => onSave(applyStoriesSuggestion(epics, groups));
+  const applyEpicReqs = (groups: SuggestedEpicRequirements[]) => onSave(applyEpicRequirementsSuggestion(epics, groups));
 
   // The story the user is focused on (the expanded row) — the assistant's spec target.
   const [activeStory, setActiveStory] = useState<{ epicId: string; storyId: string } | null>(null);
@@ -907,8 +1151,33 @@ function DesignStage({
   const specced = stories.filter((s) => specHasContent(s.spec)).length;
   const purpose = (app.purpose ?? '').trim();
 
+  // The artifact ladder + its next-step guidance — teaches AND tracks Epics → Requirements
+  // → Stories → Features/Rules, and feeds the never-a-dead-end assistant.
+  const ladder = designLadder(epics);
+  const designComplete = ladder.every((r) => r.done);
+  // The FIRST unfinished rung is what to do next; a spec-target story sharpens the ask.
+  const nextRung = ladder.find((r) => !r.done);
+  const nextSteps: { label: string; prompt?: string; onClick?: () => void }[] = [];
+  if (canEdit) {
+    if (targetStory) {
+      nextSteps.push({ label: `Draft features, NFRs & rules for “${targetStory.title.trim() || 'this story'}”`, prompt: 'Draft the features, non-functional requirements and rules for the story I have open.' });
+    } else if (nextRung?.key === 'epics') {
+      nextSteps.push({ label: 'Propose EPICs for this app', prompt: 'Suggest EPICs and user stories from the purpose.' });
+    } else if (nextRung?.key === 'requirements') {
+      nextSteps.push({ label: 'Fill in each EPIC’s requirements', prompt: 'For each existing epic, propose its technical, UX and governance requirements.' });
+    } else if (nextRung?.key === 'stories') {
+      nextSteps.push({ label: 'Add user stories to my EPICs', prompt: 'Propose user stories for my existing epics.' });
+    } else if (nextRung?.key === 'specs') {
+      nextSteps.push({ label: 'Draft the specs for my stories', prompt: 'For each story that has no spec yet, draft its features, NFRs and rules.' });
+    }
+    if (designComplete && onGoContext) {
+      nextSteps.push({ label: 'This looks ready → create the context', onClick: onGoContext });
+    }
+  }
+
   return (
     <div {...anchorAttr(ANCHORS.software.design)}>
+      <DesignLadder ladder={ladder} nextKey={nextRung?.key ?? null} />
       <StageConversation
         reverse
         context={
@@ -944,8 +1213,10 @@ function DesignStage({
               : ['Suggest EPICs for this app', 'Add user stories to my EPICs']}
             onApplyEpics={canEdit ? applyEpics : undefined}
             onApplyStories={canEdit ? applyStories : undefined}
+            onApplyEpicRequirements={canEdit ? applyEpicReqs : undefined}
             onApplySpec={canEdit && targetStory ? applySpec : undefined}
             specTargetLabel={targetStory?.title.trim() || undefined}
+            nextSteps={nextSteps}
           />
         }
         outcome={
@@ -959,6 +1230,64 @@ function DesignStage({
           </>
         }
       />
+    </div>
+  );
+}
+
+/**
+ * DesignLadder — the Design stage's ORIENTATION: a calm "what happens here" line + the
+ * artifact-ladder progress checklist (Epics → Requirements → Stories → Features & rules).
+ * It teaches the order to build things AND tracks how far along each rung the user is, so
+ * the stage is self-explanatory and nobody is left guessing what to do next. Read-only —
+ * the actual creating happens in the epic detail + assistant below.
+ */
+function DesignLadder({
+  ladder,
+  nextKey,
+}: {
+  ladder: ReturnType<typeof designLadder>;
+  nextKey: string | null;
+}) {
+  return (
+    <div className="dl">
+      <p className="dl-lede">
+        <strong>Design</strong> is where you say what the app should do — no code yet. Work down the ladder:
+        break the app into <strong>epics</strong>, note each epic’s <strong>requirements</strong>, add the
+        <strong> user stories</strong> it delivers, then list each story’s <strong>features &amp; rules</strong>.
+        The assistant can draft any rung; every item is ticked off in Build.
+      </p>
+      <ol className="dl-steps">
+        {ladder.map((r, i) => {
+          const state = r.done ? 'done' : r.key === nextKey ? 'next' : 'todo';
+          return (
+            <li key={r.key} className={`dl-step dl-${state}`}>
+              <span className="dl-mark" aria-hidden>{r.done ? '✓' : i + 1}</span>
+              <span className="dl-body">
+                <span className="dl-name">
+                  {r.label}
+                  {r.total > 0 ? <span className="dl-count"> {r.count}/{r.total}</span> : null}
+                </span>
+                {state === 'next' ? <span className="dl-hint">{r.hint}</span> : null}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+      <style jsx>{`
+        .dl { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); padding: 14px 16px; margin-bottom: 16px; }
+        .dl-lede { margin: 0 0 12px; font-size: 13px; line-height: 1.65; color: var(--text-muted); }
+        .dl-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+        .dl-step { display: flex; align-items: flex-start; gap: 8px; flex: 1 1 180px; min-width: 160px; border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; background: var(--panel-2, var(--panel)); }
+        .dl-step.dl-next { border-color: var(--gold-line); background: var(--gold-soft); }
+        .dl-step.dl-done { opacity: 0.75; }
+        .dl-mark { flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; border: 1px solid var(--border-strong, var(--border)); color: var(--text-faint); }
+        .dl-step.dl-done .dl-mark { background: var(--gold-soft); border-color: var(--gold-line); color: var(--gold-text, var(--accent)); }
+        .dl-step.dl-next .dl-mark { border-color: var(--gold-line); color: var(--gold-text, var(--accent)); }
+        .dl-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .dl-name { font-size: 12.5px; font-weight: 600; }
+        .dl-count { font-weight: 500; color: var(--text-faint); }
+        .dl-hint { font-size: 11.5px; color: var(--text-muted); line-height: 1.45; }
+      `}</style>
     </div>
   );
 }
@@ -1179,6 +1508,228 @@ function selectionToTarget(epics: Epic[], selected: ReadonlySet<string>): BuildT
   return { kind: 'app' };
 }
 
+/* ─────────────────────────── Declarative (spec) Build ─────────────────────────── */
+
+/**
+ * The DECLARATIVE Build stage — a thin wrapper that resolves the app's granted dataset/metric NAMES
+ * (the app record carries only ids) and its designed stories, then hands them to the pure
+ * `<AppSpecComposer>`. Names are resolved from the governed `/api/context/available` feed (the same
+ * DLS-scoped list the Choose-Context picker uses), intersected with the app's grants — so the
+ * dropdowns show only what THIS app may use, by their real names.
+ */
+function SpecBuildStage({
+  app, epics, user, onSaved, onGoContext, onGoPublish,
+}: {
+  app: SoftwareApp;
+  epics: Epic[];
+  user: { id: string; role: SessionRole };
+  onSaved: () => void;
+  /** Jump to Choose Context — surfaced when a tab needs a dataset but none is granted. */
+  onGoContext?: () => void;
+  /** Advance to Test & Publish — the Build stage has NO Save button; work autosaves. */
+  onGoPublish?: () => void;
+}) {
+  const [names, setNames] = useState<{ data: Record<string, string>; metrics: Record<string, string> }>({ data: {}, metrics: {} });
+
+  // Build-stage Simple ⇄ Developer split (os-ui 0.6.138, Lovable-style). SIMPLE (default) shows only
+  // the live preview + the assistant — the user builds by talking. DEVELOPER shows the full manual
+  // composer (tabs + config + advanced). Persisted per user under its own key so it's remembered.
+  const [buildMode, setBuildMode] = useState<ViewMode>('simple');
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const saved = window.localStorage.getItem(SPEC_BUILD_MODE_KEY);
+    if (saved === 'simple' || saved === 'developer') setBuildMode(saved);
+  }, []);
+  const setBuildModePersisted = (m: ViewMode) => {
+    setBuildMode(m);
+    if (typeof window !== 'undefined') window.localStorage.setItem(SPEC_BUILD_MODE_KEY, m);
+  };
+
+  useEffect(() => {
+    let live = true;
+    const load = async (kind: 'data' | 'metrics') => {
+      try {
+        const res = await fetch(`/api/context/available?kind=${kind}`);
+        if (!res.ok) return {} as Record<string, string>;
+        const d = (await res.json()) as { items?: { id: string; name: string }[] };
+        return Object.fromEntries((d.items ?? []).map((i) => [i.id, i.name]));
+      } catch {
+        return {} as Record<string, string>;
+      }
+    };
+    void Promise.all([load('data'), load('metrics')]).then(([data, metrics]) => {
+      if (live) setNames({ data, metrics });
+    });
+    return () => { live = false; };
+  }, []);
+
+  const composerApp: ComposerApp = useMemo(() => {
+    const grantName = (id: string, map: Record<string, string>) => map[id] ?? id;
+    const stories = (epics ?? []).flatMap((e) =>
+      (e.stories ?? []).map((s) => ({ epicId: e.id, storyId: s.id, label: `${e.title} · ${s.title || s.id}` })),
+    );
+    return {
+      id: app.id,
+      slug: app.slug,
+      name: app.name,
+      description: app.description,
+      spec: app.spec,
+      draftSpec: app.draftSpec,
+      grantedData: (app.grants?.data ?? []).map((g) => ({ id: g.id, name: grantName(g.id, names.data) })),
+      grantedMetrics: (app.grants?.metrics ?? []).map((g) => ({ id: g.id, name: grantName(g.id, names.metrics) })),
+      stories,
+    };
+  }, [app, epics, names]);
+
+  const noData = composerApp.grantedData.length === 0;
+
+  return (
+    <div>
+      {/* Simple ⇄ Developer split (Lovable-style). Simple = preview + assistant; Developer = the full
+          manual composer. Autosave is identical in both. */}
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <p className="hint" style={{ margin: 0 }}>
+          {buildMode === 'simple'
+            ? 'Build by talking to the assistant — the preview updates live. Switch to Developer to edit tabs by hand.'
+            : 'Edit every tab by hand — patterns, data mapping and advanced settings.'}
+        </p>
+        <BuilderModeToggle
+          mode={buildMode}
+          onChange={setBuildModePersisted}
+          simpleHint="Preview + assistant only — build by talking"
+          developerHint="The full manual composer — edit tabs by hand"
+          ariaLabel="Build App view mode"
+        />
+      </div>
+      {noData ? (
+        <div className="grant-block" style={{ marginBottom: 12, display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <p className="hint" style={{ margin: 0 }}>
+            No datasets are granted to this app yet. Grant one in <strong>Choose Context</strong> so
+            your tabs have real data to map — you can still add tabs and preview meanwhile.
+          </p>
+          {onGoContext ? (
+            <button type="button" className="btn ghost sm" onClick={onGoContext}>Choose Context →</button>
+          ) : null}
+        </div>
+      ) : null}
+      <AppSpecComposer app={composerApp} userRole={user.role} onSaved={onSaved} onGoContext={onGoContext} mode={buildMode} />
+      {/* No Save button — work autosaves as a draft. This advances to Test & Publish, the go-live gate. */}
+      {onGoPublish ? (
+        <div className="row" style={{ justifyContent: 'flex-end', marginTop: 16 }}>
+          <button type="button" className="btn" onClick={onGoPublish} title="Test your draft, then publish it live">
+            Test &amp; Publish →
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * SpecPublishStage (os-ui 0.6.135) — the declarative app's Test & Publish surface. NO pods, NO
+ * repo: Publish validates the autosaved draft with the full serving gate and, on success, promotes
+ * it to LIVE at /apps/<slug> + snapshots a version. Shows validation issues inline when the draft
+ * isn't serve-valid, a "View live app" link once a published spec exists, and the version history
+ * (auto name + change summary) with a confirm-gated Restore — all reusing the shared VersionHistory.
+ */
+type PublishIssue = { path: string; reason: string; fix: string };
+function SpecPublishStage({
+  app, user, onReload, onGoBuild,
+}: {
+  app: SoftwareApp;
+  user: { id: string; role: SessionRole };
+  onReload: () => void;
+  onGoBuild: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [issues, setIssues] = useState<PublishIssue[]>([]);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const canEdit = user.id === app.owner || roleAtLeast(user.role, 'builder');
+  const hasLive = !!app.spec;
+  const hasDraft = !!app.draftSpec;
+
+  const publish = async () => {
+    setBusy(true);
+    setMsg(null);
+    setIssues([]);
+    try {
+      const res = await fetch(`/api/apps/${app.id}/publish`, { method: 'POST', headers: { 'content-type': 'application/json' } });
+      const d = (await res.json().catch(() => ({}))) as {
+        ok?: boolean; issues?: PublishIssue[]; error?: string; slug?: string;
+        version?: { name?: string; summary?: string } | null;
+      };
+      if (!res.ok) {
+        setMsg({ kind: 'error', text: d.error ?? 'Publish failed.' });
+        return;
+      }
+      if (d.ok) {
+        setMsg({ kind: 'ok', text: `Published ${d.version?.name ?? ''} — live at /apps/${d.slug ?? app.slug}. ${d.version?.summary ?? ''}`.trim() });
+        onReload();
+      } else {
+        setIssues(d.issues ?? []);
+        setMsg({ kind: 'error', text: 'The draft has validation issues — fix them in Build, then publish.' });
+      }
+    } catch (e) {
+      setMsg({ kind: 'error', text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="sw-spec-publish">
+      <div className="grant-block">
+        <div className="section-title" style={{ margin: 0 }}>Publish your app</div>
+        <p className="hint" style={{ marginTop: 4 }}>
+          Your work autosaves as a draft while you build. Publishing validates the draft and, if it
+          passes, makes it the live app at{' '}
+          <Link className="sw-quiet-link" href={`/apps/${app.slug}`}>/apps/{app.slug}</Link>{' '}
+          — snapshotting a version you can restore later.
+        </p>
+        <div className="row" style={{ gap: 10, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+          {canEdit ? (
+            <button type="button" className="btn" onClick={() => void publish()} disabled={busy || (!hasDraft && !hasLive)} title="Validate the draft and go live">
+              {busy ? <span className="spin" /> : hasLive ? 'Publish changes' : 'Publish'}
+            </button>
+          ) : (
+            <span className="hint" style={{ margin: 0 }}>Only the app’s owner or a builder can publish.</span>
+          )}
+          {hasLive ? (
+            // Prominent primary way to open the RUNNING app — not a tiny quiet link
+            // (os-ui 0.6.139). This is the payoff of publishing, so it reads clearly.
+            <a className="btn" href={`/apps/${app.slug}`} target="_blank" rel="noreferrer">
+              Open the live app ↗
+            </a>
+          ) : (
+            <span className="hint" style={{ margin: 0 }}>Not published yet.</span>
+          )}
+          <button type="button" className="btn ghost sm" onClick={onGoBuild} title="Back to editing your draft">← Back to Build</button>
+        </div>
+        {msg ? (
+          <div style={{ marginTop: 10 }}>
+            <span className={msg.kind === 'ok' ? 'badge ok' : 'error'} style={{ margin: 0, display: 'inline-block', maxWidth: '100%' }}>{msg.text}</span>
+          </div>
+        ) : null}
+        {issues.length > 0 ? (
+          <ul className="hint" style={{ marginTop: 10 }}>
+            {issues.map((iss, i) => (
+              <li key={i}><strong>{iss.path}</strong>: {iss.reason} — {iss.fix}</li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+
+      <div className="grant-block" style={{ marginTop: 16 }}>
+        <div className="section-title" style={{ margin: 0 }}>Version history</div>
+        <p className="hint" style={{ marginTop: 4, marginBottom: 8 }}>
+          Each Publish snapshots a version with an auto name and a plain-language summary of what changed.
+        </p>
+        <VersionHistory basePath={`/api/apps/${app.id}`} name={app.name} onRestored={onReload} />
+      </div>
+    </div>
+  );
+}
+
 function BuildStage({
   app, epics, canEditCode, onBuilt, target, setTarget, onSaveEpics, onGoDesign, improvements, refineHandlers, storyTitleOf,
 }: {
@@ -1260,12 +1811,33 @@ function BuildStage({
     }
   };
 
-  // The one "Build" press: map the selection to a target, remember the batch's stories,
+  // The story the user has FOCUSED in the tree (a story/feature row click), if any. Used
+  // to attribute a free-text build AND to let the primary Build button act on a single
+  // clicked story even when no feature checkbox is ticked.
+  const nodeStoryTarget: BuildTarget | null = node.kind === 'story' || node.kind === 'feature'
+    ? { kind: 'story', epicId: node.epicId, storyId: node.storyId }
+    : null;
+  // …but only offer to build a focused story that actually HAS a Design spec — building a
+  // spec-less story would produce nothing, the very confusion we are removing.
+  const nodeBuildableTarget: BuildTarget | null = (() => {
+    if (!nodeStoryTarget || nodeStoryTarget.kind !== 'story') return null;
+    const story = epics.find((e) => e.id === nodeStoryTarget.epicId)
+      ?.stories.find((s) => s.id === nodeStoryTarget.storyId);
+    return story && specHasContent(story.spec) ? nodeStoryTarget : null;
+  })();
+  // The button's effective target: ticked features win; otherwise the focused buildable
+  // story. This keeps the Build button live + visible as you move between stories instead
+  // of greying out after a build clears the checkboxes.
+  const primaryTarget = buildTargetForSelection ?? nodeBuildableTarget;
+  const chatTarget = target ?? nodeStoryTarget;
+
+  // The one "Build" press: map to the effective target, remember the batch's stories,
   // set the target, and fire the run.
   const runBuild = () => {
-    const t = buildTargetForSelection;
+    const t = primaryTarget;
     if (!t || running) return;
-    setBuildingStoryIds([...selectedStoryIds(selected)]);
+    const ids = [...selectedStoryIds(selected)];
+    setBuildingStoryIds(ids.length ? ids : (t.kind === 'story' ? [t.storyId] : []));
     setTarget(t);
     setBuildMode('build');
     // The target prop flows to BuildChat; bump the trigger next tick so the chat sees it.
@@ -1275,26 +1847,24 @@ function BuildStage({
   const toggleFeat = (fid: string) => setSelected((sel) => toggleFeatureSel(sel, fid));
   const toggleGrp = (fids: string[]) => setSelected((sel) => toggleGroupSel(sel, fids));
 
-  // The effective target for the ONE assistant (BuildChat). A batch build sets `target`
-  // explicitly; a free-text build with nothing queued attributes to the STORY the user
-  // has selected in the detail (so a typed "add a login form" is still attributed +
-  // ticked). Falls back to null (whole-app) only when nothing is selected.
-  const nodeStoryTarget: BuildTarget | null = node.kind === 'story'
-    ? { kind: 'story', epicId: node.epicId, storyId: node.storyId }
-    : node.kind === 'feature'
-      ? { kind: 'story', epicId: node.epicId, storyId: node.storyId }
-      : null;
-  const chatTarget = target ?? nodeStoryTarget;
-
   const capNote = `Build in focused batches of up to ${BUILD_BATCH_CAP} features so each result is reliable and reviewable.`;
   const buildLabel = (() => {
-    if (buildTargetForSelection?.kind === 'story') {
-      const done = epics.find((e) => e.id === (buildTargetForSelection as { epicId: string }).epicId)
-        ?.stories.find((s) => s.id === (buildTargetForSelection as { storyId: string }).storyId)?.status === 'done';
+    if (primaryTarget?.kind === 'story') {
+      const done = epics.find((e) => e.id === (primaryTarget as { epicId: string }).epicId)
+        ?.stories.find((s) => s.id === (primaryTarget as { storyId: string }).storyId)?.status === 'done';
       return done ? 'Rebuild this user story' : 'Build this user story';
     }
     return `Build ${selCount} selected feature${selCount === 1 ? '' : 's'}`;
   })();
+
+  // Honest "why can't I build?" state. Stories with NO Design spec have nothing to
+  // build — that's expected, not a bug: features/NFRs/rules are authored in DESIGN.
+  const totalStories = epics.flatMap((e) => e.stories).length;
+  const missingSpecCount = storiesMissingSpec(epics);
+  // Fully blocked: there ARE stories, but none has a spec yet → nothing at all to build.
+  const noneBuildable = totalStories > 0 && missingSpecCount === totalStories;
+  // Partially specified: some stories are buildable, some still need their Design spec.
+  const somePending = missingSpecCount > 0 && missingSpecCount < totalStories;
 
   // The structured LEFT surface: the capped-batch spec tree + the one Build button.
   const structure = (
@@ -1304,7 +1874,7 @@ function BuildStage({
         <span className={`badge ${selCount >= BUILD_BATCH_CAP ? 'warn' : 'muted'}`} title={capNote}>{selCount} / {BUILD_BATCH_CAP} selected</span>
       </div>
       <p className="hint" style={{ marginTop: 4 }}>
-        Tick the features to build next (selecting a story or EPIC cascades to its features). {capNote} A feature with no Design spec can&apos;t be built — specify it in Design first.
+        Tick the features to build next (selecting a story or EPIC cascades to its features). {capNote}
       </p>
       <div style={{ marginTop: 10 }}>
         {epics.length === 0 ? (
@@ -1312,17 +1882,46 @@ function BuildStage({
             <p className="muted" style={{ margin: 0 }}>No stories yet — specify the app in Design first.</p>
             {onGoDesign ? <button className="btn sm" style={{ marginTop: 10 }} onClick={onGoDesign}>Go to Design →</button> : null}
           </div>
+        ) : noneBuildable ? (
+          <div className="build-blocked">
+            <p className="bb-title">Nothing to build yet — your user stories need features &amp; requirements first.</p>
+            <p className="bb-body">
+              This is expected, not an error. A story&apos;s <strong>features, NFRs and rules</strong> are defined in the
+              {' '}<strong>Design</strong> stage, and {missingSpecCount === 1 ? 'your story doesn’t have them' : `all ${missingSpecCount} of your stories don’t have them`} yet.
+              Add them in Design and each becomes buildable here.
+            </p>
+            {onGoDesign ? (
+              <button className="btn" onClick={onGoDesign}>← Back to Design to add them</button>
+            ) : null}
+            <style jsx>{`
+              .build-blocked { border: 1px solid var(--gold-line); background: var(--gold-soft); border-radius: 12px; padding: 16px 18px; }
+              .bb-title { margin: 0 0 8px; font-size: 14.5px; font-weight: 700; line-height: 1.4; }
+              .bb-body { margin: 0 0 14px; font-size: 13px; line-height: 1.6; color: var(--text); }
+            `}</style>
+          </div>
         ) : (
-          <SpecTree
-            epics={epics}
-            selected={node}
-            onSelectNode={setNode}
-            selectable
-            selectedFeatures={selected}
-            onToggleFeature={toggleFeat}
-            onToggleGroup={toggleGrp}
-            onGoDesign={onGoDesign}
-          />
+          <>
+            {somePending ? (
+              <p className="build-pending-note">
+                <strong>{missingSpecCount} of {totalStories} stories can&apos;t be built yet</strong> — they have no features &amp; rules.
+                {' '}Add their spec in <strong>Design</strong>; the rest are ready to build below.
+                {onGoDesign ? <> <button type="button" className="btn ghost sm" onClick={onGoDesign}>Back to Design →</button></> : null}
+                <style jsx>{`
+                  .build-pending-note { margin: 0 0 10px; font-size: 12.5px; line-height: 1.55; padding: 9px 11px; border: 1px solid var(--gold-line); background: var(--gold-soft); border-radius: 9px; }
+                `}</style>
+              </p>
+            ) : null}
+            <SpecTree
+              epics={epics}
+              selected={node}
+              onSelectNode={setNode}
+              selectable
+              selectedFeatures={selected}
+              onToggleFeature={toggleFeat}
+              onToggleGroup={toggleGrp}
+              onGoDesign={onGoDesign}
+            />
+          </>
         )}
       </div>
 
@@ -1341,17 +1940,19 @@ function BuildStage({
         </div>
       ) : null}
 
-      {/* The ONE primary Build button — builds the selected set (tightest scope). */}
+      {/* The ONE primary Build button — always visible; builds the ticked features, or the
+          story you have clicked (tightest scope). It stays live as you move between
+          stories instead of greying out after a build clears the checkboxes. */}
       <div className="row" style={{ gap: 10, marginTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
         <button
           className="btn lg"
-          disabled={!buildTargetForSelection || running}
+          disabled={!primaryTarget || running}
           onClick={runBuild}
-          title={buildTargetForSelection ? 'Build the selected features — commits real code' : 'Select at least one feature to build'}
+          title={primaryTarget ? 'Build the selected features — commits real code' : 'Tick a feature, or click a user story that has a spec, to build'}
         >
           {running ? <span className="spin" /> : buildLabel}
         </button>
-        {selCount === 0 ? <span className="muted" style={{ fontSize: 12 }}>Select features on the left to build.</span> : null}
+        {!primaryTarget ? <span className="muted" style={{ fontSize: 12 }}>Tick features on the left, or click a user story, to build.</span> : null}
       </div>
 
       {/* Always-visible detail: the selected item's spec + honest built-state. */}
@@ -1371,9 +1972,9 @@ function BuildStage({
         context={
           <>
             <span className="sc-scope">Build</span>
-            <span className="badge muted" title="The build runs code generation on the standard model — no reasoning escalation">Build · {tierNote(modelRoleForMode('build'))}</span>
+            <span className="badge muted" title="The build runs code generation on the reasoning model">Build · {tierNote(modelRoleForMode('build'))}</span>
             <span className="sc-hint">Context from Define: {defineContextNote({ template: app.template, purpose: app.purpose })}</span>
-            <span className="sc-hint sc-spacer">Tick features → Build the batch on the standard model, grounded in the Design spec. The assistant refines &amp; gives feedback.</span>
+            <span className="sc-hint sc-spacer">Tick features → Build the batch on the reasoning model, grounded in the Design spec. The assistant refines &amp; gives feedback.</span>
           </>
         }
         structure={structure}
@@ -1510,7 +2111,7 @@ function TestStage({
         </div>
         {verifyMsg ? <div className={verifyMsg.startsWith('✓') ? 'answer' : 'error'} style={{ marginTop: 10 }}>{verifyMsg}</div> : null}
         <p className="hint" style={{ marginTop: 8 }}>
-          Refinements land as reviewable to-dos — nothing auto-runs. A missed spec item becomes a <strong>rebuild</strong> (standard model); feedback that changes the requirement is routed to <strong>Design</strong> first.
+          Refinements land as reviewable to-dos — nothing auto-runs. A missed spec item becomes a <strong>rebuild</strong> (reasoning model); feedback that changes the requirement is routed to <strong>Design</strong> first.
         </p>
       </div>
 
