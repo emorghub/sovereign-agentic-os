@@ -93,6 +93,20 @@ test('grant cardinality is tagged at the source (R1) and defaults to low', () =>
   assert.deepEqual(d.grants[0].scope.rows, ['region = $region']);
 });
 
+test('domainArtifact:view round-trips; table/absent is byte-stable (never emitted)', () => {
+  // A view-promoted dataset persists its marker.
+  const view = sample({ tier: 'asset', visibility: 'domain', domainArtifact: 'view' });
+  const round = parseDataset(serializeDataset(view));
+  assert.equal(round.domainArtifact, 'view');
+  assert.ok(serializeDataset(view).includes('domainArtifact: view'));
+  // A table-promoted (or un-promoted) dataset NEVER emits the key (zero migration).
+  const table = sample({ tier: 'asset', visibility: 'domain', domainArtifact: 'table' });
+  assert.equal(serializeDataset(table).includes('domainArtifact'), false);
+  assert.equal(parseDataset(serializeDataset(table)).domainArtifact, undefined);
+  // A legacy record with no field parses as undefined (byte-stable).
+  assert.equal(parseDataset({ name: 'X', owner: 'a', domain: 'sales', tier: 'asset' }).domainArtifact, undefined);
+});
+
 // ----------------------------------------------- connected (Phase 2) back-compat ---
 
 test('back-compat: a legacy dataset.yaml WITHOUT connected loads with no origin/connected', () => {

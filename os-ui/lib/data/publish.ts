@@ -7,6 +7,7 @@ import { visibilityFor, type Dataset } from './dataset-schema.ts';
 import {
   applyApprovedPromotion,
   clearDomainTableStale,
+  assertPromoteTargetFree,
   getDataset,
   listGovernedDatasets,
   requireDomainTableMaterialized,
@@ -58,6 +59,11 @@ export type PublishDeps = {
    *  vacuous/mismatched build ✓ can't leak an un-materialized asset. Wired to the real
    *  Trino `tableQueryable` server-side; a test may inject a fake to prove the gate. */
   verifyDomainTable: MaterializationVerifier;
+  /** PROMOTE-AS-VIEW (platform flag, default OFF): when true a NEW promote publishes a
+   *  governed VIEW over the owner's personal lane instead of a physical CTAS copy. The
+   *  server wires it from `promoteAsView()`; absent/false ⇒ today's table copy. Only NEW
+   *  promotes read this — an already-promoted dataset keeps its recorded `domainArtifact`. */
+  asView?: boolean;
 };
 
 export type PublishOutcome =
@@ -84,10 +90,19 @@ export async function publishApprovedPromotion(
   deps: PublishDeps,
 ): Promise<PublishOutcome> {
   // 1. Every promotion gate, WITHOUT flipping (tier/role/domain/transparency).
-  const d = validatePromotion(req, approver);
+  validatePromotion(req, approver);
 
-  // 2. Compile the publish plan (source = the requester's personal-lane table).
-  const plan = publishPlan(d);
+  // 1a. COLLISION GUARD (data-loss): if this dataset's `assetTarget` would land on a domain
+  //     table an EXISTING promoted sibling already owns (name/slug collision), REJECT with a
+  //     rename prompt (409). We never pin the physical slug — it also names the owner's
+  //     personal-lane table, so mutating it would break the owner's own dataset + the demote
+  //     round-trip. A unique target passes untouched.
+  const d = assertPromoteTargetFree(req.datasetId);
+
+  // 2. Compile the publish plan (source = the requester's personal-lane table). Under the
+  //    promote-as-view flag this emits a governed VIEW over the personal lane instead of a
+  //    physical CTAS copy — the read path (target FQN) is identical either way.
+  const plan = publishPlan(d, { asView: deps.asView });
 
   // 3. The approver's identity — uid AND Trino session principal are the APPROVING
   //    Builder, so the write floor, the OPA read governance inside the CTAS and the
@@ -132,8 +147,9 @@ export async function publishApprovedPromotion(
   //    (the Northpeak gap). Throws 502 (tier untouched) if the domain table is absent.
   await requireDomainTableMaterialized(plan.target, approver, deps.verifyDomainTable);
 
-  // 7. ✓ only: flip the registry tier (re-validates; 409 on a concurrent flip).
-  const dataset = applyApprovedPromotion(req, approver);
+  // 7. ✓ only: flip the registry tier (re-validates; 409 on a concurrent flip). Record the
+  //    artifact kind (view vs table) so demote/reconcile pick the right path.
+  const dataset = applyApprovedPromotion(req, approver, plan.artifact);
 
   // 8. The Cube leg (T7): governed datasets with a built Gold now appear in the
   //    `/api/cube/models` payload the sync sidecar delivers (≤60s on the cluster).
@@ -168,6 +184,14 @@ export async function rematerializeDomainTable(
   const d = getDataset(datasetId, operator);
   if (d.tier === 'dataset') {
     return { ok: false, fqn: '', error: 'This dataset is not promoted — nothing to re-materialize' };
+  }
+  // PROMOTE-AS-VIEW: a view is a live pass-through to the owner's personal lane — it can NEVER
+  // drift, so a re-materialize is a NO-OP (there is no CTAS to re-run). Report ok against the
+  // existing domain FQN (the view). This is what makes reconcile a no-op for view-promoted
+  // datasets while the CTAS heal below still runs for legacy table-promoted ones.
+  if (d.domainArtifact === 'view') {
+    const report: DataBuildReport = { ok: true, rows: [], skipped: [] };
+    return { ok: true, fqn: publishPlan(d, { asView: true }).target, mode: 'view', report, dataset: d };
   }
   // Domain-schema write floor (separation of duties, same as promotion): only a Builder+
   // may re-run a CTAS into the governed domain schema. A creator's rebuild leaves it STALE.

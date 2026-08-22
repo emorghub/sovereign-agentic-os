@@ -13,6 +13,9 @@ Two independent gates, both enforced here BEFORE any SQL reaches Trino:
        * CREATE OR REPLACE TABLE  iceberg.<schema>.<table> AS SELECT ...
        * CREATE TABLE IF NOT EXISTS iceberg.<schema>.<table> AS SELECT ...
        * DROP TABLE IF EXISTS      iceberg.<schema>.<table>
+       * CREATE OR REPLACE VIEW iceberg.<schema>.<view> AS
+             SELECT ... FROM iceberg.<schema>.<table>    (governed promote-as-view)
+       * DROP VIEW IF EXISTS iceberg.<schema>.<view>
        * INSERT INTO iceberg.<schema>.<table> SELECT ...          (incremental append)
        * MERGE INTO  iceberg.<schema>.<table> USING ... ON ... WHEN ...  (upsert)
        * DELETE FROM iceberg.<schema>.<table> WHERE _batch_id = '<id>'
@@ -68,6 +71,23 @@ _RE_CTAS_IFNE = re.compile(
 )
 _RE_DROP = re.compile(
     rf"drop\s+table\s+if\s+exists\s+{CATALOG}\.({_IDENT})\.({_IDENT})",
+    re.IGNORECASE,
+)
+# Governed PROMOTE-AS-VIEW: a domain VIEW over the owner's personal-lane table instead
+# of a physical CTAS copy (a view never drifts, so promote/demote stop copying data). The
+# AS body is restricted to a PLAIN `SELECT ... FROM iceberg.<schema>.<table>` — NOT arbitrary
+# DDL/subqueries/joins — so this shape can only ever expose ONE existing iceberg table as a
+# view (the read still runs governed, exactly like a CTAS SELECT). The view's target schema
+# is the authorization subject (same domain/personal floor as a CTAS); the SOURCE table's
+# schema is unconstrained here BY DESIGN (a domain view points at `iceberg.personal_<owner>.…`),
+# and the DEFINER (the query-tool service identity) is what lets domain members read it.
+_RE_CREATE_VIEW = re.compile(
+    rf"create\s+or\s+replace\s+view\s+{CATALOG}\.({_IDENT})\.({_IDENT})\s+as\s+"
+    rf"select\s+.*\bfrom\s+{CATALOG}\.{_IDENT}\.{_IDENT}\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+_RE_DROP_VIEW = re.compile(
+    rf"drop\s+view\s+if\s+exists\s+{CATALOG}\.({_IDENT})\.({_IDENT})",
     re.IGNORECASE,
 )
 # Incremental sync (append): the inserted rows MUST come from a SELECT — a plain
@@ -191,6 +211,7 @@ def guard_read(sql: str) -> str:
 class ParsedWrite:
     kind: str            # 'create_schema' | 'ctas' | 'drop_table' | 'insert_select' | 'merge'
                          # | 'delete_batch' | 'expire_snapshots' | 'optimize'
+                         # | 'create_view' | 'drop_view'
     catalog: str         # always 'iceberg'
     schema: str          # target schema (the authorization subject)
     table: Optional[str] # None for create_schema
@@ -243,6 +264,14 @@ def parse_statement(sql: str) -> ParsedWrite:
     if m:
         return ParsedWrite("drop_table", CATALOG, m.group(1), m.group(2))
 
+    m = _RE_CREATE_VIEW.fullmatch(s)
+    if m:
+        return ParsedWrite("create_view", CATALOG, m.group(1), m.group(2))
+
+    m = _RE_DROP_VIEW.fullmatch(s)
+    if m:
+        return ParsedWrite("drop_view", CATALOG, m.group(1), m.group(2))
+
     m = _RE_INSERT_SELECT.fullmatch(s)
     if m:
         return ParsedWrite("insert_select", CATALOG, m.group(1), m.group(2))
@@ -267,9 +296,10 @@ def parse_statement(sql: str) -> ParsedWrite:
         400,
         "statement not allowed: only CREATE SCHEMA IF NOT EXISTS, "
         "CREATE OR REPLACE TABLE ... AS SELECT, CREATE TABLE IF NOT EXISTS ... AS "
-        "SELECT, DROP TABLE IF EXISTS, INSERT INTO ... SELECT, MERGE INTO ... USING "
-        "... ON ... WHEN ..., DELETE FROM ... WHERE _batch_id = '<id>', and ALTER "
-        "TABLE ... EXECUTE expire_snapshots(...)/optimize(...) "
+        "SELECT, DROP TABLE IF EXISTS, CREATE OR REPLACE VIEW ... AS SELECT ... FROM "
+        "iceberg.<schema>.<table>, DROP VIEW IF EXISTS, INSERT INTO ... SELECT, MERGE "
+        "INTO ... USING ... ON ... WHEN ..., DELETE FROM ... WHERE _batch_id = '<id>', "
+        "and ALTER TABLE ... EXECUTE expire_snapshots(...)/optimize(...) "
         "against iceberg.<schema>.<table> are permitted",
     )
 

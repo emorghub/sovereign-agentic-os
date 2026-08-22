@@ -3,9 +3,10 @@
  */
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
 import FolderTree, { type FolderSelection, type FolderTreeItem } from '@/components/core/FolderTree';
+import ChooseContextShell, { type ContextTypeDescriptor } from '@/components/core/ChooseContextShell';
 import {
   CONTEXT_ACCESS_LABELS,
   accessOf,
@@ -31,7 +32,6 @@ import {
 import {
   CHOOSE_CONTEXT_TYPES,
   CHOOSE_CONTEXT_META,
-  grantedSummary,
   type ChooseContextType,
 } from '@/lib/software/appspec/choose-context-model';
 
@@ -83,25 +83,70 @@ export default function SoftwareContextGrants({
   /** Re-pull the app after a create-new so the new grant shows. */
   onReload?: () => void;
 }) {
+  // The Software tab is a thin ADAPTER over the shared ChooseContextShell: it maps its
+  // six CHOOSE_CONTEXT_META entries to ContextTypeDescriptors, keeping its own picker
+  // bodies (Agents/Foldered/Flat) + create-new bodies. The shell owns the chrome only.
+  const types: ContextTypeDescriptor[] = CHOOSE_CONTEXT_TYPES.map((type) => {
+    const meta = CHOOSE_CONTEXT_META[type];
+    const foldered = FOLDERED.has(type);
+    return {
+      key: type,
+      label: meta.label,
+      blurb: meta.blurb,
+      grantedCount: grantedCount(type, value, agentGrants),
+      loadAvailable: async () => {
+        const res = await fetch(
+          `/api/context/available?kind=${type}${foldered ? '&folders=1' : ''}`,
+          { cache: 'no-store' },
+        );
+        const body = await res.json();
+        if (!res.ok) return { items: [] as GrantItem[] };
+        return { items: (body.items as GrantItem[]), folders: (body.folders as FolderRow[]) ?? [] };
+      },
+      renderPicker: (feed) => {
+        const items = feed.items as GrantItem[];
+        const folders = (feed.folders as FolderRow[]) ?? [];
+        if (type === 'agents') {
+          return <AgentsPicker items={items} grants={agentGrants} onChange={onChangeAgents} canEdit={canEdit} />;
+        }
+        if (foldered) {
+          return (
+            <FolderedKind
+              kind={type as ContextKind} items={items} folders={folders}
+              value={value} onChange={onChange} cap={cap} canEdit={canEdit}
+            />
+          );
+        }
+        return (
+          <FlatKind
+            kind={type as ContextKind} items={items}
+            value={value} onChange={onChange} cap={cap} canEdit={canEdit}
+          />
+        );
+      },
+      createNew: canEdit
+        ? {
+            mode: meta.createMode,
+            // The shell re-fetches its own feed via `refresh`; the app-level re-pull
+            // (onReload) is composed here so a create still surfaces the new grant.
+            render: ({ refresh }) => (
+              <CreateNew
+                type={type}
+                appId={appId}
+                appName={appName}
+                onCreated={() => { refresh(); onReload?.(); }}
+              />
+            ),
+          }
+        : undefined,
+    };
+  });
+
   return (
-    <div className="context-grants">
-      {CHOOSE_CONTEXT_TYPES.map((type) => (
-        <TypeSection
-          key={type}
-          type={type}
-          value={value}
-          onChange={onChange}
-          agentGrants={agentGrants}
-          onChangeAgents={onChangeAgents}
-          cap={cap}
-          canEdit={canEdit}
-          appId={appId}
-          appName={appName}
-          onReload={onReload}
-        />
-      ))}
-      {cap.locked ? <p className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>{cap.reason}</p> : null}
-    </div>
+    <ChooseContextShell
+      types={types}
+      footer={cap.locked ? <p className="muted" style={{ fontSize: 11.5, marginTop: 6 }}>{cap.reason}</p> : null}
+    />
   );
 }
 
@@ -109,120 +154,6 @@ export default function SoftwareContextGrants({
 function grantedCount(type: ChooseContextType, value: ContextGrantsValue, agentGrants: AppAgentGrant[]): number {
   if (type === 'agents') return agentGrants.length;
   return value[type as ContextKind]?.length ?? 0;
-}
-
-function TypeSection({
-  type, value, onChange, agentGrants, onChangeAgents, cap, canEdit, appId, appName, onReload,
-}: {
-  type: ChooseContextType;
-  value: ContextGrantsValue;
-  onChange: (next: ContextGrantsValue) => void;
-  agentGrants: AppAgentGrant[];
-  onChangeAgents?: (next: AppAgentGrant[]) => void;
-  cap: ContextAccessCap;
-  canEdit: boolean;
-  appId?: string;
-  appName?: string;
-  onReload?: () => void;
-}) {
-  const meta = CHOOSE_CONTEXT_META[type];
-  const [open, setOpen] = useState(false);
-  const [items, setItems] = useState<GrantItem[] | null>(null);
-  const [folders, setFolders] = useState<FolderRow[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const granted = grantedCount(type, value, agentGrants);
-
-  const load = useCallback(() => {
-    if (loaded) return;
-    setLoaded(true);
-    const foldered = FOLDERED.has(type);
-    fetch(`/api/context/available?kind=${type}${foldered ? '&folders=1' : ''}`, { cache: 'no-store' })
-      .then(async (res) => {
-        const body = await res.json();
-        if (res.ok) {
-          setItems(body.items as GrantItem[]);
-          if (foldered) setFolders((body.folders as FolderRow[]) ?? []);
-        } else setItems([]);
-      })
-      .catch(() => setItems([]));
-  }, [type, loaded]);
-
-  useEffect(() => { if (open) load(); }, [open, load]);
-
-  // A create-new (or a grant-on-select of a just-listed item) should refresh both the app
-  // and this section's list, so the new artifact appears in "Already available" immediately.
-  const refresh = useCallback(() => {
-    setLoaded(false);
-    setItems(null);
-    onReload?.();
-  }, [onReload]);
-
-  // M8: deep-link kinds (Agents / Connections) open their builder in a NEW TAB. On return, the
-  // just-built artifact won't be in this list unless we re-fetch — so re-run load when the window
-  // regains focus while this section is open and points at another tab's builder.
-  useEffect(() => {
-    if (!open || meta.createMode !== 'deep-link') return;
-    const onFocus = () => { setLoaded(false); setItems(null); };
-    window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
-  }, [open, meta.createMode]);
-
-  return (
-    <div className="grant-block" style={{ marginBottom: 14, border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px' }}>
-      <button
-        type="button"
-        className="row"
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          width: '100%', justifyContent: 'space-between', alignItems: 'center', gap: 8,
-          background: 'none', border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left',
-        }}
-        aria-expanded={open}
-      >
-        <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <span className="comp-label" style={{ margin: 0 }}>
-            {meta.label}
-            {granted > 0 ? <span className="badge" style={{ marginLeft: 8 }}>{granted} granted</span> : null}
-          </span>
-          <span className="muted" style={{ fontSize: 11.5 }}>{meta.blurb}</span>
-        </span>
-        <span aria-hidden style={{ color: 'var(--text-faint)', fontSize: 11, transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 120ms ease' }}>▶</span>
-      </button>
-
-      {open ? (
-        <div style={{ marginTop: 12 }}>
-          {/* ── Already available + Add existing ─────────────────────────────── */}
-          <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-            {grantedSummary(granted)}
-            <span style={{ fontWeight: 400 }}> · ＋ Add existing</span>
-          </div>
-          {items === null ? (
-            <p className="muted" style={{ fontSize: 13, margin: 0 }}>Loading…</p>
-          ) : type === 'agents' ? (
-            <AgentsPicker items={items} grants={agentGrants} onChange={onChangeAgents} canEdit={canEdit} />
-          ) : FOLDERED.has(type) ? (
-            <FolderedKind
-              kind={type as ContextKind} items={items} folders={folders}
-              value={value} onChange={onChange} cap={cap} canEdit={canEdit}
-            />
-          ) : (
-            <FlatKind
-              kind={type as ContextKind} items={items}
-              value={value} onChange={onChange} cap={cap} canEdit={canEdit}
-            />
-          )}
-
-          {/* ── Create new ───────────────────────────────────────────────────── */}
-          {canEdit ? (
-            <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-              <div className="muted" style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>＋ Create new</div>
-              <CreateNew type={type} appId={appId} appName={appName} onCreated={refresh} />
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
-  );
 }
 
 /** The "Create new" affordance per type — in-folder create, deep-link, or a derived pointer. */

@@ -713,6 +713,26 @@ test('publishPlan falls back to silver when no Gold is built, and refuses bronze
   );
 });
 
+test('publishPlan with asView emits a governed VIEW over the personal lane (not a CTAS)', () => {
+  const plan = publishPlan(
+    { name: 'Returns Impact', domain: 'sales', owner: 'amir', versions: { silver: { built: true }, gold: { built: true } } },
+    { asView: true },
+  );
+  assert.equal(plan.artifact, 'view');
+  // Same source/target FQNs as the CTAS path — only the statement kind changes.
+  assert.equal(plan.source, 'iceberg.personal_amir.gold_returns_impact');
+  assert.equal(plan.target, 'iceberg.sales.gold_returns_impact');
+  assert.equal(plan.sql, 'create or replace view iceberg.sales.gold_returns_impact as select * from iceberg.personal_amir.gold_returns_impact');
+  // Guard shape: single statement, no comments, no ';'.
+  assert.ok(!plan.sql.includes(';') && !plan.sql.includes('--') && !plan.sql.includes('/*'));
+});
+
+test('publishPlan default (no opts) is a table copy — byte-for-byte the pre-flag behaviour', () => {
+  const plan = publishPlan({ name: 'Orders', domain: 'sales', owner: 'amir', versions: { silver: { built: true }, gold: { built: true } } });
+  assert.equal(plan.artifact, 'table');
+  assert.match(plan.sql, /^create or replace table /);
+});
+
 test('publishPlan sanitizes an email owner into the same personal schema the guard mints', () => {
   const plan = publishPlan({
     name: 'Orders', domain: 'sales', owner: 'Amir@Example.com',

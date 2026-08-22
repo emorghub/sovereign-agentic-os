@@ -13,6 +13,89 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.141 — Self-heal the "domain gold table not materialized" drift (probe-before-claim + reconcile sweep + zombie-asset prevention)
+
+The recurring #96 / #151 materialization-gap class, diagnosed live on `ds_ylney9n5q5`
+(`northpeak_service_cases`, domain `agentic-leader-q3-2026`): a promoted dataset's registry
+reports it **served** (tier=asset, queryable, cube-ready) at `iceberg.<domain>.gold_<slug>`, but
+the **physical Iceberg table has drifted out of the warehouse** and the dataset carries **no
+`domainTableStale` flag** — so the OS believes it is fine, offers no repair, and Dashboards/Cube
+dead-end with "not materialized". This wave **heals** existing zombies and **prevents** new ones.
+
+#### Fixed / Added
+- **Probe-before-claim (honesty).** The single-dataset detail read (`GET /api/data/datasets/[id]`)
+  now **physically probes** a promoted dataset's domain gold table (the same governed
+  `tableQueryable` probe the publish uses, via `domainTableMissing()` in
+  `lib/data/reconcile-server.ts`) before the detail view claims it queryable/cube-ready. A drifted
+  table is flagged `domainTableStale` at read time — so the honest "not materialized — re-materialize
+  to serve" state + the repair affordance appear even when the (previously unreliable) stored flag was
+  never set. Fail-soft (un-promoted / unreachable engine never cries wolf) and single-read only (never
+  per-row in a list).
+- **Governed reconcile sweep.** New `reconcileDomainTables(operator, deps, {domain?})`
+  (`lib/data/reconcile.ts`, pure + fully unit-tested) enumerates the promoted domain tables the
+  operator governs, probes each physical table, and re-materializes any **missing** or **stale** one by
+  re-running the **stored** publish CTAS via the existing `rematerializeDomainTable` (preserves grain +
+  measures — never reconstructs). Best-effort per dataset (one failure never aborts the sweep;
+  idempotent — a healthy table is skipped). Honest per-dataset report
+  `{datasetId, name, fqn, before: missing|stale|ok, after: refreshed|failed|skipped, error?}`.
+  Governance: Admin tenant-wide, or Builder+ within their own domain (the domain-schema write floor).
+  Exposed as **`POST /api/platform-admin/reconcile-domain-tables`** (admin-gated via `adminCtx`,
+  optional `{domain}`) and the **`reconcile_domain_tables`** MCP verb (data-write surface, Builder+).
+- **Actionable dead-ends.** The Data-tab dataset detail (`DataBuilder.tsx`) shows a prominent
+  **"Re-materialize domain table"** action (Builder+) whenever the domain table is missing/stale for a
+  promoted dataset — calling the existing `rematerializeOnly` repair route. The Dashboards
+  "not available in the governed model" warning now points the operator to that Data-tab action instead
+  of dead-ending.
+- **Zombie-asset PREVENTION (root cause).** A dataset **demote** (`unshare`, asset→dataset) now
+  **retires the governed domain gold table** (`retireDomainTables` in `lib/data/physical-delete.ts` —
+  drops only the domain copies, the owner's personal build is untouched) and **warns on dependents**
+  (`dependentsOf`), so a demoted dataset can never be read as a served domain asset (and a later
+  re-promote can't resurrect a served-but-empty table). Confirmed the **promote/re-promote path is
+  already fail-closed** — `requireDomainTableMaterialized` re-probes the exact domain FQN before any
+  tier flip — and added a **round-trip regression test** (promote → served & in the governed set →
+  demote → not served, no zombie → re-promote → fail-closed again).
+
+### os-ui 0.6.142–0.6.145 — 2026-08-19→22 — Materialization self-heal, honest probes, and the promote/demote round-trip
+
+- **0.6.142 — reconcile probe false-skip.** The self-heal probe gated table existence on a Cube `/meta` ping and *failed open* ("present") on timeout — during a CTAS-heavy sweep Cube is busy, so a genuinely-missing table was declared OK and skipped. Now gated on `queryToolReachable()` (the Trino path the table actually lives in), checked once per sweep, **fail-closed** (probe throw ⇒ missing ⇒ repair). Cube health ≠ Trino table existence.
+- **0.6.143/0.6.144 — build/promote gated on Trino, not Cube.** `buildStage('promote')` (and the silver/gold builds) were Cube-reachability-gated and would fabricate a "refreshed" offline-mock result when Cube was busy. Gated on `queryToolReachable()` so a real deploy never fakes a materialization.
+- **0.6.145 — promote/demote round-trip (no slug poisoning).** Pinning a unique promote slug mutated `physicalSlug`, which also names the owner's **personal-lane** table — breaking the owner's own dataset and the demote round-trip. Replaced with `assertPromoteTargetFree` (block-on-collision, 409 with a rename prompt) so a demoted dataset lands back as the creator's My-dataset and works again; the physical slug is never mutated.
+
+### os-ui 0.6.146–0.6.151 — 2026-08-19→22 — Talk-to-Data reasoning tier, context-picker + app-write + durable-agent + dataset-id polish, and promote-as-view (flagged)
+
+- **0.6.146 — Talk-to-Data.** Always runs on the reasoning tier + prompt hardening, so it supports real SQL questions and stops inventing counts (e.g. "25 service centers" over a 5-row table).
+- **0.6.147 — folder-name truncation.** The context/folder pickers cut names to half; the row now wraps (`flexWrap`) so the full folder path is legible in every tab.
+- **0.6.148 — apps write back.** The Software builder's context assistant now proposes **write** access (not only read) when an epic needs to persist, and proposes a **new record table** when the information has nowhere to live — via `os.records.*`, never a dataset.
+- **0.6.149 — durable agent runs.** Agent build/run state is checkpointed so a run survives a tab-switch / pod restart (resumable, no lost progress).
+- **0.6.150 — clean rebuild.** Durable-agent + promote-as-view code landed together from a clean HEAD (the view flag ships OFF).
+- **0.6.151 — dataset id in title.** The dataset id shows as small grey monospace after the name — trivial copy for support/queries.
+- **PROMOTE-AS-VIEW (behind `promoteAsView`, default OFF).** Promotion can publish a governed Trino **VIEW** `iceberg.<domain>.gold_<slug>` over the owner's personal-lane gold instead of a physical CTAS copy; demote = `DROP VIEW`; reconcile/re-materialize become no-ops (a view can't drift) — deleting the entire zombie/collision/re-materialize class. Requires the **query-tool 0.6.2** image (CREATE-OR-REPLACE-VIEW / DROP-VIEW allowlist in `execute_guard.py`); OPA needs no change (the view shares the domain FQN governance is keyed on). Verified live: `table_type=VIEW`, member reads the view, base personal-lane read denied.
+
+### os-ui 0.6.152 — 2026-08-22 — Agent-build reach-END fix + autonomous-agents platform gate
+
+- **Agent-system Build "test invocation did not reach END" (cohort blocker).** The offline graph verifier only counted END via a supervisor node or a handoff-less leaf — but `handoff` edges compile to *conditional* Commands, so a cyclic/handoff team (coordinator↔specialist) had no leaf and failed verification even though the real runtime terminates fine. `runGraph` now treats any ReAct node as able to finish to END; cyclic-handoff regression test added.
+- **Autonomous agents OFF by default.** New platform flag `autonomousAgentsEnabled` (default OFF, nil-safe). Unattended triggers (cron schedule + event/API) are refused **fail-closed** at the single run entrypoint (`runScheduledSystem`) with an honest policy message until a platform admin enables it in Admin → Platform Settings; running a system by hand is unaffected.
+
+### os-ui 0.6.153 — 2026-08-22 — Agent context-scoping, Data DQ-cards + auto-advance, Software heal + assistant fallback
+
+- **Agent run only sees granted context (security/UX).** The run system prompt was injecting each granted tab's full `CONTEXT.md` — which enumerates the whole tool catalog + golden paths — so an agent granted only `query_data` was *told* to call `build_gold_join`/`run_quality_checks`/`create_software`/`index_knowledge` (execution refused them, but the discovery layer leaked). Replaced with a **grant-scoped tool brief**; the build spec is injected only when `create_software` is granted. Execution-time governance untouched (defense-in-depth).
+- **Data — "Suggest quality rules" produces rule cards.** The validate stage returned prose; it now returns the structured `{checks}` contract (recovered via the tolerant parser even when a reasoning model wraps JSON in preamble) and files them as editable rule cards.
+- **Data — auto-advance on upload.** After a Bronze commit, Silver → Gold → docs → DQ rules build automatically (best-effort, Bronze stays raw, each stage independent, all override-able).
+- **Software — "Reconnect git" + assistant fallback.** Offline apps (created while Forgejo was briefly unreachable) now show a **Reconnect git** action that re-probes + re-scaffolds; the app assistant falls back to the saved spec when the on-screen draft is mid-edit-invalid.
+- **query-tool 0.6.2 pinned in the chart** so `helm upgrade` no longer reverts the promote-as-view allowlist.
+
+### os-ui 0.6.154 — 2026-08-22 — Agents-tab builder redesign (Define · Grant · Design · Build&Run · Evaluate)
+
+- Five-stage flow: **Define** (the outcome), **Grant** ("what your team can use" — rebuilt on a shared `ChooseContextShell` primitive so it matches the Software tab's Choose-Context UX; Software was refactored onto the *same* primitive with zero behavior change), **Design** (a team is **auto-proposed on entry** from the deliverable + grants, grounded only in granted context, confirmed via the one governed commit path), **Build & Run**, **Evaluate**.
+- A **per-stage AI assistant** with apply-suggestion cards. Backend gains chat + propose modes; the legacy `{instruction}` scaffold path is unchanged. Saved systems load with no yaml migration.
+
+### os-ui 0.6.155 — 2026-08-22 — Agents builder iteration + View/Edit mode
+
+- **Six stages:** Define · Grant · Design · **Build** · **Run** · Evaluate (Build & Run split apart again).
+- The **trigger** (Manual / On schedule / Called from system) moved to **Define** — how the team runs is defined up front.
+- The per-stage assistant moved to the **top** of each stage and **auto-suggests on stage entry** (proactive, ref-guarded, dismissible).
+- **View vs Edit:** a ready+tested system (built and run at least once) opens in a read-only **View** (trigger/run · live monitor · results + diagnostics, reusing the Run + Evaluate panels); the six-stage builder is **Edit** (✎). Matches the OS-wide Context-tab View/Edit convention.
+
 ## [os-ui 0.6.140] — 2026-08-14 — Remove the in-app tool overlay entirely (embedded tools open in their own tab)
 
 ### Fixed

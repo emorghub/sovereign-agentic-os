@@ -33,6 +33,22 @@ test('object stage: unusable prose → null', () => {
   assert.equal(parseStageJson('sorry, I cannot help with that'), null);
 });
 
+// Data · Validate "Suggest quality rules": the no-profile-suggestions branch now returns a
+// strict {checks} JSON contract (like Define) instead of prose, so the action creates
+// editable rule cards. A reasoning model that wraps that JSON in preamble prose used to be
+// dropped by the naive JSON.parse — leaving only prose and NO rules. The tolerant guard
+// must recover the {checks} object so the rules land as cards.
+test('validate suggest-rules: recovers a {checks} object wrapped in prose (the DQ-suggest bug)', () => {
+  const reply =
+    'Sure — based on the columns, here are sensible rules:\n' +
+    '{"checks":[{"rule":"not_null","column":"id"},{"rule":"range","column":"amount","min":0,"max":1000}]}\n' +
+    'Let me know if you want more.';
+  const parsed = parseStageJson(reply) as { checks?: unknown[] } | null;
+  assert.ok(parsed && Array.isArray(parsed.checks), 'checks recovered from prose-wrapped reply');
+  assert.equal(parsed.checks.length, 2);
+  assert.deepEqual(parsed.checks[0], { rule: 'not_null', column: 'id' });
+});
+
 test('array stage (expectArray): parses a clean array', () => {
   assert.deepEqual(parseStageJson('[{"viz":"bar"}]', true), [{ viz: 'bar' }]);
 });

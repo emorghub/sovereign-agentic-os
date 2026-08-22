@@ -741,7 +741,7 @@ export default function FolderTree(props: FolderTreeProps) {
   const picker = props.variant === 'picker' ? props : null;
 
   return (
-    <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'flex-start' }}>
       {roots.includes('personal') && (
         <Root
           scope="personal"

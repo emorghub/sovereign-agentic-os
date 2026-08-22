@@ -58,11 +58,14 @@ export async function buildStage(
     releaseSchema: write?.releaseSchema,
     targetFqn: write?.targetFqn,
   };
-  // The live/offline switch probes the service the stage ACTUALLY depends on:
-  // Silver/Gold are a governed CTAS through the query-tool (Cube is irrelevant —
-  // probing Cube here silently offline-mocked transforms whenever Cube was down);
-  // the metric/dashboard/publish stages keep Cube as the irreplaceable dependency.
-  const reachable = stage === 'silver' || stage === 'gold'
+  // The live/offline switch probes the service the stage ACTUALLY depends on.
+  // Silver/Gold AND promote are a governed CTAS through the query-tool (Trino) — Cube is
+  // NOT their essential dependency (promote's core act is a CREATE-OR-REPLACE into the
+  // domain schema; the Cube model is a downstream best-effort registration). Gating promote
+  // on Cube silently OFFLINE-MOCKED the CTAS whenever Cube was slow/down — e.g. a
+  // reconcile sweep hammering Cube would fabricate a "refreshed" that never landed a table.
+  // Only the metric/dashboard stages keep Cube as the irreplaceable dependency.
+  const reachable = stage === 'silver' || stage === 'gold' || stage === 'promote'
     ? await queryToolReachable()
     : await liveDataReachable();
   if (reachable) {

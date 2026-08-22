@@ -3,28 +3,24 @@
  */
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import BuildRunPanel from './BuildRunPanel';
 import RecurrenceEditor from './RecurrenceEditor';
-import type { System, SafetyPreset, DataLayer, DeclaredOutput, OutputKind } from '@/lib/agents/system-schema';
+import GrantStage from './GrantStage';
+import AgentStageAssistant from './AgentStageAssistant';
+import { NewFolderField } from './GrantPickers';
+import type { System, OutputKind } from '@/lib/agents/system-schema';
 import { classifyModelNeed } from '@/lib/agents/routing';
 import { instructionsOf } from '@/lib/agents/agent-md';
 import {
   addSimpleAgent, moveAgent, removeAgentSimple,
-  setAgentInstructions, setAgentRole, setArtifactGrant, removeArtifactGrant,
-  setDescription, addSystemTool, setDataGrantLayer,
-  setFolderGrant, removeFolderGrant, setArtifactGrantLevel, setFolderGrantLevel,
+  setAgentInstructions, setAgentRole,
+  setDescription, addSystemTool,
   addOutput, removeOutput,
 } from '@/lib/agents/simple-edit';
-import {
-  accessCap, allowedAccessLevels, capabilityToAccess, clampAccess,
-  ACCESS_LABELS, AGENT_SAFETY_PRESETS, type AccessLevel, type AccessCap,
-} from '@/lib/agents/access-levels';
-import { membersOf, isWorkflowId, type ResourceMember } from '@/lib/agents/resource-groups';
-import { scopeLabel, type ScopeKey } from '@/lib/core/scopes';
-import FolderTree, { type FolderSelection } from '@/components/core/FolderTree';
 import { useToast } from '@/components/core/Toast';
-import { itemsUnderFolder, normaliseFolderPath } from '@/lib/core/folders';
+import { normaliseFolderPath } from '@/lib/core/folders';
+import { scopeLabel } from '@/lib/core/scopes';
 import {
   capabilityChipsForGrants, toolsForCapabilityChipsInPool, chipIdsForTools,
   type CapabilityChip,
@@ -37,8 +33,9 @@ import { anchorAttr, ANCHORS } from '@/lib/tutorials/anchors';
 import { usePublishPageContext } from '@/components/core/PageContext';
 import {
   advance, goTo, initialStageState, isSatisfied, markDone,
-  type StageDef, type StageState,
+  type StageState,
 } from '@/lib/core/stages';
+import { AGENT_STAGES, type AgentStageId, type AgentStageCtx } from '@/lib/agents/stages';
 import { runChecks, allChecksPass } from '@/lib/agents/build/run-checks';
 import type { DiagRun } from '@/lib/agents/build/run-diagnostics';
 import { dimensionLabel, type JudgeResult } from '@/lib/agents/evaluate-judge';
@@ -46,53 +43,31 @@ import { downloadEvalPdf } from '@/lib/agents/build/agent-pdf';
 import { useUser } from '@/lib/useUser';
 
 /**
- * Simple mode — the guided builder for non-coders, now a FIVE-phase path:
- *   Define · Design · Build · Run · Evaluate.
+ * Simple mode — the guided builder for non-coders, a SIX-stage path:
+ *   Define · Grant · Design · Build · Run · Evaluate.
  * It reads and writes the SAME `system.yaml` / `agents/<id>/AGENT.md` Developer mode
  * does, through the SAME `commitSystem` file write and `/api/agents` endpoints. There
- * is NO parallel data model. Build/Run/Evaluate reuse the ONE `BuildRunPanel` run
- * engine (gated per phase); the schedule reuses the existing schedule route; the
- * LLM-judge reuses the ONE governed assistant model via the evaluate route.
+ * is NO parallel data model. Build/Run/Evaluate reuse the ONE `BuildRunPanel` run engine
+ * (gated per phase); the schedule reuses the existing schedule route; the LLM-judge reuses
+ * the ONE governed assistant model via the evaluate route.
  *
- *  1. Define    — Name, Description (the describe→scaffold box), safety preset + trigger mode.
- *  2. Design    — the team: per-agent cards + a template picker on "+ Add agent".
- *  3. Build     — compile + verify the team (no run).
- *  4. Run       — one-click ▶ Run + live progress + the final result.
- *  5. Evaluate  — per-agent breakdown + deterministic checks + LLM-judge + diagnostics/PDF/trace.
+ *  1. Define    — Name + a plain "Describe the deliverable" box + where the results go + trigger.
+ *  2. Grant     — the safety preset + the Choose-Context grant surface (shared shell).
+ *  3. Design    — the team: per-agent cards, a template picker, and an auto-suggested team.
+ *  4. Build     — compile + verify (the same build developers run).
+ *  5. Run       — one-click ▶ Run, live progress, the final result + per-node drill-down.
+ *  6. Evaluate  — per-agent breakdown + deterministic checks + LLM-judge + diagnostics/PDF/trace.
  *
- * The stepper rail + phase gating ride the OS-wide staged-builder primitive
- * (lib/core/stages.ts + components/core/StageShell.tsx) — this builder is its
- * reference adoption; the phase CONTENT below stays Agents-specific.
+ * The stage rail + gating ride the OS-wide staged-builder primitive (lib/agents/stages.ts +
+ * lib/core/stages.ts + components/core/StageShell.tsx). Every stage body mounts a per-stage
+ * assistant (AgentStageAssistant) at the TOP, which auto-suggests on entry. The stage CONTENT
+ * below stays Agents-specific.
+ *
+ * This is the EDIT surface. A ready-and-tested system (built + run at least once) opens in a
+ * read-only VIEW instead (see ReadOnlyView) with a ✎ Edit affordance owned by SystemView.
  */
 
-type Phase = 'define' | 'design' | 'build' | 'run' | 'evaluate';
-
-/** The live state the phase gates/✓-conditions read — derived fresh each render. */
-type PhaseCtx = {
-  named: boolean;
-  ready: boolean;
-  builtOk: boolean;
-  hasRun: boolean;
-  checksPass: boolean;
-};
-
-/**
- * The five phases as a shared-core staged path (lib/core/stages.ts + the StageShell
- * rail). `enabled` gates which phases are reachable — you can't Build/Run/Evaluate
- * without a team, and you can't Evaluate without a run. `completed` is each phase's
- * underlying condition; a phase shows a ✓ only when the user has ALSO completed it
- * this session (tracked in the StageState below), so a step never shows done on
- * first open, and a check clears if the user later invalidates it (e.g. deletes
- * every agent). Build/Run/Evaluate reflect their live server state.
- */
-const PHASES: StageDef<Phase, PhaseCtx>[] = [
-  { id: 'define', title: 'Define', completed: (c) => c.named },
-  { id: 'design', title: 'Design', completed: (c) => c.ready },
-  { id: 'build', title: 'Build', enabled: (c) => c.ready, completed: (c) => c.builtOk }, // a green ✓ once the team is built
-  { id: 'run', title: 'Run', enabled: (c) => c.ready, completed: (c) => c.hasRun },
-  // Evaluate is ✓ once a run's deterministic checks all pass (the "✓ all passed" state).
-  { id: 'evaluate', title: 'Evaluate', enabled: (c) => c.ready && c.hasRun, completed: (c) => c.checksPass },
-];
+const PHASES = AGENT_STAGES;
 
 type BuildRunProps = {
   running: boolean;
@@ -100,6 +75,9 @@ type BuildRunProps = {
   activity: React.ComponentProps<typeof BuildRunPanel>['activity'];
   lastRun: React.ComponentProps<typeof BuildRunPanel>['lastRun'];
   nodePath: string[];
+  /** True for editors AND in-domain consumers who may run a Shared system. Optional
+   *  (falls back to canEdit in the panel) — threaded so read-only VIEW can still Run. */
+  canRun?: boolean;
 };
 
 export default function SimpleBuilder({
@@ -110,6 +88,8 @@ export default function SimpleBuilder({
   buildRun,
   onCommit,
   onReload,
+  view = false,
+  onEdit,
 }: {
   systemId: string;
   system: System;
@@ -121,13 +101,35 @@ export default function SimpleBuilder({
   onCommit: (next: System) => Promise<void> | void;
   /** Re-fetch the system view after a server-side edit (scaffold). */
   onReload: () => Promise<void> | void;
+  /**
+   * Read-only VIEW mode — a ready-and-tested system (built + run at least once) opens here
+   * instead of the six-stage EDIT builder: Trigger/Run · Monitor · Results + Diagnostics,
+   * reusing the same Run + Evaluate panels arranged read-only. SystemView owns the gate +
+   * the ✎ Edit toggle (`onEdit`). Absent/false = the EDIT builder.
+   */
+  view?: boolean;
+  onEdit?: () => void;
 }) {
+  // Read-only VIEW — the calm surface for a finished team: run it now (or see its schedule),
+  // watch it run, read the last result + diagnostics. Reuses the Run + Evaluate panels.
+  if (view) {
+    return (
+      <ReadOnlyView
+        systemId={systemId}
+        system={system}
+        canEdit={canEdit}
+        buildRun={buildRun}
+        onReload={onReload}
+        onEdit={onEdit}
+      />
+    );
+  }
   // Always OPEN on Define — creating a new system OR opening an existing one lands
   // here, never jumping ahead. Phase checkmarks reflect what the user has actually
   // completed THIS session (`stage.done`), so a freshly opened system shows NO green
   // checks even if its persisted state happens to satisfy a phase's condition. Both
   // rules are guaranteed by the shared stage model (lib/core/stages.ts).
-  const [stage, setStage] = useState<StageState<Phase>>(() => initialStageState(PHASES));
+  const [stage, setStage] = useState<StageState<AgentStageId>>(() => initialStageState(PHASES));
   const phase = stage.current;
 
   // Tell "Ask the OS" exactly what's open: this agent system + the current phase, so
@@ -164,7 +166,7 @@ export default function SimpleBuilder({
 
   // The live context the PHASES gates/conditions read. `checksPass` inspects the run
   // only when one exists (&& short-circuit), matching the old lazy evaluate condition.
-  const ctx: PhaseCtx = {
+  const ctx: AgentStageCtx = {
     named: !!system.system.name && system.system.name !== 'Untitled system',
     ready,
     builtOk: !!buildRun.lastBuild?.ok,
@@ -175,7 +177,7 @@ export default function SimpleBuilder({
   // Every transition goes through the shared stage model: `go` jumps (entry-gated),
   // `next` advances and records the current phase's ✓ only when its condition is met
   // — the same "mark if done, then move" behavior the builder always had.
-  const go = (id: Phase) => setStage((s) => goTo(PHASES, s, id, ctx));
+  const go = (id: AgentStageId) => setStage((s) => goTo(PHASES, s, id, ctx));
   const next = () => setStage((s) => advance(PHASES, s, ctx));
 
   // Build · Run · Evaluate complete inside their own panels (no explicit "Next"), so
@@ -188,6 +190,13 @@ export default function SimpleBuilder({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, buildRun.lastBuild?.ok, hasRun, buildRun.lastRun]);
+
+  // The per-stage assistant, mounted at the TOP of every stage body. One helper, one
+  // endpoint; it auto-suggests on entering each stage (edit-mode only — read-only VIEW
+  // never fires it, since nothing can be applied there).
+  const assistant = (
+    <AgentStageAssistant systemId={systemId} system={system} stage={phase} canEdit={editable} onCommit={commit} autoSuggest={editable} />
+  );
 
   return (
     <div className="simple-builder">
@@ -215,38 +224,54 @@ export default function SimpleBuilder({
       {err ? <div className="error" style={{ marginBottom: 12 }}>{err}</div> : null}
 
       {phase === 'define' ? (
-        <DefineStep
-          systemId={systemId}
-          system={system}
-          canEdit={editable}
-          onScaffolded={async () => { await onReload(); setStage((s) => goTo(PHASES, markDone(s, 'define'), 'design', ctx)); }}
-          onReload={onReload}
-          onCommit={(next) => commit(next)}
-          onNext={next}
-        />
+        <div {...anchorAttr(ANCHORS.agents.define)}>
+          {assistant}
+          <DefineStep
+            systemId={systemId}
+            system={system}
+            canEdit={editable}
+            onCommit={(next) => commit(next)}
+            onReload={onReload}
+            onNext={next}
+          />
+        </div>
+      ) : null}
+
+      {phase === 'grant' ? (
+        <div {...anchorAttr(ANCHORS.agents.tools)}>
+          {assistant}
+          <GrantStage systemId={systemId} system={system} canEdit={editable} onCommit={commit} />
+          <div className="row" style={{ justifyContent: 'space-between', marginTop: 18 }}>
+            <button className="btn ghost sm" onClick={() => go('define')}>← Define</button>
+            <button className="btn" onClick={() => go('design')}>Design your team →</button>
+          </div>
+        </div>
       ) : null}
 
       {phase === 'design' ? (
-        <div {...anchorAttr(ANCHORS.agents.tools)}>
-        <DesignStep
-          systemId={systemId}
-          system={system}
-          canEdit={editable}
-          catalog={catalog}
-          onCommit={commit}
-          onBack={() => go('define')}
-          onNext={next}
-          ready={ready}
-        />
+        <div>
+          {assistant}
+          <DesignStep
+            systemId={systemId}
+            system={system}
+            canEdit={editable}
+            catalog={catalog}
+            onCommit={commit}
+            onReload={onReload}
+            onBack={() => go('grant')}
+            onNext={next}
+            ready={ready}
+          />
         </div>
       ) : null}
 
       {phase === 'build' ? (
         <div className="sb-run">
+          {assistant}
           <h2 className="sb-section-title" style={{ marginTop: 0 }}>Build</h2>
           <p className="hint" style={{ marginTop: 0 }}>
-            Compile your team and verify it — the same build developers run. Nothing runs yet.
-            When it is green, move on to Run.
+            Compile and verify your team — the same build developers run. Each step turns ✓ only when it
+            both applies and verifies, so a green build is a real one. Then move to Run.
           </p>
           <BuildRunPanel
             systemId={systemId}
@@ -262,23 +287,26 @@ export default function SimpleBuilder({
           />
           <div className="row" style={{ justifyContent: 'space-between', marginTop: 14 }}>
             <button className="btn ghost sm" onClick={() => go('design')}>← Design</button>
-            <button className="btn" onClick={next}>Run →</button>
+            <button className="btn" onClick={next} disabled={!ctx.builtOk} title={ctx.builtOk ? 'Run the team' : 'Build the team first'}>Run →</button>
           </div>
         </div>
       ) : null}
 
       {phase === 'run' ? (
         <div className="sb-run" {...anchorAttr(ANCHORS.agents.run)}>
+          {assistant}
           <h2 className="sb-section-title" style={{ marginTop: 0 }}>Run</h2>
           <p className="hint" style={{ marginTop: 0 }}>
-            Run the team — it walks from the START agent and shows its progress and final result.
-            How it is triggered is set on Define. See the step-by-step breakdown under Evaluate.
+            Run it with one press: it walks from the START agent and shows its progress and final result.
+            Open any agent to see what it was given, what it produced, and each tool call. The full
+            step-by-step assessment lives under Evaluate.
           </p>
           <BuildRunPanel
             systemId={systemId}
             system={system}
             running={buildRun.running}
             canEdit={canEdit}
+            canRun={buildRun.canRun}
             lastBuild={buildRun.lastBuild}
             activity={buildRun.activity}
             lastRun={buildRun.lastRun}
@@ -295,6 +323,7 @@ export default function SimpleBuilder({
 
       {phase === 'evaluate' ? (
         <div className="sb-run">
+          {assistant}
           <h2 className="sb-section-title" style={{ marginTop: 0 }}>Evaluate</h2>
           <p className="hint" style={{ marginTop: 0 }}>
             Check the run against clear, honest tests — deterministic checks first, then an optional
@@ -321,45 +350,129 @@ export default function SimpleBuilder({
   );
 }
 
-/* ─────────────────────────── Phase 1 — Define ─────────────────────────── */
-
-// Safety-preset copy comes from the ONE shared const (lib/agents/access-levels.ts)
-// so this picker can never contradict RuntimeSelector's. The read-propose copy
-// reflects the real Write-approval enforcement: EVERY write is held for approval.
-const PRESETS = AGENT_SAFETY_PRESETS;
+/* ─────────────────────────── Read-only VIEW ─────────────────────────── */
 
 /**
- * Phase 1 — Define. Name on top, Description below it (the describe→scaffold box that
- * edits system.yaml server-side), then the safety/rights preset — surfaced HERE on
- * the first page. Success criteria live in the Description prose or in a granted
- * Knowledge workflow; there is deliberately NO separate acceptance-criteria field.
+ * ReadOnlyView — the calm surface a ready-and-tested team opens in (built + run at least
+ * once), mirroring the OS-wide View/Edit pattern (Data/Metrics/Dashboards detail views open
+ * View; ✎ Edit → the builder). Nothing here mutates the team's design; it only RUNS it and
+ * SHOWS the last run. Three sections, reusing the SAME panels the builder uses:
+ *
+ *   • Trigger / Run — how it's triggered (Manual / schedule / called-from-system) plus a
+ *     prominent ▶ Run control and live "running…" state — the Run phase of BuildRunPanel.
+ *   • Monitor — live progress + last-run status (carried by the same Run panel).
+ *   • Results + Diagnostics — the last run's final output, per-node drill-down, and the
+ *     Evaluate diagnostics (latency/tokens/cost/errors + Langfuse + PDF) — EvaluateStep +
+ *     the Evaluate phase of BuildRunPanel, read-only (canEdit=false disables applies).
+ *
+ * The ✎ Edit affordance (owned by SystemView) opens the six-stage EDIT builder.
+ */
+function ReadOnlyView({
+  systemId, system, canEdit, buildRun, onReload, onEdit,
+}: {
+  systemId: string;
+  system: System;
+  canEdit: boolean;
+  buildRun: BuildRunProps;
+  onReload: () => void | Promise<void>;
+  onEdit?: () => void;
+}) {
+  const triggerKind = system.schedule?.kind ?? 'manual';
+  const triggerWord = triggerKind === 'cron' ? 'On schedule' : triggerKind === 'event' ? 'Called from system' : 'Manual';
+
+  return (
+    <div className="simple-builder sb-view">
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
+        <div>
+          <h2 className="sb-section-title" style={{ marginTop: 0, marginBottom: 2 }}>Ready to run</h2>
+          <p className="hint" style={{ marginTop: 0 }}>
+            This team is built and tested. Run it now, watch it work, and review the last run’s result and diagnostics.
+          </p>
+        </div>
+        {canEdit && onEdit ? (
+          <button className="btn ghost sm" onClick={onEdit} title="Open the guided builder to change this team">✎ Edit</button>
+        ) : null}
+      </div>
+
+      {/* Trigger / Run + Monitor — the Run panel: a prominent ▶ Run, live progress, results.
+          For a scheduled / called-from-system team the trigger is shown; the run control
+          stays available (a manual run of a scheduled team is a normal, useful action). */}
+      <div className="sb-run" style={{ marginBottom: 8 }}>
+        <div className="row" style={{ alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <span className="badge">{triggerWord}</span>
+          {triggerKind === 'cron' && system.schedule?.cron ? (
+            <span className="hint" style={{ marginTop: 0 }}>Scheduled · <span className="mono">{system.schedule.cron}</span></span>
+          ) : triggerKind === 'event' ? (
+            <span className="hint" style={{ marginTop: 0 }}>Runs when called from another system or the API.</span>
+          ) : null}
+        </div>
+        <BuildRunPanel
+          systemId={systemId}
+          system={system}
+          running={buildRun.running}
+          canEdit={canEdit}
+          canRun={buildRun.canRun}
+          lastBuild={buildRun.lastBuild}
+          activity={buildRun.activity}
+          lastRun={buildRun.lastRun}
+          nodePath={buildRun.nodePath}
+          onStateChange={onReload}
+          phase="run"
+        />
+      </div>
+
+      {/* Results + Diagnostics — the same Evaluate surfaces, read-only (canEdit=false).
+          EvaluateStep carries the checks, AI judge and PDF; the Evaluate panel adds the
+          context roll-up, per-agent diagnostics and Langfuse trace link. */}
+      <div className="sb-run">
+        <h2 className="sb-section-title" style={{ marginTop: 0 }}>Results &amp; diagnostics</h2>
+        <EvaluateStep systemId={systemId} system={system} lastRun={buildRun.lastRun} canEdit={false} />
+        <BuildRunPanel
+          systemId={systemId}
+          system={system}
+          running={buildRun.running}
+          canEdit={false}
+          lastBuild={buildRun.lastBuild}
+          activity={buildRun.activity}
+          lastRun={buildRun.lastRun}
+          nodePath={buildRun.nodePath}
+          onStateChange={onReload}
+          phase="evaluate"
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────── Stage 1 — Define ─────────────────────────── */
+
+/**
+ * Stage 1 — Define. The essentials: Name, a plain "Describe the deliverable" box (the
+ * deliverable / success-criteria text that grounds the Design auto-suggest AND the Evaluate
+ * judge — it NO LONGER scaffolds a team here; that moves to Design), "Where the results go"
+ * (declared outputs), and HOW the team is triggered (Manual / On schedule / Called from
+ * system). The safety preset + grants live in Grant. Success criteria live in the deliverable
+ * prose or a granted Knowledge workflow; there is deliberately NO separate acceptance field.
  */
 function DefineStep({
   systemId,
   system,
   canEdit,
-  onScaffolded,
-  onReload,
   onCommit,
+  onReload,
   onNext,
 }: {
   systemId: string;
   system: System;
   canEdit: boolean;
-  onScaffolded: () => Promise<void> | void;
-  onReload: () => Promise<void> | void;
   onCommit: (next: System) => void;
+  onReload: () => void | Promise<void>;
   onNext: () => void;
 }) {
-  const toast = useToast();
   const [name, setName] = useState(system.system.name === 'Untitled system' ? '' : system.system.name);
-  // Seed the describe box from the persisted team description so the judge's task and
-  // the scaffold prompt share one source of truth (re-seeded when it changes server-side).
+  // Seed the deliverable box from the persisted description so the judge's task and the
+  // Design proposer share one source of truth (re-seeded when it changes server-side).
   const [desc, setDesc] = useState(system.system.description ?? '');
-  const [scaffolding, setScaffolding] = useState(false);
-  const [scaffoldErr, setScaffoldErr] = useState('');
-  const hasAgents = system.agents.length > 0;
-  const preset = system.safetyPreset ?? 'read-only';
 
   useEffect(() => { setName(system.system.name === 'Untitled system' ? '' : system.system.name); }, [system.system.name]);
   useEffect(() => { setDesc(system.system.description ?? ''); }, [system.system.description]);
@@ -370,50 +483,11 @@ function DefineStep({
     onCommit({ ...system, system: { ...system.system, name: trimmed } });
   };
 
-  // Persist the describe text as the team's purpose (drives the Evaluate judge). Skipped
-  // when unchanged so we never churn system.yaml on a no-op blur.
+  // Persist the deliverable text as the team's purpose (grounds the Design proposer + the
+  // Evaluate judge). Skipped when unchanged so we never churn system.yaml on a no-op blur.
   const saveDesc = () => {
     if (desc.trim() === (system.system.description ?? '').trim()) return;
     onCommit(setDescription(system, desc));
-  };
-
-  const describe = async () => {
-    const instruction = desc.trim();
-    if (!instruction || scaffolding) return;
-    const before = system.agents.length;
-    setScaffolding(true);
-    setScaffoldErr('');
-    try {
-      // The SAME scaffold endpoint the helper uses — edits system.yaml server-side.
-      const res = await fetch(`/api/agents/systems/${systemId}/assistant`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ instruction }),
-      });
-      const raw = await res.text();
-      let body: { error?: string } = {};
-      try { body = raw ? JSON.parse(raw) : {}; } catch { body = {}; }
-      if (!res.ok) {
-        const msg = body.error ?? 'The OS could not build that yet.';
-        setScaffoldErr(msg);
-        toast.error(msg);
-        return;
-      }
-      // Persist the description so the Evaluate judge grades THIS task; the scaffold
-      // reload re-seeds `desc` from it, so the box keeps what the author wrote.
-      onCommit(setDescription(system, instruction));
-      await onScaffolded();
-      // Make the store UNMISTAKABLE: a success toast confirms the team changed, the
-      // step-done tick fires (via onScaffolded), and we advance to Design so the new
-      // agents are visible on screen. The button no longer looks like a no-op.
-      toast.success(before > 0 ? 'Added to your team — see it in Design' : 'Your team is built — review it in Design');
-    } catch (e) {
-      const msg = (e as Error).message;
-      setScaffoldErr(msg);
-      toast.error(msg);
-    } finally {
-      setScaffolding(false);
-    }
   };
 
   return (
@@ -433,12 +507,12 @@ function DefineStep({
         />
       </div>
 
-      {/* Description below — the describe→scaffold box */}
+      {/* The deliverable box — plain words, no scaffold. It grounds Design + Evaluate. */}
       <div className="sb-hero">
-        <h2 className="sb-hero-title">Describe what your team should do</h2>
+        <h2 className="sb-hero-title">Describe the deliverable</h2>
         <p className="sb-hero-sub">
-          Say it in plain words, including what a good result looks like — the OS builds the agents,
-          wires them up, and picks the right model for each. You review and adjust next.
+          Say, in plain words, what this team should produce and what a good result looks like.
+          You’ll grant its context next, then design (or auto-propose) the team.
         </p>
         <textarea
           className="sb-hero-input"
@@ -446,65 +520,22 @@ function DefineStep({
           value={desc}
           onChange={(e) => setDesc(e.target.value)}
           onBlur={saveDesc}
-          disabled={!canEdit || scaffolding}
-          placeholder="e.g. a team that pulls campaign data, checks margins after returns, scores each campaign against the rules, and recommends budget changes"
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void describe(); } }}
+          disabled={!canEdit}
+          placeholder="e.g. a weekly report that pulls campaign data, checks margins after returns, scores each campaign against the rules, and recommends budget changes"
         />
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
-          <span className="hint" style={{ marginTop: 0 }}>⌘/Ctrl + Enter. Success criteria go here or in a granted Knowledge workflow.</span>
-          <button className="btn" onClick={describe} disabled={!canEdit || scaffolding || !desc.trim()}>
-            {scaffolding ? <span className="spin" /> : hasAgents ? 'Add to my team' : 'Build my team'}
-          </button>
-        </div>
-        {scaffoldErr ? <div className="error" style={{ marginTop: 10 }}>{scaffoldErr}</div> : null}
+        <p className="hint" style={{ marginTop: 8 }}>Success criteria go here or in a granted Knowledge workflow.</p>
       </div>
-
-      {/* Safety / rights preset — surfaced on the FIRST page */}
-      <div className="sb-resources" style={{ marginTop: 16 }}>
-        <h2 className="sb-section-title" style={{ marginTop: 0 }}>What this team is allowed to do</h2>
-        <p className="hint" style={{ marginTop: 0 }}>
-          The safety preset bounds every agent — pick the least power the job needs.
-        </p>
-        <div className="rs-preset-grid">
-          {PRESETS.map((p) => {
-            const selected = preset === p.id;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                disabled={!canEdit}
-                className={`rs-preset-option${selected ? ' rs-preset-option--selected' : ''}`}
-                onClick={() => canEdit && !selected && onCommit({ ...system, safetyPreset: p.id })}
-              >
-                <div className="rs-preset-top">
-                  <span className="rs-preset-name">{p.label}</span>
-                  {selected && <span className="rs-preset-check" aria-hidden>✓</span>}
-                </div>
-                <p className="rs-preset-consequence">{p.consequence}</p>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* How the team is triggered — part of team setup, so it lives on Define. */}
-      <TriggerMode systemId={systemId} system={system} canEdit={canEdit} onReload={onReload} />
-
-      {/* What your team can use — grants/resource picker, at the bottom of Define */}
-      <TeamResources systemId={systemId} system={system} canEdit={canEdit} onCommit={onCommit} />
 
       {/* Where the results go — declared outputs (auto-provisioned Write targets) */}
       <OutputsSection systemId={systemId} system={system} canEdit={canEdit} onCommit={onCommit} />
 
-      {hasAgents ? (
-        <div className="row" style={{ justifyContent: 'flex-end', marginTop: 14 }}>
-          <button className="btn ghost sm" onClick={() => { saveName(); onNext(); }}>Design your team →</button>
-        </div>
-      ) : (
-        <p className="hint">Or start empty and add agents yourself on the next step.</p>
-      )}
+      {/* How the team is triggered — Manual / On schedule / Called from system. Part of
+          DEFINING the team, so it lives here (not next to Run). Same /schedule route. */}
+      <TriggerMode systemId={systemId} system={system} canEdit={canEdit} onReload={onReload} />
+
+      <div className="row" style={{ justifyContent: 'flex-end', marginTop: 14 }}>
+        <button className="btn" onClick={() => { saveName(); onNext(); }} disabled={!name.trim()}>Grant context →</button>
+      </div>
     </div>
   );
 }
@@ -526,6 +557,7 @@ function DesignStep({
   canEdit,
   catalog,
   onCommit,
+  onReload,
   onBack,
   onNext,
   ready,
@@ -535,6 +567,7 @@ function DesignStep({
   canEdit: boolean;
   catalog: string[] | null;
   onCommit: (next: System) => void;
+  onReload: () => Promise<void> | void;
   onBack: () => void;
   onNext: () => void;
   ready: boolean;
@@ -580,6 +613,17 @@ function DesignStep({
         </div>
       </div>
 
+      {/* Auto-suggested team — fires ONCE on entering Design with an empty team and a
+          stated deliverable/outputs. Non-blocking + dismissible; any failure degrades
+          silently to the blank canvas + template picker below (never a dead end). */}
+      <AutoProposeTeam
+        systemId={systemId}
+        system={system}
+        canEdit={canEdit}
+        onCommit={onCommit}
+        onReload={onReload}
+      />
+
       {system.agents.length === 0 ? (
         <div className="sb-empty">No agents yet — add one below, or go back and describe your team.</div>
       ) : (
@@ -613,10 +657,130 @@ function DesignStep({
       )}
 
       <div className="row" style={{ justifyContent: 'space-between', marginTop: 18 }}>
-        <button className="btn ghost sm" onClick={onBack}>← Define</button>
-        <button className="btn" onClick={onNext} disabled={!ready} title={ready ? 'Build' : 'Add at least one agent first'}>
+        <button className="btn ghost sm" onClick={onBack}>← Grant</button>
+        <button className="btn" onClick={onNext} disabled={!ready} title={ready ? 'Build the team' : 'Add at least one agent first'}>
           Build →
         </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── Auto-suggested team (Design) ─────────────────── */
+
+/**
+ * The Design auto-proposer: on the FIRST entry to Design with an EMPTY team and a stated
+ * deliverable/outputs, it calls the proposal endpoint ONCE ({stage:'design', propose:true})
+ * and renders the result as a calm "Proposed team" review card stack. It NEVER blocks — a
+ * shimmer while proposing, and any failure (503/402/unusable) degrades SILENTLY to the
+ * blank canvas + template picker (renders nothing). Accepting commits the proposed system
+ * ONCE through the existing governed path; the agents then appear as normal AgentCards.
+ */
+type ProposedAgentRow = { id: string; role: string; instruction: string };
+
+function AutoProposeTeam({
+  systemId, system, canEdit, onCommit, onReload,
+}: {
+  systemId: string;
+  system: System;
+  canEdit: boolean;
+  onCommit: (next: System) => void;
+  onReload: () => Promise<void> | void;
+}) {
+  const [proposing, setProposing] = useState(false);
+  const [proposed, setProposed] = useState<System | null>(null);
+  const [removed, setRemoved] = useState<Set<string>>(new Set());
+  const [dismissed, setDismissed] = useState(false);
+  const firedRef = useRef(false);
+
+  const hasAgents = system.agents.length > 0;
+  const description = system.system.description ?? '';
+  const hasGoal = !!description.trim() || (system.outputs?.length ?? 0) > 0;
+
+  useEffect(() => {
+    // Fire ONCE per mount: only with an empty team + a stated goal, and only if editable.
+    if (firedRef.current) return;
+    if (hasAgents || !hasGoal || !canEdit || dismissed) return;
+    firedRef.current = true;
+    let alive = true;
+    setProposing(true);
+    fetch(`/api/agents/systems/${systemId}/assistant`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ stage: 'design', propose: true }),
+    })
+      .then(async (res) => {
+        const body = await res.json().catch(() => ({}));
+        // Any non-OK (503 no-model / 402 cap / unusable) → degrade silently to blank canvas.
+        if (!res.ok || !body?.proposedSystem) throw new Error(body?.error ?? 'no proposal');
+        if (alive) setProposed(body.proposedSystem as System);
+      })
+      .catch(() => { if (alive) setProposed(null); })
+      .finally(() => { if (alive) setProposing(false); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Nothing to show: not proposing, no proposal, or the user already has/added agents.
+  if (hasAgents || dismissed) return null;
+  if (proposing) {
+    return (
+      <div className="sb-propose sb-propose--busy" style={{ border: '1px dashed var(--border)', borderRadius: 12, padding: 14, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span className="spin" />
+        <span className="hint" style={{ marginTop: 0 }}>Proposing your team from the deliverable…</span>
+      </div>
+    );
+  }
+  if (!proposed) return null;
+
+  const rows: ProposedAgentRow[] = proposed.agents
+    .filter((a) => !removed.has(a.id))
+    .map((a) => ({ id: a.id, role: a.role, instruction: instructionsOf(a.agent_md) }));
+
+  if (rows.length === 0) return null;
+
+  const remove = (id: string) => setRemoved((s) => new Set(s).add(id));
+
+  // Accept: commit the proposed system, dropping any per-agent removals + fixing the
+  // entrypoint if it was one of the removed agents. One governed commit.
+  const accept = async () => {
+    const keep = proposed.agents.filter((a) => !removed.has(a.id));
+    if (keep.length === 0) { setDismissed(true); return; }
+    const entrypoint = keep.some((a) => a.id === proposed.entrypoint) ? proposed.entrypoint : keep[0].id;
+    const next: System = { ...proposed, agents: keep, entrypoint };
+    setDismissed(true);
+    await onCommit(next);
+    await onReload();
+  };
+
+  return (
+    <div className="sb-propose" style={{ border: '1px solid var(--gold-line)', background: 'var(--gold-soft)', borderRadius: 12, padding: 14, marginBottom: 16 }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+        <div>
+          <h3 style={{ margin: 0 }}>Proposed team</h3>
+          <p className="hint" style={{ marginTop: 2 }}>
+            Built from your deliverable and grants. Review the wiring order, drop any you don’t want, then use it — or dismiss and design your own.
+          </p>
+        </div>
+      </div>
+      <ol className="sb-propose-list" style={{ margin: '10px 0', paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {rows.map((r, i) => (
+          <li key={r.id} className="sb-card" style={{ padding: '10px 12px' }}>
+            <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+              <span className="sb-card-order">{i + 1}</span>
+              <span style={{ fontWeight: 650 }}>{r.role || r.id}</span>
+              {i === 0 ? <span className="badge warn">START</span> : null}
+              {canEdit ? (
+                <button className="sb-chip-x" title="Remove before accepting" style={{ marginLeft: 'auto' }} onClick={() => remove(r.id)}>✕</button>
+              ) : null}
+            </div>
+            {r.instruction ? <p className="hint" style={{ margin: '4px 0 0' }}>{r.instruction}</p> : null}
+          </li>
+        ))}
+      </ol>
+      <div className="row" style={{ gap: 8 }}>
+        <button className="btn" onClick={accept} disabled={!canEdit || rows.length === 0}>Use this team</button>
+        <button className="btn ghost sm" onClick={() => setDismissed(true)}>Dismiss</button>
       </div>
     </div>
   );
@@ -1383,321 +1547,10 @@ function EvaluateStep({
   );
 }
 
-type Available = { id: string; name: string; scope: 'personal' | 'domain' | 'marketplace'; layers?: DataLayer[]; folder?: string };
-type FolderNode = { path: string; scope: 'personal' | 'domain' };
-type AvailableFeed = { items: Available[]; folders?: FolderNode[] };
-
-/** Highest built layer of a dataset (Gold > Silver > Bronze), or null if none built. */
-function highestLayer(layers: DataLayer[] | undefined): DataLayer | null {
-  if (!layers || layers.length === 0) return null;
-  if (layers.includes('gold')) return 'gold';
-  if (layers.includes('silver')) return 'silver';
-  if (layers.includes('bronze')) return 'bronze';
-  return null;
-}
-
-/** The folder grants of a kind currently on the system (each `{path,scope}`). */
-function folderGrantsOf(system: System, kind: 'data' | 'knowledge' | 'files'): FolderNode[] {
-  return system.grants[kind]
-    .filter((g) => g.folder)
-    .map((g) => ({ path: g.folder!.path, scope: g.folder!.scope }));
-}
-
-/**
- * Apply a FolderTree {@link FolderSelection} onto the system for one foldered kind,
- * as a minimal diff that PRESERVES existing per-item write capabilities. Folder grants
- * and item grants both default to Read on first tick; the write toggle below the tree
- * is what lifts a specific grant. Files carry NO per-item list, so only their folder
- * grants are applied (individual file ticks are inert — surfaced in the UI hint).
- */
-function applyFolderSelection(
-  system: System,
-  kind: 'data' | 'knowledge' | 'files',
-  sel: FolderSelection,
-  itemLayer: (id: string) => DataLayer,
-  // When the knowledge feed is split into Workflows vs Knowledge, each picker
-  // reconciles ONLY its own item family so it never removes the other's grants.
-  // `manageFolders` is false for the Workflows picker (workflows carry no folders).
-  opts: { inFamily?: (id: string) => boolean; manageFolders?: boolean } = {},
-): System {
-  const inFamily = opts.inFamily ?? (() => true);
-  const manageFolders = opts.manageFolders ?? true;
-  let next = system;
-  const key = (f: { path: string; scope: string }) => `${f.scope}:${normaliseFolderPath(f.path)}`;
-
-  // ── Folder grants: add newly-selected, remove de-selected. ──
-  if (manageFolders) {
-    const wantFolders = new Set(sel.folderGrants.map(key));
-    const haveFolders = folderGrantsOf(system, kind);
-    for (const f of sel.folderGrants) {
-      if (!haveFolders.some((h) => key(h) === key(f))) next = setFolderGrant(next, kind, f, false);
-    }
-    for (const h of haveFolders) {
-      if (!wantFolders.has(key(h))) next = removeFolderGrant(next, kind, h);
-    }
-  }
-
-  // ── Item grants (all foldered kinds, INCLUDING files — a single file can be
-  //    granted by its id, exactly like a dataset or a knowledge entry). ──
-  {
-    const wantItems = new Set(sel.itemGrants.filter(inFamily));
-    const haveItems = next.grants[kind].filter((g) => !g.folder && g.id && inFamily(g.id)).map((g) => g.id);
-    for (const id of wantItems) {
-      if (!haveItems.includes(id)) next = setArtifactGrant(next, kind, id, false, itemLayer(id));
-    }
-    for (const id of haveItems) {
-      if (!wantItems.has(id)) next = removeArtifactGrant(next, kind, id);
-    }
-  }
-  return next;
-}
-
-/**
- * Wave-3 folder-aware grant picker for the FOLDERED kinds (data · knowledge · files).
- * Renders the shared `<FolderTree variant="checkbox">` over the DLS-scoped feed so the
- * author ticks whole FOLDERS (→ a folder grant that late-binds to every item under it,
- * incl. future ones) or individual ITEMS. The feed is already DLS-scoped, so only
- * grantable items show — a folder that also holds ungrantable items simply renders as
- * a partial (tri-state) tick, honest by construction. Granted resources are listed
- * below with their access toggle (Read / Can-write) + medallion layer (data), reusing
- * the same controls the flat picker used. Marketplace items (no folder tree) keep a
- * small supplementary add-picker so nothing that was grantable before is lost.
- */
-function FolderResourcePicker({
-  systemId, system, kind, label, canEdit, onCommit, idFamily, hideLabel,
-}: {
-  systemId: string;
-  system: System;
-  kind: 'data' | 'knowledge' | 'files';
-  label: string;
-  canEdit: boolean;
-  onCommit: (next: System) => void;
-  /** Knowledge feed only — narrow to workflows (`wf_…`) or knowledge docs (everything else). */
-  idFamily?: 'workflow' | 'knowledge';
-  /** Suppress the internal category label — the caller renders a prominent one. */
-  hideLabel?: boolean;
-}) {
-  const [feed, setFeed] = useState<AvailableFeed | null>(null);
-  const [loadErr, setLoadErr] = useState('');
-  const [mktOpen, setMktOpen] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    setLoadErr('');
-    fetch(`/api/agents/systems/${systemId}/grants/available?kind=${kind}`, { cache: 'no-store' })
-      .then(async (res) => {
-        const body = await res.json();
-        if (!res.ok) throw new Error(body.error ?? 'Failed to load');
-        if (alive) setFeed(body as AvailableFeed);
-      })
-      .catch((e) => { if (alive) setLoadErr((e as Error).message); });
-    return () => { alive = false; };
-  }, [systemId, kind]);
-
-  // Split the shared knowledge feed so Workflows (own Plan-Items member) and Knowledge
-  // (Context) each show ONLY their own item family. Other kinds pass every item.
-  const inFamily = (id: string) =>
-    !idFamily ? true : idFamily === 'workflow' ? isWorkflowId(id) : !isWorkflowId(id);
-  const items = (feed?.items ?? []).filter((a) => inFamily(a.id));
-  const folders = feed?.folders ?? [];
-  const availOf = (id: string) => items.find((a) => a.id === id);
-  const nameOf = (id: string) => availOf(id)?.name ?? (id.includes('_') ? id.split('_').slice(1).join('_') : id);
-  const layersOf = (id: string): DataLayer[] => availOf(id)?.layers ?? [];
-  const layerFor = (id: string): DataLayer => (kind === 'data' ? (highestLayer(layersOf(id)) ?? 'gold') : 'gold');
-
-  // Split the feed: foldered (personal/domain) items feed the tree; marketplace items
-  // (no folder tree) keep a flat supplementary picker. Each tree item carries its
-  // scope so the FolderTree shows it under ONLY its own root (My vs Shared) — a
-  // root-level dataset/workflow is no longer listed twice.
-  const treeItems = items
-    .filter((a) => a.scope === 'personal' || a.scope === 'domain')
-    .map((a) => ({ id: a.id, folder: a.folder ?? '/', name: a.name, scope: a.scope as 'personal' | 'domain' }));
-  const personalNodes = folders.filter((f) => f.scope === 'personal').map((f) => ({ path: f.path }));
-  const domainNodes = folders.filter((f) => f.scope === 'domain').map((f) => ({ path: f.path }));
-  const mktItems = items.filter((a) => a.scope === 'marketplace');
-
-  // Currently-checked ids = explicit item grants ∪ every feed item under a granted folder
-  // (so a folder grant renders as a fully-ticked folder). Files: only folders drive checks.
-  // Workflows carry no folders, so the Workflows picker manages item grants only.
-  const managesFolders = idFamily !== 'workflow';
-  const grantList = system.grants[kind];
-  const itemGrantIds = new Set(grantList.filter((g) => !g.folder && g.id && inFamily(g.id)).map((g) => g.id));
-  const checked = new Set<string>(itemGrantIds);
-  for (const g of grantList) {
-    if (!g.folder) continue;
-    for (const it of itemsUnderFolder(g.folder.path, treeItems)) checked.add(it.id);
-  }
-
-  const onChange = (sel: FolderSelection) => {
-    if (!canEdit) return;
-    onCommit(applyFolderSelection(system, kind, sel, layerFor, { inFamily, manageFolders: managesFolders }));
-  };
-
-  // The granted chips (item grants + folder grants) shown below the tree with controls.
-  const grantedItems = grantList.filter((g) => !g.folder && g.id && inFamily(g.id));
-  const grantedFolders = managesFolders ? grantList.filter((g) => g.folder) : [];
-  const cap = accessCap(system.safetyPreset);
-  const scopeOf = (id: string): 'personal' | 'domain' | 'marketplace' => availOf(id)?.scope ?? 'personal';
-  const mktGrantedIds = new Set(grantedItems.map((g) => g.id));
-  const addableMkt = mktItems.filter((a) => !mktGrantedIds.has(a.id));
-
-  return (
-    <div className="sb-resource">
-      {hideLabel ? null : <div className="sb-field-label" style={{ margin: '4px 0' }}>{label}</div>}
-      {loadErr ? <div className="error" style={{ marginBottom: 6 }}>{loadErr}</div> : null}
-      {feed === null ? (
-        <p className="hint" style={{ marginTop: 0 }}>Loading…</p>
-      ) : treeItems.length === 0 && folders.length === 0 ? (
-        <p className="hint" style={{ marginTop: 0 }}>Nothing to grant — create or share {label.toLowerCase()} first.</p>
-      ) : (
-        <FolderTree
-          variant="checkbox"
-          personalNodes={personalNodes}
-          domainNodes={domainNodes}
-          items={treeItems}
-          checkedIds={[...checked]}
-          onChange={onChange}
-          // Files are grantable at ANY granularity: a single file (leaf tick), a
-          // folder, or "All" (the `/` root row). Leaves are selectable for every
-          // kind; the extra "All …" root row is a Files convenience for granting a
-          // whole scope (incl. files that sit at the root with no named subfolder).
-          rootGrantable={kind === 'files'}
-        />
-      )}
-
-      {/* Granted-resource controls — access level + (data) medallion layer. */}
-      {(grantedItems.length > 0 || grantedFolders.length > 0) ? (
-        <div className="sb-chips" style={{ marginTop: 8 }}>
-          {grantedFolders.map((g) => (
-            <span key={`f:${g.folder!.scope}:${g.folder!.path}`} className="sb-chip granted" style={{ gap: 8 }}>
-              <span>📁 {g.folder!.path === '/' ? 'All' : g.folder!.path}<span className="badge muted" style={{ marginLeft: 6 }}>{scopeLabel(g.folder!.scope === 'domain' ? 'shared' : 'mine')}</span></span>
-              {/* Files are folder-granted only, so the folder chip carries the SAME access
-                  selector item grants use — this is the only place a Files write can be set.
-                  `cap` (from the system safety preset) bounds it exactly like every kind. */}
-              <AccessLevelSelect
-                cap={cap}
-                capability={g.capability}
-                canEdit={canEdit}
-                onLevel={(l) => onCommit(setFolderGrantLevel(system, kind, g.folder!, l))}
-              />
-              {canEdit ? (
-                <button className="sb-chip-x" title="Remove" onClick={() => onCommit(removeFolderGrant(system, kind, g.folder!))}>✕</button>
-              ) : null}
-            </span>
-          ))}
-          {grantedItems.map((g) => (
-            <span key={g.id} className="sb-chip granted" style={{ gap: 8 }}>
-              <span>{nameOf(g.id)}<span className="badge muted" style={{ marginLeft: 6 }}>{scopeLabel(scopeKeyOf(scopeOf(g.id)))}</span></span>
-              <AccessLevelSelect
-                cap={cap}
-                capability={g.capability}
-                canEdit={canEdit}
-                onLevel={(l) => onCommit(setArtifactGrantLevel(system, kind, g.id, l))}
-              />
-              {kind === 'data' ? (
-                <LayerToggle
-                  layer={g.layer ?? highestLayer(layersOf(g.id)) ?? 'gold'}
-                  built={layersOf(g.id)}
-                  canEdit={canEdit}
-                  onPick={(l) => onCommit(setDataGrantLayer(system, g.id, l))}
-                />
-              ) : null}
-              {canEdit ? (
-                <button className="sb-chip-x" title="Remove" onClick={() => onCommit(removeArtifactGrant(system, kind, g.id))}>✕</button>
-              ) : null}
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      {kind === 'files' ? (
-        <p className="hint" style={{ marginTop: 6, marginBottom: 0 }}>
-          Tick a <strong>single file</strong>, a whole <strong>folder</strong> (covers files added later), or <strong>All</strong>.
-          Access follows the file store’s own permissions at run time.
-        </p>
-      ) : null}
-
-      {/* Marketplace supplementary picker — foldered trees only cover personal + domain. */}
-      {kind !== 'files' && canEdit && mktItems.length > 0 ? (
-        !mktOpen ? (
-          <button className="btn ghost sm" style={{ marginTop: 6 }} onClick={() => setMktOpen(true)}>
-            + Add from marketplace
-          </button>
-        ) : (
-          <div className="sb-resource-picker">
-            {addableMkt.length === 0 ? (
-              <p className="hint" style={{ marginTop: 0 }}>Nothing left to add.</p>
-            ) : (
-              <div className="sb-picker-list">
-                {addableMkt.map((a) => (
-                  <button
-                    key={a.id}
-                    className="sb-picker-row"
-                    title={a.id}
-                    onClick={() => onCommit(setArtifactGrantLevel(system, kind, a.id, cap.default, layerFor(a.id)))}
-                  >
-                    +<span>{a.name}</span><span className="badge muted">{scopeLabel(scopeKeyOf(a.scope))}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => setMktOpen(false)}>Done</button>
-          </div>
-        )
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Simple-mode "What your team can use" — the plain grant section for the four resource
- * kinds (Data · Knowledge · Files · Connections), each at a Read / Can-write access
- * level. Granting AUTO-PROVISIONS the matching governed tools via `setArtifactGrant`,
- * so the label is truthful. Data/Knowledge/Connections carry per-artifact id lists
- * (picker); Files have no id list, so it is a single Read/Write toggle. Shown in Design.
- */
-function TeamResources({
-  systemId, system, canEdit, onCommit,
-}: {
-  systemId: string;
-  system: System;
-  canEdit: boolean;
-  onCommit: (next: System) => void;
-}) {
-  const cap = accessCap(system.safetyPreset);
-  return (
-    <div className="sb-resources">
-      <h2 className="sb-section-title" style={{ marginTop: 0 }}>What your team can use</h2>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Give the whole team the resources it needs — every agent shares these. For each item, choose{' '}
-        <strong>Read-only</strong>, <strong>Read + propose</strong> (every write is held for a human to
-        approve before it runs — nothing is written directly), or{' '}
-        <strong>Read + write</strong> (writes run directly). The matching tools are granted automatically.
-      </p>
-
-      {/* The system-wide access cap, explained — why items may be locked or capped. */}
-      <AccessCapNote cap={cap} preset={system.safetyPreset} />
-
-      {/* ① Plan Items ─ Strategy · Big Bets · Operating Manual · Workflows */}
-      <ResourceSectionBlock
-        title="① Plan Items"
-        subtitle="Your strategy, big bets, operating manual and business processes."
-        members={membersOf('plan')}
-        systemId={systemId} system={system} canEdit={canEdit} onCommit={onCommit}
-      />
-
-      {/* ② Context ─ Knowledge · Files · Data · Connections · Metrics */}
-      <ResourceSectionBlock
-        title="② Context"
-        subtitle="The folders and items the team reads from and writes to."
-        members={membersOf('context')}
-        systemId={systemId} system={system} canEdit={canEdit} onCommit={onCommit}
-      />
-    </div>
-  );
-}
-
 /* ─────────────────────────── Outputs (Define) ─────────────────────────── */
+
+/** A DLS-scoped folder row from the grants-available feed (path + scope). */
+type FolderNode = { path: string; scope: 'personal' | 'domain' };
 
 /** The three destination kinds a declared output can target, with plain labels. */
 const OUTPUT_KIND_CARDS: { kind: OutputKind; label: string; feedKind: 'files' | 'data' | 'knowledge' }[] = [
@@ -1707,71 +1560,11 @@ const OUTPUT_KIND_CARDS: { kind: OutputKind; label: string; feedKind: 'files' | 
 ];
 
 /**
- * A small reusable "pick an existing folder OR ＋ New folder" control. The folder list
- * is the kind's DLS-scoped folders (from the grants-available feed); a new folder is
- * just a typed path that materialises when the first artifact is written there (folders
- * are path-derived — there is no standalone folder object). Emits the chosen `path`.
- * Reusable beyond Outputs — the same affordance can back a grant picker's new-path input.
- */
-function NewFolderField({
-  folders, value, canEdit, onChange, scope,
-}: {
-  /** Existing folder paths available in the chosen scope. */
-  folders: string[];
-  value: string;
-  canEdit: boolean;
-  onChange: (path: string) => void;
-  scope: 'personal' | 'domain';
-}) {
-  const [adding, setAdding] = useState(false);
-  const [draft, setDraft] = useState('');
-  const commitNew = () => {
-    const p = normaliseFolderPath(draft);
-    if (p && p !== '/') { onChange(p); setAdding(false); setDraft(''); }
-  };
-  if (adding) {
-    return (
-      <span className="sb-out-newfolder" style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-        <span className="hint" style={{ marginTop: 0 }}>{scope === 'domain' ? 'Domain' : 'My'} /</span>
-        <input
-          type="text"
-          autoFocus
-          value={draft}
-          placeholder="reports/weekly"
-          disabled={!canEdit}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitNew(); } if (e.key === 'Escape') setAdding(false); }}
-          style={{ width: 160 }}
-        />
-        <button type="button" className="btn ghost sm" disabled={!canEdit || !draft.trim()} onClick={commitNew}>Add</button>
-        <button type="button" className="btn ghost sm" onClick={() => { setAdding(false); setDraft(''); }}>Cancel</button>
-      </span>
-    );
-  }
-  return (
-    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-      <select
-        className="sb-out-folder"
-        value={value}
-        disabled={!canEdit}
-        onChange={(e) => onChange(e.target.value)}
-        style={{ minWidth: 140 }}
-      >
-        <option value="/">/ (root)</option>
-        {folders.filter((f) => f !== '/').map((f) => <option key={f} value={f}>{f}</option>)}
-        {value !== '/' && !folders.includes(value) ? <option value={value}>{value}</option> : null}
-      </select>
-      <button type="button" className="btn ghost sm" disabled={!canEdit} onClick={() => setAdding(true)}>＋ New folder</button>
-    </span>
-  );
-}
-
-/**
  * "Where the results go" — DECLARED OUTPUTS. Each row picks a destination Type
  * (File · Dataset · Knowledge), a Name, a Folder (existing or ＋ New folder) and a
  * Scope (My / Domain). Declaring an output auto-grants the team **Write** to that
  * folder (reusing the grant/write-tool machinery — see `addOutput`); the folder
- * materialises when the first result is saved. Consistent with the grants picker above.
+ * materialises when the first result is saved. Consistent with the grants picker.
  */
 function OutputsSection({
   systemId, system, canEdit, onCommit,
@@ -1894,357 +1687,6 @@ function OutputsSection({
             + Add output
           </button>
         </div>
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * The inline explanation of the agent-system-wide access cap. Reads the system's
- * safety preset and says, in one honest line, HOW the per-item selector is bounded:
- * locked at the extremes (read-only / full-in-scope), downgrade-only in the middle.
- */
-function AccessCapNote({ cap, preset }: { cap: AccessCap; preset: SafetyPreset }) {
-  const msg = cap.locked
-    ? cap.reason
-    : preset === 'read-bounded'
-      ? 'The system allows writes in-scope — each item defaults to Read + write; you may downgrade any item, never go above it.'
-      : 'The system default is Read + propose — every write is held for a human to approve before it runs; nothing is written directly. Each item defaults to Read + propose; you may downgrade to Read-only, never grant direct write above the system setting.';
-  return (
-    <div className={`badge ${cap.locked ? 'warn' : 'muted'}`} role="note" style={{ display: 'block', padding: '8px 10px', marginBottom: 10, lineHeight: 1.4, whiteSpace: 'normal' }}>
-      {cap.locked ? '🔒 ' : 'ℹ '}{msg} Change it under <strong>What this team is allowed to do</strong> above.
-    </div>
-  );
-}
-
-/** One labelled section (Plan Items / Context) rendering its members' grant pickers. */
-function ResourceSectionBlock({
-  title, subtitle, members, systemId, system, canEdit, onCommit,
-}: {
-  title: string;
-  subtitle: string;
-  members: ResourceMember[];
-  systemId: string;
-  system: System;
-  canEdit: boolean;
-  onCommit: (next: System) => void;
-}) {
-  return (
-    <div className="sb-grant-group">
-      <div className="sb-grant-group-title">{title}</div>
-      <p className="sb-grant-group-sub">{subtitle}</p>
-      {members.map((m) => (
-        <ResourceMemberBlock
-          key={m.key}
-          member={m}
-          systemId={systemId} system={system} canEdit={canEdit} onCommit={onCommit}
-        />
-      ))}
-    </div>
-  );
-}
-
-/**
- * Render ONE group member. Wireable members route to the right picker (foldered tree
- * for data/knowledge/files/workflows, flat picker for connections/metrics and the three
- * Plan items — Operating Manual · Strategy · Big Bets — through the shared `plan` grant
- * list). A non-wireable member (none today) would render a labelled, honest note so the
- * IA stays complete without inventing a grant channel.
- */
-function ResourceMemberBlock({
-  member, systemId, system, canEdit, onCommit,
-}: {
-  member: ResourceMember;
-  systemId: string;
-  system: System;
-  canEdit: boolean;
-  onCommit: (next: System) => void;
-}) {
-  // Each category is a titled card — the prominent CATEGORY heading lives HERE (the
-  // pickers render their My/Domain/Company sub-labels beneath it), so the heading
-  // hierarchy reads group → category → scope.
-  return (
-    <div className="sb-grant-cat">
-      <div className="sb-grant-cat-title">{member.label}</div>
-      {!member.wireable ? (
-        <p className="hint" style={{ marginTop: 0, marginBottom: 0 }}>{member.note}</p>
-      ) : member.feedKind === 'data' || member.feedKind === 'knowledge' || member.feedKind === 'files' ? (
-        // Foldered kinds (data · knowledge · files) + Workflows (knowledge feed, wf_ family).
-        <FolderResourcePicker
-          systemId={systemId} system={system}
-          kind={member.feedKind}
-          idFamily={member.idFamily}
-          label={member.label}
-          hideLabel
-          canEdit={canEdit} onCommit={onCommit}
-        />
-      ) : (
-        // Flat kinds — Connections · Metrics · Plan Items (Operating Manual · Strategy · Big Bets).
-        <ResourcePicker
-          systemId={systemId} system={system}
-          kind={member.field as 'connections' | 'metrics' | 'plan'}
-          feedKind={member.feedKind as 'connections' | 'metric' | 'operating-manual' | 'strategy' | 'big-bets'}
-          label={member.label}
-          hideLabel
-          canEdit={canEdit} onCommit={onCommit}
-        />
-      )}
-    </div>
-  );
-}
-
-/** Map the grants-available `scope` string to a core `ScopeKey` for `scopeLabel`. */
-function scopeKeyOf(scope: 'personal' | 'domain' | 'marketplace'): ScopeKey {
-  return scope === 'domain' ? 'shared' : scope === 'marketplace' ? 'marketplace' : 'mine';
-}
-
-/** Per-level tooltip — what each access level actually grants, in plain words. */
-const ACCESS_HINTS: Record<AccessLevel, string> = {
-  'read-only': 'Can read only — never changes anything.',
-  'read-propose': 'Every write is held for a human to approve before it runs — nothing is written directly.',
-  'read-write': 'Can change directly — no approval step.',
-};
-
-/**
- * The per-item ACCESS-LEVEL selector — a labelled three-option SEGMENTED control
- * (Read-only · Read + propose · Read + write) CAPPED by the agent-system-wide safety
- * preset (`cap`). It offers only the levels at or below the system ceiling.
- *
- * Fully CONTROLLED — the highlighted option is derived ONLY from the persisted
- * `capability` prop (clamped to the cap), never from local optimistic state, so there
- * is NO flicker or press-then-revert repaint: the commit awaits the reload and the
- * segment repaints once, cleanly, to the new value. The active option is always shown
- * filled with its text label, so the current level is unambiguous at a glance.
- *
- * When the system is LOCKED (read-only / full-in-scope) the control is non-interactive
- * but still legible: the fixed level stays highlighted, dimmed, with a 🔒 and the reason.
- */
-function AccessLevelSelect({
-  cap, capability, canEdit, onLevel,
-}: {
-  cap: AccessCap;
-  capability: string;
-  canEdit: boolean;
-  onLevel: (level: AccessLevel) => void;
-}) {
-  const current = clampAccess(capabilityToAccess(capability as Parameters<typeof capabilityToAccess>[0]), cap);
-  const options = allowedAccessLevels(cap);
-  const interactive = canEdit && !cap.locked;
-  return (
-    <span
-      className={`sb-access-seg${cap.locked ? ' locked' : ''}`}
-      role="radiogroup"
-      aria-label="Access level"
-      title={cap.locked ? cap.reason : undefined}
-      style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}
-    >
-      {options.map((l) => {
-        const active = l === current;
-        return (
-          <button
-            key={l}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            disabled={!interactive}
-            title={ACCESS_HINTS[l] + (cap.locked ? ` — ${cap.reason}` : '')}
-            className={`sb-access-seg-btn${active ? ' active' : ''}`}
-            onClick={() => interactive && !active && onLevel(l)}
-          >
-            {cap.locked && active ? '🔒 ' : ''}{ACCESS_LABELS[l]}
-          </button>
-        );
-      })}
-    </span>
-  );
-}
-
-/**
- * Bronze · Silver · Gold segmented selector for ONE granted dataset (DATA grants
- * only). Renders ONLY the medallion layers that are actually BUILT for this dataset
- * — so a user can never pick an unbuilt (unqueryable) layer. Hidden entirely when
- * the dataset exposes a single layer (nothing to choose). Gold, when built, is the
- * curated serving default; picking silver/bronze routes the team's discovery + reads
- * to that layer's physical table.
- */
-const LAYER_ORDER: DataLayer[] = ['bronze', 'silver', 'gold'];
-function LayerToggle({
-  layer, built, canEdit, onPick,
-}: {
-  layer: DataLayer;
-  /** The dataset's built medallion layers (from the grant-available feed). */
-  built: DataLayer[];
-  canEdit: boolean;
-  onPick: (layer: DataLayer) => void;
-}) {
-  const choices = LAYER_ORDER.filter((l) => built.includes(l));
-  // Nothing to choose (0 or 1 built layer) → no selector at all.
-  if (choices.length < 2) return null;
-  return (
-    <span className="sb-layer" role="group" aria-label="Medallion layer" style={{ display: 'inline-flex', gap: 4 }}>
-      {choices.map((l) => (
-        <button
-          key={l}
-          type="button"
-          className={`btn ghost sm${l === layer ? ' active' : ''}`}
-          aria-pressed={l === layer}
-          disabled={!canEdit}
-          title={`Read the ${l} layer`}
-          onClick={() => canEdit && l !== layer && onPick(l)}
-        >
-          {l.charAt(0).toUpperCase() + l.slice(1)}
-        </button>
-      ))}
-    </span>
-  );
-}
-
-function ResourcePicker({
-  systemId, system, kind, feedKind, label, canEdit, onCommit, hideLabel,
-}: {
-  systemId: string;
-  system: System;
-  /** An id-carrying grant kind (Files is handled separately by FolderResourcePicker).
-   *  `plan` holds heterogeneous Plan grants — Operating Manual (`manual:<scope>`),
-   *  Strategic Pillar (`pillar:<id>`) and Big Bet (`bigbet:<id>`) ids. */
-  kind: 'data' | 'knowledge' | 'connections' | 'metrics' | 'plan';
-  /** The `…/grants/available?kind=` feed to browse — `metric` (singular) for metrics;
-   *  `operating-manual` · `strategy` · `big-bets` for the three plan feeds. */
-  feedKind: 'data' | 'knowledge' | 'connections' | 'metric' | 'operating-manual' | 'strategy' | 'big-bets';
-  label: string;
-  /** Suppress the internal category label — the caller renders a prominent one. */
-  hideLabel?: boolean;
-  canEdit: boolean;
-  onCommit: (next: System) => void;
-}) {
-  const [available, setAvailable] = useState<Available[] | null>(null);
-  const [loadErr, setLoadErr] = useState('');
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState('');
-
-  useEffect(() => {
-    let alive = true;
-    setLoadErr('');
-    fetch(`/api/agents/systems/${systemId}/grants/available?kind=${feedKind}`, { cache: 'no-store' })
-      .then(async (res) => {
-        const body = await res.json();
-        if (!res.ok) throw new Error(body.error ?? 'Failed to load');
-        if (alive) setAvailable(body.items as Available[]);
-      })
-      .catch((e) => { if (alive) setLoadErr((e as Error).message); });
-    return () => { alive = false; };
-  }, [systemId, feedKind]);
-
-  const granted = system.grants[kind];
-  const availOf = (id: string) => available?.find((a) => a.id === id);
-  const nameOf = (id: string) =>
-    availOf(id)?.name
-    ?? (id.includes('_') ? id.split('_').slice(1).join('_') : id);
-  const scopeOf = (id: string): 'personal' | 'domain' | 'marketplace' => availOf(id)?.scope ?? 'personal';
-  /** Built medallion layers for a granted dataset (empty until `available` loads). */
-  const layersOf = (id: string): DataLayer[] => availOf(id)?.layers ?? [];
-  const grantedIds = new Set(granted.map((g) => g.id));
-  const addable = (available ?? []).filter((a) => !grantedIds.has(a.id));
-  const q = search.trim().toLowerCase();
-  const shown = q ? addable.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q)) : addable;
-  // Metrics + Plan (Operating Manual) are read-only (no agent author path) — cap the
-  // selector at read-only regardless of the system posture; other kinds obey the full cap.
-  const readOnlyKind = kind === 'metrics' || kind === 'plan';
-  const baseCap = accessCap(system.safetyPreset);
-  const cap: AccessCap = readOnlyKind
-    ? { ...baseCap, ceiling: 'read-only', default: 'read-only', reason: baseCap.reason || `${label} is read-only.` }
-    : baseCap;
-
-  return (
-    <div className="sb-resource">
-      {hideLabel ? null : <div className="sb-field-label" style={{ margin: '4px 0' }}>{label}</div>}
-      {loadErr ? <div className="error" style={{ marginBottom: 6 }}>{loadErr}</div> : null}
-      <div className="sb-chips">
-        {granted.length === 0 ? <span className="hint" style={{ marginTop: 0 }}>None yet.</span> : null}
-        {granted.map((g) => (
-          <span key={g.id} className="sb-chip granted" style={{ gap: 8 }}>
-            <span>{nameOf(g.id)}<span className="badge muted" style={{ marginLeft: 6 }}>{scopeLabel(scopeKeyOf(scopeOf(g.id)))}</span></span>
-            {readOnlyKind ? null : (
-              <AccessLevelSelect
-                cap={cap}
-                capability={g.capability}
-                canEdit={canEdit}
-                onLevel={(l) => onCommit(setArtifactGrantLevel(system, kind, g.id, l))}
-              />
-            )}
-            {kind === 'data' ? (
-              <LayerToggle
-                layer={g.layer ?? highestLayer(layersOf(g.id)) ?? 'gold'}
-                built={layersOf(g.id)}
-                canEdit={canEdit}
-                onPick={(l) => onCommit(setDataGrantLayer(system, g.id, l))}
-              />
-            ) : null}
-            {canEdit ? (
-              <button className="sb-chip-x" title="Remove" onClick={() => onCommit(removeArtifactGrant(system, kind, g.id))}>✕</button>
-            ) : null}
-          </span>
-        ))}
-      </div>
-      {kind === 'data' && granted.length > 0 ? (
-        <p className="hint" style={{ marginTop: 4, marginBottom: 0 }}>
-          Which refined layer this team reads — Gold is the curated default.
-        </p>
-      ) : null}
-      {kind === 'plan' ? (
-        <p className="hint" style={{ marginTop: 4, marginBottom: 0 }}>
-          {feedKind === 'strategy' ? (
-            <>A granted pillar is loaded on demand via the governed <span className="mono">get_pillar</span> tool, scope-checked as you. Nothing is auto-injected — the read tool + your access is the only path it reaches the team.</>
-          ) : feedKind === 'big-bets' ? (
-            <>A granted big bet is loaded on demand via the governed <span className="mono">get_big_bet</span> tool, scope-checked as you. Nothing is auto-injected — the read tool + your access is the only path it reaches the team.</>
-          ) : (
-            <>A granted manual is loaded on demand via the governed <span className="mono">get_operating_manual</span> tool, scope-checked as you. Nothing is auto-injected — grant the Domain manual to have the team load it explicitly.</>
-          )}
-        </p>
-      ) : null}
-      {canEdit ? (
-        !open ? (
-          <button className="btn ghost sm" style={{ marginTop: 6 }} disabled={available === null} onClick={() => setOpen(true)}>
-            + Add {label.toLowerCase()}
-          </button>
-        ) : (
-          <div className="sb-resource-picker">
-            {addable.length > 6 ? (
-              <input
-                type="text"
-                autoFocus
-                placeholder={`Search ${label.toLowerCase()}…`}
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                style={{ width: '100%', marginBottom: 8 }}
-              />
-            ) : null}
-            {shown.length === 0 ? (
-              <p className="hint" style={{ marginTop: 0 }}>
-                {addable.length === 0 ? `Nothing to add — create or share ${label.toLowerCase()} first.` : 'No matches.'}
-              </p>
-            ) : (
-              <div className="sb-picker-list">
-                {shown.map((a) => (
-                  <button
-                    key={a.id}
-                    className="sb-picker-row"
-                    title={a.id}
-                    onClick={() =>
-                      // A newly-granted item adopts the system posture's DEFAULT access
-                      // level (the author can then downgrade it). DATA grants default to
-                      // the HIGHEST built layer; non-data kinds ignore the layer arg.
-                      onCommit(setArtifactGrantLevel(system, kind, a.id, cap.default, highestLayer(a.layers) ?? 'gold'))
-                    }
-                  >
-                    +<span>{a.name}</span><span className="badge muted">{scopeLabel(scopeKeyOf(a.scope))}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <button className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => { setOpen(false); setSearch(''); }}>Done</button>
-          </div>
-        )
       ) : null}
     </div>
   );

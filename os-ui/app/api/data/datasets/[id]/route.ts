@@ -6,8 +6,9 @@ import { withRoute } from '@/lib/core/route-server';
 import type { CurrentUser } from '@/lib/core/auth';
 import { requirePrincipal, errorResponse } from '@/lib/data/server';
 import { requireUser } from '@/lib/core/auth';
-import { getDataset, isDatasetArchived, archiveDataset, unarchiveDataset, deleteDataset, renameDataset } from '@/lib/data/store';
-import { dropPhysicalTables } from '@/lib/data/physical-delete';
+import { getDataset, isDatasetArchived, archiveDataset, unarchiveDataset, deleteDataset, renameDataset, listAllDatasets } from '@/lib/data/store';
+import { dropPhysicalTables, sharedFootprintFqns } from '@/lib/data/physical-delete';
+import { domainTableMissing } from '@/lib/data/reconcile-server';
 import { executeRun } from '@/lib/infra/governed';
 import { stepperStages } from '@/lib/data/panels';
 import { goldOutputColumns } from '@/lib/data/metrics';
@@ -34,8 +35,16 @@ export const GET = withRoute<{ id: string }>(async ({ user, params, req }) => {
   // which differ from `columns` (base docs) after a Gold join — the metric builder
   // and any gold-mart consumer must read these.
   const archived = isDatasetArchived(id, user);
+  // PROBE-BEFORE-CLAIM (#96): for a PROMOTED dataset, physically probe the domain gold table
+  // before the detail view claims it queryable/cube-ready. If the table has drifted away
+  // (registry says served, warehouse says gone — the Northpeak zombie), flag it STALE at
+  // read time so the UI shows the honest "not materialized — re-materialize to serve" note +
+  // the repair action, even when the (previously unreliable) stored flag was never set. Fail-
+  // soft: an un-promoted dataset / an unreachable engine never flips it (no false alarm).
+  const missing = await domainTableMissing(dataset).catch(() => false);
+  const domainTableStale = dataset.domainTableStale || missing;
   return NextResponse.json({
-    dataset: { ...dataset, archived, goldColumns: goldOutputColumns(dataset) },
+    dataset: { ...dataset, archived, goldColumns: goldOutputColumns(dataset), ...(domainTableStale ? { domainTableStale: true } : {}) },
     stages: stepperStages(dataset),
   });
 }, { gate: requirePrincipal as () => Promise<CurrentUser> });
@@ -100,6 +109,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 export const DELETE = withRoute<{ id: string }>(async ({ user, params }) => {
   const { id } = params;
   const dataset = deleteDataset(id, user); // throws 403/409 → nothing is dropped
-  const physical = await dropPhysicalTables(dataset, user, executeRun);
+  // COLLISION SAFETY: never drop a physical table another LIVE dataset still occupies via a
+  // name/slug collision (dropping it would orphan the still-served sibling). Compute the
+  // protected footprint from every OTHER live dataset before issuing the drops.
+  const protectedFqns = sharedFootprintFqns(dataset, listAllDatasets());
+  const physical = await dropPhysicalTables(dataset, user, executeRun, protectedFqns);
   return NextResponse.json({ ok: true, physical });
 }, { gate: requirePrincipal as () => Promise<CurrentUser> });

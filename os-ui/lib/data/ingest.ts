@@ -8,6 +8,7 @@ import type { Role } from '@/lib/core/session';
 import { emptyVersions, type Dataset } from './dataset-schema.ts';
 import { getDataset, buildVersion, setDocs } from './store.ts';
 import { autoDocumentAfterIngest, type IngestGrounding } from './auto-docs.ts';
+import { autoAdvancePipeline } from './auto-pipeline.ts';
 import { stageArtifact } from './panels.ts';
 import { personalSchema, bronzeTarget } from './store-fqn.ts';
 import { putObject, uploadObjectKey } from './object-store.ts';
@@ -175,6 +176,14 @@ export async function ingestAndRegisterBronze(
       persist: (docs) => { setDocs(datasetId, user, docs, { provenance: 'ai-auto' }); },
     },
   ).catch(() => { /* fire-and-forget: never surface an auto-doc failure to the ingest caller */ });
+  // AUTO-ADVANCE the pipeline after the Bronze commit: build Silver → Gold (pass-through
+  // copies, Bronze stays RAW) and suggest + STORE the obvious DQ rules — so the user gets the
+  // whole medallion + default checks with NO extra button presses. Best-effort + NON-BLOCKING,
+  // same contract as auto-docs: it reuses the SAME governed build/checks functions the manual
+  // buttons call, each stage is independent (one failure logs + continues), and nothing is
+  // locked — the user can rebuild any layer and edit/delete any check afterward. The ingest
+  // response never waits on it.
+  void autoAdvancePipeline(datasetId, user).catch(() => { /* fire-and-forget: never surface to the ingest caller */ });
   return { ok: true, report, dataset: final };
 }
 

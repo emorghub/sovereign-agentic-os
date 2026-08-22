@@ -62,6 +62,11 @@ type LastRun = {
   mode?: 'live' | 'offline-mock';
   traceStoreAvailable?: boolean;
   traceUrl?: string;
+  /** Set when this run was recovered after a mid-run restart — the completed steps
+   *  are preserved and the UI shows an "interrupted — re-run to continue" banner. */
+  interrupted?: boolean;
+  /** Node index the interrupted walk reached (for a future full-resume). */
+  resumeFromIndex?: number;
 };
 
 /** Grant ids per kind, mirroring ContextKind — for the Evaluate granted-vs-used strip. */
@@ -716,20 +721,20 @@ export default function BuildRunPanel({
   nodePath?: string[];
   onStateChange: () => void;
   /**
-   * Which sections to render. Simple mode's 5-phase flow reuses this ONE panel but
-   * shows only the section for the current phase: `'build'` = compile+verify only,
-   * `'run'` = the run trigger + results (final output, per-node drill-down, live
-   * progress), `'evaluate'` = the assessment (diagnostics table, Langfuse link, PDF).
-   * Developer mode passes nothing → `'all'`, so it is unchanged.
+   * Which sections to render. Simple mode's guided flow reuses this ONE panel but
+   * shows only the section(s) for the current phase: `'build'` = compile+verify only,
+   * `'run'` = the run trigger + results, `'build-run'` = BOTH build and run in one merged
+   * "Build & Run" stage (no assessment), `'evaluate'` = the assessment (diagnostics table,
+   * Langfuse link, PDF). Developer mode passes nothing → `'all'`, so it is unchanged.
    */
-  phase?: 'all' | 'build' | 'run' | 'evaluate';
+  phase?: 'all' | 'build' | 'run' | 'build-run' | 'evaluate';
 }) {
   // canRunProp absent → fall back to canEdit (back-compat with callers that haven't
   // threaded the new prop yet, e.g. SimpleBuilder). When present, use it as the
   // authoritative gate: the server already enforces run authz; the UI just surfaces it.
   const canRun = canRunProp !== undefined ? canRunProp : canEdit;
-  const showBuild = phase === 'all' || phase === 'build';
-  const showRun = phase === 'all' || phase === 'run';
+  const showBuild = phase === 'all' || phase === 'build' || phase === 'build-run';
+  const showRun = phase === 'all' || phase === 'run' || phase === 'build-run';
   const showEvaluate = phase === 'all' || phase === 'evaluate';
   const [building, setBuilding] = useState(false);
   // Seed from server-persisted lastBuild so the panel survives tab-switches.
@@ -1055,7 +1060,7 @@ export default function BuildRunPanel({
       {showBuild ? (
       <>
       <div className="section-title" style={{ marginTop: 4 }}>
-        {phase === 'build' ? 'Build' : 'Build — execute + verify'}
+        {phase === 'build' || phase === 'build-run' ? 'Build' : 'Build — execute + verify'}
         <button className="btn lg" style={{ marginLeft: 'auto' }} onClick={doBuild} disabled={building || !canEdit}>
           {building ? <span className="spin" /> : builtAt ? 'Rebuild' : 'Build'}
         </button>
@@ -1157,8 +1162,15 @@ export default function BuildRunPanel({
           Running since {timeAgo(activity.startedAt)} — in progress on another tab or session
         </div>
       ) : null}
+      {/* An interrupted run (recovered after a mid-run restart) is legible, not lost:
+          the completed steps are preserved above; a re-run continues the work. */}
+      {lastRun?.interrupted && !runningNow ? (
+        <div className="hint" style={{ marginTop: 2, marginBottom: 4, color: 'var(--warn, #b7791f)' }}>
+          Interrupted by a restart {timeAgo(lastRun.at)} — completed steps preserved below; press ▶ Run to continue.
+        </div>
+      ) : null}
       {/* Seed timestamp for the persisted run result. */}
-      {run && lastRun && !runningNow ? (
+      {run && lastRun && !runningNow && !lastRun.interrupted ? (
         <div className="hint" style={{ marginTop: 2, marginBottom: 4 }}>
           Last run {timeAgo(lastRun.at)}
         </div>

@@ -43,6 +43,26 @@ export type Settings = {
   // a PLATFORM admin (not a domain admin) may turn it back on. Fail-closed: the UI
   // is not the gate — createApp + the create route + the MCP surface all enforce it.
   codedAppsEnabled: boolean;
+  // PROMOTE-AS-VIEW — the promotion model (os-ui 0.6.150). When OFF (the DEFAULT),
+  // promote physically COPIES the owner's built gold/silver into the domain schema
+  // (`CREATE OR REPLACE TABLE iceberg.<domain>.<layer>_<slug> AS SELECT * FROM
+  // personal_<owner>…`) — today's behaviour, byte-for-byte. When ON, promote instead
+  // publishes a governed VIEW (`CREATE OR REPLACE VIEW … AS SELECT * FROM
+  // personal_<owner>…`) + the SAME domain grant/governance push: a view never drifts,
+  // so demote is a DROP VIEW and reconcile/re-materialize become no-ops. The read path
+  // is UNCHANGED (consumers still read `iceberg.<domain>.gold_<slug>`). Fail-closed:
+  // a PLATFORM admin turns it on; NEW promotes under the flag are views, existing
+  // table-promoted datasets are never migrated (each dataset records its own artifact).
+  promoteAsView: boolean;
+  // AUTONOMOUS AGENTS — the unattended-execution gate (os-ui 0.6.152). When OFF (the
+  // DEFAULT), an agent system may still be RUN by hand (a human clicks Run), but the
+  // UNATTENDED trigger paths — a cron schedule and the event/API trigger — are refused
+  // BEFORE the team executes, with an honest "autonomous execution is disabled by
+  // platform policy" (the CronJob keeps firing; each firing no-ops until re-enabled).
+  // This is the safe default for a teaching tenant: nothing runs on its own until a
+  // PLATFORM admin explicitly turns it on. Fail-closed: the gate lives at the run
+  // entrypoint, not the UI — the scheduler + event receiver both consult it.
+  autonomousAgentsEnabled: boolean;
 };
 
 const EMPTY_ROLES = { reasoning: '', standard: '', tools: '', embeddings: '' };
@@ -57,6 +77,8 @@ let settings: Settings = {
   modelRoles: { ...EMPTY_ROLES },
   standardFirstEscalation: true,
   codedAppsEnabled: false,
+  promoteAsView: false,
+  autonomousAgentsEnabled: false,
 };
 
 function fail(message: string, status: number): Error {
@@ -96,6 +118,20 @@ export function updateSettings(patch: Partial<Settings> & Record<string, unknown
       typeof patch.codedAppsEnabled === 'boolean'
         ? patch.codedAppsEnabled
         : settings.codedAppsEnabled,
+    // Nil-safe (same pattern as codedAppsEnabled): only a REAL boolean flips it; an
+    // absent/partial/garbage patch keeps the current value (default OFF), so a partial
+    // settings PUT can never accidentally switch promotion to the view model.
+    promoteAsView:
+      typeof patch.promoteAsView === 'boolean'
+        ? patch.promoteAsView
+        : settings.promoteAsView,
+    // Nil-safe (same pattern as promoteAsView): only a REAL boolean flips it; an
+    // absent/partial/garbage patch keeps the current value (default OFF), so a partial
+    // settings PUT can never accidentally ENABLE unattended agent execution.
+    autonomousAgentsEnabled:
+      typeof patch.autonomousAgentsEnabled === 'boolean'
+        ? patch.autonomousAgentsEnabled
+        : settings.autonomousAgentsEnabled,
   };
   return settings;
 }
@@ -104,6 +140,18 @@ export function updateSettings(patch: Partial<Settings> & Record<string, unknown
  *  surface consult so "coded apps disabled" is decided in exactly one place. */
 export function codedAppsEnabled(): boolean {
   return settings.codedAppsEnabled;
+}
+
+/** The promote-as-view platform flag (default OFF). The ONE read the publish path
+ *  consults so "promote copies a table vs publishes a view" is decided in one place. */
+export function promoteAsView(): boolean {
+  return settings.promoteAsView;
+}
+
+/** The autonomous-agents platform flag (default OFF). The ONE read the scheduler +
+ *  event receiver consult so "may an agent run unattended" is decided in one place. */
+export function autonomousAgentsEnabled(): boolean {
+  return settings.autonomousAgentsEnabled;
 }
 
 export function _reset(): void {
@@ -117,5 +165,7 @@ export function _reset(): void {
     modelRoles: { ...EMPTY_ROLES },
     standardFirstEscalation: true,
     codedAppsEnabled: false,
+    promoteAsView: false,
+    autonomousAgentsEnabled: false,
   };
 }

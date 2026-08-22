@@ -73,6 +73,29 @@ test('with no disabled list every agent still runs (no regression)', async () =>
   assert.ok(res.steps.some((s) => s.node === 'worker'));
 });
 
+const SYS_HANDOFF_CYCLE = `
+entrypoint: coordinator
+grants: { tools: [retrieve, write_file] }
+agents:
+  - { id: coordinator, role: lead, agent_md: "", memory_md: "", tools: [retrieve] }
+  - { id: specialist, role: worker, agent_md: "", memory_md: "", tools: [write_file] }
+edges:
+  - { from: coordinator, to: specialist, type: handoff }
+  - { from: specialist, to: coordinator, type: handoff }
+`;
+
+test('a cyclic handoff team (no supervisor, no leaf) still reaches END', async () => {
+  // Regression: `handoff` edges are CONDITIONAL Commands, so a coordinator↔specialist
+  // loop terminates to END in the real runtime. The Build verification must not report
+  // "did not reach END" for such a graph (root cause of the Campaign Example 2 failure).
+  const ir = compile(parseSystem(SYS_HANDOFF_CYCLE));
+  const { gw } = spyGateway(() => true);
+  const res = await runGraph(ir, { gateway: gw });
+  assert.equal(res.reachedEnd, true, 'a cyclic handoff graph reaches END');
+  assert.ok(res.path.includes('coordinator') && res.path.includes('specialist'), 'both agents run');
+  assert.ok(res.output.includes('END'));
+});
+
 test('a run returns a structured output summary + per-step trace (visible without Langfuse)', async () => {
   // The Run panel renders these inline so the user can always see what the agent
   // did, independent of the (clickhouse-backed) Langfuse trace store.

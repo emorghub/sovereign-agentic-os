@@ -6,6 +6,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useUser } from '@/lib/useUser';
 import { canManageArtifact } from '@/lib/governance/edit-scope';
+import { roleAtLeast } from '@/lib/core/session';
 import { anchorAttr, ANCHORS } from '@/lib/tutorials';
 import LineagePanel from './LineagePanel';
 import RefinePanel from './RefinePanel';
@@ -184,6 +185,9 @@ type Dataset = {
   certification?: Certification;
   /** Soft-archived (retained, reversible). Absent/false = live. */
   archived?: boolean;
+  /** #96: the governed DOMAIN gold table has drifted (missing/stale) — the detail route
+   *  probes it physically, so this is honest even when the stored flag was never set. */
+  domainTableStale?: boolean;
   /** 'ai-auto' when the documentation was AUTO-DRAFTED after ingestion and not yet reviewed
    *  by a human — drives the subtle "AI-drafted — review…" note. Cleared on a human save. */
   docsProvenance?: 'ai-auto';
@@ -625,6 +629,23 @@ export default function DataBuilder({
     } catch (e) { setShareErr((e as Error).message); } finally { setShareBusy(false); }
   }, [datasetId, loadPromote, load, notifyApprovalFiled]);
 
+  // RE-MATERIALIZE the governed domain table (#96 self-heal): re-run the stored publish CTAS
+  // for a promoted dataset whose domain gold table drifted away (missing/stale). Reuses the
+  // gold-join route's `rematerializeOnly` repair mode; on ✓ it reloads so the STALE banner clears.
+  const [rematBusy, setRematBusy] = useState(false);
+  const [rematErr, setRematErr] = useState('');
+  const rematerialize = useCallback(async () => {
+    setRematErr(''); setRematBusy(true);
+    try {
+      const res = await fetch(`/api/data/datasets/${datasetId}/gold-join`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rematerializeOnly: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setRematErr(data.error ?? data?.domainTable?.reason ?? 'Could not re-materialize the domain table'); return; }
+      await load();
+    } catch (e) { setRematErr((e as Error).message); } finally { setRematBusy(false); }
+  }, [datasetId, load]);
+
   // Best-effort OpenMetadata deep link from the catalog union.
   useEffect(() => {
     let cancelled = false;
@@ -921,6 +942,21 @@ export default function DataBuilder({
     );
   };
 
+  // File a set of AI-drafted quality rules into the editable rule cards (each validated +
+  // governed by the checks route). Shared by the Define draft and the Validate-stage
+  // "Suggest quality rules" action, so a suggested rule ALWAYS lands as an editable card,
+  // never as prose the user can't accept.
+  const fileChecks = useCallback((checks: DefineDraft['checks']) => {
+    for (const chk of checks ?? []) {
+      if (chk && RULE_KINDS.has(chk.rule as DataCheckRule) && typeof chk.column === 'string' && chk.column.trim()) {
+        const extra: { values?: string[]; min?: number; max?: number } = {};
+        if (chk.rule === 'accepted_values' && Array.isArray(chk.values)) extra.values = chk.values.filter((v) => typeof v === 'string');
+        if (chk.rule === 'range') { if (typeof chk.min === 'number') extra.min = chk.min; if (typeof chk.max === 'number') extra.max = chk.max; }
+        void addRuleWith(chk.rule as DataCheckRule, chk.column, extra);
+      }
+    }
+  }, [addRuleWith]);
+
   // Apply an assistant Define draft into the docs + quality-rule editors (never auto-saves).
   const applyDraft = useCallback((draft: DefineDraft) => {
     if (typeof draft.description === 'string' && draft.description.trim()) setDesc(draft.description.trim());
@@ -930,16 +966,8 @@ export default function DataBuilder({
       const merged = Array.from(known, ([name, description]) => ({ name, description }));
       setCols(merged.length ? merged : [{ name: '', description: '' }]);
     }
-    // File the suggested quality rules (each validated + governed by the checks route).
-    for (const chk of draft.checks ?? []) {
-      if (chk && RULE_KINDS.has(chk.rule as DataCheckRule) && typeof chk.column === 'string' && chk.column.trim()) {
-        const extra: { values?: string[]; min?: number; max?: number } = {};
-        if (chk.rule === 'accepted_values' && Array.isArray(chk.values)) extra.values = chk.values.filter((v) => typeof v === 'string');
-        if (chk.rule === 'range') { if (typeof chk.min === 'number') extra.min = chk.min; if (typeof chk.max === 'number') extra.max = chk.max; }
-        void addRuleWith(chk.rule as DataCheckRule, chk.column, extra);
-      }
-    }
-  }, [cols, addRuleWith]);
+    fileChecks(draft.checks);
+  }, [cols, fileChecks]);
 
   // ── Live ctx off REAL dataset state — the stage gates/✓ read this, never faked ──
   const ctx: DataCtx = useMemo(() => {
@@ -1229,6 +1257,9 @@ export default function DataBuilder({
         ) : (
           <h2 className="stepper-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%', display: 'flex', alignItems: 'center', gap: 10 }}>
             {dataset.name}
+            {/* The dataset id in small gray monospace — makes support/debugging (and copying an
+                id into a query) trivial without opening the network tab. */}
+            <span className="muted" style={{ fontSize: 11, fontWeight: 400, fontFamily: 'var(--font-mono, monospace)', opacity: 0.55, flex: 'none' }} title="Dataset id (click-to-select)">{dataset.id}</span>
             {/* Rename must be DISCOVERABLE — a labelled button, not a bare glyph
                 (user feedback 2026-07-31: the pencil-only affordance read as missing). */}
             {canEdit ? (
@@ -1503,10 +1534,15 @@ export default function DataBuilder({
             {/* AI, built into the flow: one big action at the top — explain the profile's
                 suggested checks, or (none yet) suggest which quality rules to author. */}
             <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 14 }}>
-              <AiAction
+              <AiAction<DefineDraft>
                 datasetId={dataset.id} stage="validate"
                 cta={suggestions.length ? 'Explain suggested checks' : 'Suggest quality rules'}
                 title={suggestions.length ? 'AI explains what each suggested check guards against' : 'AI suggests quality rules for the documented columns'}
+                // With profile suggestions the reply is prose (explanation) — no onDraft.
+                // Without them "Suggest quality rules" returns a structured {checks} draft,
+                // which we file as editable rule cards the user can review/override/save.
+                onDraft={suggestions.length ? undefined : (draft) => fileChecks(draft.checks)}
+                successText="Drafted rules added below — review, edit and save them."
                 payload={() => ({
                   name: dataset.name,
                   columns: colNames,
@@ -1957,6 +1993,24 @@ export default function DataBuilder({
           <span className="mono muted" style={{ fontSize: 11 }} title="Dataset ID">{dataset.id}</span>
           <span className="mono muted" style={{ fontSize: 11 }} title="Physical table name (frozen — unaffected by rename)">table: {physicalSlug(dataset)}</span>
         </div>
+      {/* Domain-table drift (#96): a PROMOTED dataset whose governed domain gold table is
+          missing/stale — the detail route probes this physically, so we surface the honest
+          state + a prominent repair regardless of the (previously unreliable) stored flag. */}
+      {dataset.tier !== 'dataset' && dataset.domainTableStale ? (
+        <div className="row" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface-2, rgba(0,0,0,0.02))' }}>
+          <span role="alert" style={{ fontSize: 13 }}>
+            <strong>Domain table not materialized.</strong> The shared copy Cube and dashboards read isn’t in the warehouse — re-materialize to serve it.
+          </span>
+          {user && roleAtLeast(user.role, 'builder') ? (
+            <button className="btn" disabled={rematBusy} onClick={rematerialize} title="Re-run the stored publish CTAS to rebuild the governed domain table">
+              {rematBusy ? <span className="spin" /> : 'Re-materialize domain table'}
+            </button>
+          ) : (
+            <span className="muted" style={{ fontSize: 12 }}>A Builder must re-materialize the shared domain table.</span>
+          )}
+          {rematErr ? <span className="error" role="alert" style={{ fontSize: 12 }}>{rematErr}</span> : null}
+        </div>
+      ) : null}
       <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
         {layer ? (
           <span className="status-chip s-searchable" title={`Physical table: ${fqn}`} style={{ cursor: 'default' }}>

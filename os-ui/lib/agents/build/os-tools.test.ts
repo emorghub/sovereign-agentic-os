@@ -12,6 +12,7 @@ import {
   resolveGrantedTools,
   isAgenticOsTeam,
   grantedToolSpecs,
+  grantedToolBrief,
   grantedToolExecutor,
   grantedLayerFor,
   resolveFolderGrants,
@@ -50,6 +51,41 @@ function sysWithPreset(tools: string[], preset: 'read-only' | 'read-propose' | '
 }
 
 const CREATOR: CurrentUser = { id: 'u1', name: 'Cara Creator', domains: ['sales'], role: 'creator' };
+
+// --- grantedToolBrief: the prompt-side manifest = the granted tools only ---------
+
+test('grantedToolBrief: ADVERTISES only granted tools as callable list entries', () => {
+  const brief = grantedToolBrief(CREATOR, sysWith(['query_data', 'search_knowledge']));
+  // The advertised, callable tools are the "- <name> — …" list entries.
+  const advertised = new Set(
+    brief.split('\n').map((l) => /^- (\w+) —/.exec(l)?.[1]).filter((n): n is string => !!n),
+  );
+  assert.ok(advertised.has('query_data'));
+  assert.ok(advertised.has('search_knowledge'));
+  // The exact ungranted tools the live bug attempted must NOT be advertised as callable
+  // (they may still be *named* inside a granted tool's own before/after hint prose, but
+  // that is not a callable entry — the manifest still excludes them).
+  for (const leak of ['create_software', 'build_gold_join', 'run_quality_checks', 'index_knowledge']) {
+    assert.ok(!advertised.has(leak), `${leak} is not granted — it must not be advertised as callable`);
+  }
+});
+
+test('grantedToolBrief: the brief is a SUBSET of the advertised tool manifest', () => {
+  const sys = sysWith(['query_data', 'search_knowledge']);
+  const advertised = new Set(grantedToolSpecs(CREATOR, sys).map((s) => s.name));
+  const brief = grantedToolBrief(CREATOR, sys);
+  // Every "- name — desc" line names a tool that is genuinely in the manifest.
+  for (const line of brief.split('\n')) {
+    const m = /^- (\w+) —/.exec(line);
+    if (m) assert.ok(advertised.has(m[1]), `${m[1]} named in brief but not advertised in manifest`);
+  }
+});
+
+test('grantedToolBrief: fails closed for an empty grant set (advertise none, not all)', () => {
+  const brief = grantedToolBrief(CREATOR, sysWith([]));
+  assert.match(brief, /been granted NO tools/);
+  assert.doesNotMatch(brief, /create_software|query_data/);
+});
 const BUILDER: CurrentUser = { id: 'u2', name: 'Bo Builder', domains: ['sales'], role: 'builder' };
 const DOMAIN_ADMIN: CurrentUser = { id: 'u3', name: 'Dana Domain-Admin', domains: ['sales'], role: 'domain_admin' };
 

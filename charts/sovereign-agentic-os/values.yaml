@@ -2031,7 +2031,16 @@ queryTool:
   enabled: true
   image:
     repository: sovereign-os/query-tool     # built locally, loaded into kind
-    tag: "0.6.1"                             # 0.6.1 = service-bearer auth (require
+    tag: "0.6.2"                             # 0.6.2 = ADDS the promote-as-view allowlist
+                                             #         (CREATE OR REPLACE VIEW / DROP VIEW for
+                                             #         builder+ into an entitled domain schema)
+                                             #         on top of 0.6.1. MUST stay pinned here —
+                                             #         it is otherwise rolled via `kubectl set
+                                             #         image` and every `helm upgrade` reverted
+                                             #         it to 0.6.1, silently breaking promote=view
+                                             #         (CREATE VIEW denied → publish fails → tier
+                                             #         never flips → "still my data"). 2026-08-22.
+                                             # 0.6.1 = service-bearer auth (require
                                              #         Authorization: Bearer on /query +
                                              #         /execute when SERVICE_BEARER_TOKEN
                                              #         is set; /health stays open; fail-

@@ -3,23 +3,25 @@
  */
 import 'server-only';
 import { buildStage } from './build/server.ts';
-import { liveDataReachable, realTrino } from './build/live-clients.ts';
+import { queryToolReachable, realTrino } from './build/live-clients.ts';
 import { realForgejo } from '../agents/build/live-clients.ts';
 import { publishApprovedPromotion, rematerializeDomainTable, type PublishOutcome, type RematerializeOutcome } from './publish.ts';
 import { listGovernedDatasets } from './store.ts';
 import { syncAnalyticsRepo } from './analytics-repo.ts';
+import { promoteAsView } from '../platform-admin/settings.ts';
 import type { MaterializationVerifier, Principal, PromotionRequest } from './store.ts';
 
 /**
  * The independent FAIL-CLOSED domain-table probe (#96) the publish runs right before
- * the tier flip. LIVE ⇒ a REAL governed `tableQueryable` probe on the exact domain
- * target (so a promotion can't flip while the gold lives only in `personal_<owner>`).
- * OFFLINE-MOCK ⇒ there is no domain schema to probe; the in-process build report's own
- * verify (against the mock's materialized set) is the gate, so this trusts the ✓ (the
- * offline-mock is a teaching path, never production — #96 is a live-schema bug).
+ * the tier flip. Gated on the WRITE/Trino path the domain table lives in
+ * (`queryToolReachable`) — NOT Cube's `/meta` (`liveDataReachable`), which is slow under
+ * load and would flip this to a blanket "present", falsely passing verification for a
+ * table the CTAS never landed (the reconcile-sweep false-"refreshed"). LIVE ⇒ a REAL
+ * governed `tableQueryable` probe on the exact domain target. Only a genuinely unreachable
+ * query-tool (true offline-mock — no domain schema to probe) trusts the in-process build ✓.
  */
 const verifyDomainTable: MaterializationVerifier = async (fqn, principal) => {
-  if (await liveDataReachable()) return realTrino().tableQueryable(fqn, principal);
+  if (await queryToolReachable()) return realTrino().tableQueryable(fqn, principal);
   return true;
 };
 
@@ -37,6 +39,10 @@ export async function publishPromotionLive(
   const outcome = await publishApprovedPromotion(req, approver, {
     buildPromote: (dataset, principal, write) => buildStage(dataset, 'promote', principal, write),
     verifyDomainTable,
+    // Promote-as-view platform flag (default OFF): a NEW promote publishes a governed VIEW
+    // over the owner's personal lane instead of a physical CTAS copy. Existing promoted
+    // datasets are never migrated (their recorded `domainArtifact` decides demote/reconcile).
+    asView: promoteAsView(),
   });
   // Fire-and-forget analytics repo sync on promote success (#146 Phase 2).
   // Never throws into the approval flow — the hook is best-effort.

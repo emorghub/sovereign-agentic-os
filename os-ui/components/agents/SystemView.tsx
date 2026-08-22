@@ -134,6 +134,10 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
   // View mode (Simple ⇄ Developer). Initialized from the persisted choice / role
   // once the system's role is known; remembered in localStorage thereafter.
   const [mode, setMode] = useState<ViewMode | null>(null);
+  // Simple-mode View/Edit. A ready-and-tested system (built + run at least once) opens in a
+  // read-only VIEW with a ✎ Edit affordance; a not-yet-ready system opens straight into EDIT.
+  // Null = "not chosen yet, use the ready-gate default"; set on the user's explicit toggle.
+  const [simpleEdit, setSimpleEdit] = useState<boolean | null>(null);
   const [catalog, setCatalog] = useState<string[] | null>(null);
   const [actErr, setActErr] = useState('');
   const [acting, setActing] = useState(false);
@@ -318,6 +322,13 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
   // The mode to render NOW: the resolved state once known, else Simple — the
   // universal default (never flash the Developer surface before the pref resolves).
   const effectiveMode: ViewMode = mode ?? 'simple';
+  // Ready + tested = built green AND run at least once — the OS View/Edit gate for the
+  // Simple builder. Drives both the render below and the header View/Edit toggle.
+  const readyTested =
+    !!data.lastBuild?.ok &&
+    !!data.lastRun &&
+    ((data.lastRun.path?.length ?? 0) > 0 || !!data.lastRun.output);
+  const simpleInView = simpleEdit === null ? readyTested : !simpleEdit;
   const onConnect = (from: string, to: string) => {
     const fromAgent = sys.agents.find((a) => a.id === from);
     const isSupervisor = from === sys.entrypoint || (fromAgent?.members?.length ?? 0) > 0;
@@ -399,6 +410,32 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
               Developer
             </button>
           </div>
+          {/* View ⇄ Edit — only for the Simple builder on a ready-and-tested system (built +
+              run at least once). VIEW is the calm read-only run/monitor/results surface; Edit
+              opens the six-stage guided builder. Matches the header-toggle convention the
+              Data/Metrics/Dashboards detail views use. Hidden until the system is ready. */}
+          {effectiveMode === 'simple' && readyTested ? (
+            <div className="mode-toggle" role="group" aria-label="View or edit">
+              <button
+                type="button"
+                className={simpleInView ? 'active' : ''}
+                aria-pressed={simpleInView}
+                onClick={() => setSimpleEdit(false)}
+                title="Read-only: run it, monitor it, review results"
+              >
+                View
+              </button>
+              <button
+                type="button"
+                className={!simpleInView ? 'active' : ''}
+                aria-pressed={!simpleInView}
+                onClick={() => setSimpleEdit(true)}
+                title="Open the guided builder to change this team"
+              >
+                Edit
+              </button>
+            </div>
+          ) : null}
           {acting ? <span className="spin" title="applying…" /> : null}
           {data.running ? (
             <button className="btn ghost sm" onClick={() => post('run', { stop: true })} disabled={!data.canEdit || acting}>Stop</button>
@@ -461,9 +498,12 @@ export default function SystemView({ systemId, onBack }: { systemId: string; onB
             activity: data.activity,
             lastRun: data.lastRun,
             nodePath: runOrder(sys, data.disabledAgents),
+            canRun: data.canRun,
           }}
           onCommit={(next) => commit(next, { snapshot: sys })}
           onReload={reloadAll}
+          view={simpleInView}
+          onEdit={() => setSimpleEdit(true)}
         />
       ) : (
       <>

@@ -13,6 +13,13 @@
  * the separate `app.grants.agents` list (`lib/software/app-agent-grants.ts`).
  */
 
+import { type ChooseContextTypeMetaBase, type CreateNewMode, grantedSummary } from '@/lib/core/choose-context';
+
+// Re-export the shared core pieces so the Software tab's existing imports (and its
+// unit test) keep resolving from THIS module unchanged, while the single source of
+// truth for the summary copy + create-mode shape lives in `lib/core/choose-context`.
+export { type CreateNewMode, grantedSummary };
+
 /** Every Choose-Context type, in stable display order. */
 export type ChooseContextType =
   | 'data' | 'metrics' | 'files' | 'knowledge' | 'agents' | 'connections';
@@ -21,27 +28,10 @@ export const CHOOSE_CONTEXT_TYPES: ChooseContextType[] = [
   'data', 'metrics', 'files', 'knowledge', 'agents', 'connections',
 ];
 
-/** How a type's "Create new" resolves. */
-export type CreateNewMode =
-  /** Create a fresh, possibly-empty artifact IN the App folder via context-provision, then grant. */
-  | 'in-folder'
-  /** Deep-link into another tab's own builder (it has its own creator), then grant on return. */
-  | 'deep-link'
-  /** No standalone create (the artifact is derived elsewhere) — point to the owning tab. */
-  | 'derived';
-
-export type ChooseContextTypeMeta = {
+export type ChooseContextTypeMeta = ChooseContextTypeMetaBase & {
   type: ChooseContextType;
-  label: string;
-  /** One honest line under the type header — what granting THIS type gives the app. */
-  blurb: string;
-  createMode: CreateNewMode;
-  /** The label on the create-new affordance. */
-  createLabel: string;
   /** For deep-link/derived types: the OS tab a "Create new" points at. */
   createTab?: 'agents' | 'connections' | 'metrics';
-  /** A short note explaining a deep-link / derived create (why it lives in another tab). */
-  createNote?: string;
 };
 
 /** The six type descriptors — the single source of the section copy + create behaviour. */
@@ -84,10 +74,4 @@ export const CHOOSE_CONTEXT_META: Record<ChooseContextType, ChooseContextTypeMet
 /** The types whose "Create new" makes a fresh artifact in the App folder (vs deep-link/derived). */
 export function isInFolderCreateType(type: ChooseContextType): boolean {
   return CHOOSE_CONTEXT_META[type].createMode === 'in-folder';
-}
-
-/** The "Already available to this app" count line for a type, given how many are granted. */
-export function grantedSummary(count: number): string {
-  if (count === 0) return 'Nothing granted yet';
-  return `${count} already available to this app`;
 }

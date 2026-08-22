@@ -37,6 +37,7 @@ import { proposeFixes, applyFixes, dqComplete, type FixApplyInput } from '@/lib/
 import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data';
 import { queryRun, executeRun } from '@/lib/infra/governed';
 import { publishPromotionLive, rematerializeDomainTableLive } from '@/lib/data/publish-server';
+import { reconcileDomainTablesLive } from '@/lib/data/reconcile-server';
 import { enqueue, getApproval, decide, listApprovals } from '@/lib/governance/approvals';
 import { canBuildStage, canPassThrough, stageArtifact } from '@/lib/data/panels';
 import { scaffoldCubeYaml } from '@/lib/data/metrics';
@@ -880,6 +881,27 @@ export const dataWriteTools: McpTool[] = [
       if (!outcome.ok) fail(outcome.error, outcome.status);
       if (outcome.skipped) return { skipped: true, reason: outcome.reason, run: outcome.run ?? null };
       return { skipped: false, run: outcome.run };
+    },
+  },
+  {
+    name: 'reconcile_domain_tables',
+    tab: 'data',
+    minRole: 'builder',
+    description:
+      'SELF-HEAL the recurring "domain gold table not materialized" drift (#96 / #151): a promoted dataset whose registry says served (tier=asset, queryable, cube-ready) but whose PHYSICAL domain table `iceberg.<domain>.gold_<slug>` has vanished from the warehouse (a catalog/warehouse event, or a demote→re-promote round-trip) — so Dashboards + Cube dead-end with "not materialized". This SWEEP enumerates the promoted domain tables you govern (optionally scoped to one `domain`), PROBES each physical Iceberg table, and RE-MATERIALIZES any that are MISSING or STALE by re-running the SAME stored publish CTAS the Data tab runs (source = the owner’s built Gold → target = the domain schema; preserves grain + measures — it re-runs the stored plan, never reconstructs). Best-effort per dataset (one failure never aborts the sweep) and IDEMPOTENT (a healthy, in-sync table is skipped — no CTAS re-run). Returns an honest per-dataset report {datasetId, name, fqn, before: missing|stale|ok, after: refreshed|failed|skipped, error?}. Governance: Builder+ heals their OWN domain (the domain-schema write floor); Admin heals every domain. Use after a warehouse re-provision, or when a dashboard reports a governed dataset "not materialized". The SAME sweep the governed route POST /api/platform-admin/reconcile-domain-tables runs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        domain: { type: 'string', description: 'Optional — scope the sweep to ONE domain (e.g. "agentic-leader-q3-2026"). Omit to sweep every domain you govern.' },
+      },
+      required: [],
+      examples: [{}, { domain: 'agentic-leader-q3-2026' }],
+    },
+    call: async (user, args) => {
+      const p = P(user);
+      const domain = str(args.domain).trim();
+      const report = await reconcileDomainTablesLive(p, domain ? { domain } : {});
+      return report;
     },
   },
 ];

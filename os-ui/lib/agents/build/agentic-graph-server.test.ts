@@ -152,11 +152,51 @@ test('isAgenticOsTeam gates the live path: mixed + software true, hermes false',
 // --- preamble grounds in every granted tab -----------------------------------
 
 test('osPreamble grounds a mixed team in the OS rules (tab-agnostic, no software-only leakage)', () => {
-  const pre = osPreamble(parseSystem(mixedYaml()));
+  const pre = osPreamble(CREATOR, parseSystem(mixedYaml()));
   assert.match(pre, /governed team inside the Sovereign Agentic OS/);
   assert.match(pre, /RUNNING USER/);
   // A data+knowledge team must NOT carry the software build-spec preamble.
   assert.doesNotMatch(pre, /BUILD SPEC \(canonical/);
+});
+
+test('osPreamble advertises ONLY granted tools — no ungranted-tool leak from the tab catalog', () => {
+  // A team granted only query_data (+ its read-only discovery companions) + search_knowledge.
+  const pre = osPreamble(CREATOR, parseSystem(mixedYaml()));
+  // The advertised, CALLABLE tools are the "- <name> — …" list entries in the brief.
+  const advertised = new Set(
+    pre.split('\n').map((l) => /^- (\w+) —/.exec(l)?.[1]).filter((n): n is string => !!n),
+  );
+  assert.ok(advertised.has('query_data'));
+  assert.ok(advertised.has('search_knowledge'));
+  // The tab CONTEXT.md tool catalog USED to inject these ungranted tools into the
+  // prompt as usable steps, so the model attempted them at run time. None may be an
+  // advertised (callable) entry now.
+  for (const leak of ['build_gold_join', 'run_quality_checks', 'index_knowledge', 'create_software', 'transform_silver', 'ingest_dataset']) {
+    assert.ok(!advertised.has(leak), `${leak} must not be advertised as callable — it is not granted`);
+  }
+  // The whole-tab golden-path text (which named cross-tab, ungranted tools verbatim
+  // and led the model to attempt them) is gone — create_software lives in the software
+  // tab, so a data+knowledge team must never even see the string.
+  assert.doesNotMatch(pre, /create_software/, 'no cross-tab tool string may leak into the preamble');
+  // The preamble carries NO artifact catalog: no ungranted dataset/knowledge NAMES
+  // (the model discovers only what its granted, DLS-scoped list_* tools return).
+  assert.doesNotMatch(pre, /Northpeak Employees/i, 'no ungranted dataset name may be injected');
+});
+
+test('osPreamble fails closed — a system with NO tools advertises none (not the whole catalog)', () => {
+  const noTools = parseSystem({
+    version: '1',
+    system: { name: 'Empty', domain: 'sales', visibility: 'Personal' },
+    runtime: 'langgraph',
+    entrypoint: 'a',
+    grants: { tools: [] },
+    agents: [{ id: 'a', role: 'agent', agent_md: '', memory_md: '' }],
+  });
+  const pre = osPreamble(CREATOR, noTools);
+  assert.match(pre, /been granted NO tools/);
+  for (const leak of ['build_gold_join', 'create_software', 'query_data', 'search_knowledge']) {
+    assert.doesNotMatch(pre, new RegExp(leak), `${leak} must not leak into a no-grant preamble`);
+  }
 });
 
 // --- LIVE PROGRESS (0.1.81): runOsTeam forwards the streaming callbacks ----------

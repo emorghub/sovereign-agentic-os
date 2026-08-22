@@ -358,6 +358,15 @@ export type Dataset = {
    *  false ⇒ the domain table is in sync (or the dataset was never promoted) — omitted from
    *  the yaml (byte-stable, zero migration; the `gitBacked` precedent). */
   domainTableStale?: boolean;
+  /** HOW this dataset's governed DOMAIN artifact is materialized (promote-as-view, 0.6.150).
+   *  `'view'` = the promotion published a `CREATE OR REPLACE VIEW iceberg.<domain>.<layer>_<slug>
+   *  AS SELECT * FROM iceberg.personal_<owner>…` (a live pass-through — it never drifts, so demote
+   *  is a DROP VIEW and reconcile/re-materialize are no-ops); `'table'`/ABSENT = the classic
+   *  physical CTAS copy (demote drops the TABLE, a rebuild flags it stale + re-materializes). Set at
+   *  promote time from the `promoteAsView` platform flag; NEW promotes under the flag are `'view'`,
+   *  every existing promoted dataset stays a table. Omitted from the yaml when absent/`'table'`
+   *  (byte-stable, zero migration — the `gitBacked`/`domainTableStale` precedent). */
+  domainArtifact?: 'view' | 'table';
 };
 
 export class DatasetError extends Error {
@@ -752,6 +761,10 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
   const gitBacked = doc.gitBacked === true ? true : undefined;
   // Northpeak fix: absent/false ⇒ the domain table is in sync (or never promoted).
   const domainTableStale = doc.domainTableStale === true ? true : undefined;
+  // Promote-as-view: only 'view' is stored; absent/'table' ⇒ the classic physical CTAS copy
+  // (every dataset promoted before this field existed). Byte-stable — only a view-promoted
+  // dataset carries the marker.
+  const domainArtifact = doc.domainArtifact === 'view' ? ('view' as const) : undefined;
   // Create paths: only 'curated'/'connected' are stored; absent ⇒ ingest (every pre-existing
   // record). A 'connected' record must carry a valid `connected` block; a malformed block
   // downgrades the origin to ingest so nothing half-connected leaks into the FQN seam.
@@ -792,6 +805,7 @@ export function parseDataset(input: string | Record<string, unknown>): Dataset {
     ...(cubeNamespaced ? { cubeNamespaced } : {}),
     ...(gitBacked ? { gitBacked } : {}),
     ...(domainTableStale ? { domainTableStale } : {}),
+    ...(domainArtifact ? { domainArtifact } : {}),
     ...(origin ? { origin } : {}),
     // Only carry `connected` when the origin is genuinely connected (a stray block on a
     // non-connected record is dropped — byte-stable, and the FQN seam only trusts origin).
@@ -877,6 +891,9 @@ export function serializeDataset(d: Dataset): string {
   // Omit-when-false (byte-stable): only a promoted dataset whose domain table drifted
   // from a rebuild carries this; every in-sync/un-promoted dataset serializes as before.
   if (d.domainTableStale) doc.domainTableStale = true;
+  // Omit-unless-view (byte-stable): a table-promoted / un-promoted dataset serializes exactly
+  // as before this field existed — only a view-promoted dataset writes the marker.
+  if (d.domainArtifact === 'view') doc.domainArtifact = 'view';
   // Omit-unless-curated/connected (byte-stable): the classic ingest path serializes exactly
   // as before. A connected dataset writes its origin + the `connected` block together (the
   // block is meaningless without the origin, and vice versa).

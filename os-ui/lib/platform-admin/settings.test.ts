@@ -3,7 +3,7 @@
  */
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { getSettings, updateSettings, codedAppsEnabled, _reset } from './settings.ts';
+import { getSettings, updateSettings, codedAppsEnabled, promoteAsView, autonomousAgentsEnabled, _reset } from './settings.ts';
 
 beforeEach(() => { _reset(); });
 
@@ -67,4 +67,42 @@ test('coded-apps flag is NIL-SAFE — a partial PUT never accidentally enables i
   updateSettings({ codedAppsEnabled: true });
   assert.equal(updateSettings({ currency: 'USD' }).codedAppsEnabled, true);
   assert.equal(updateSettings({ codedAppsEnabled: 'no' as unknown as boolean }).codedAppsEnabled, true);
+});
+
+test('promote-as-view defaults OFF (physical CTAS copy is the sole default path)', () => {
+  assert.equal(getSettings().promoteAsView, false);
+  assert.equal(promoteAsView(), false);
+});
+
+test('promote-as-view toggles on and back off via a boolean patch', () => {
+  assert.equal(updateSettings({ promoteAsView: true }).promoteAsView, true);
+  assert.equal(promoteAsView(), true);
+  assert.equal(updateSettings({ promoteAsView: false }).promoteAsView, false);
+  assert.equal(promoteAsView(), false);
+});
+
+test('promote-as-view flag is NIL-SAFE — a partial PUT never accidentally enables it', () => {
+  assert.equal(updateSettings({ currency: 'GBP' }).promoteAsView, false);
+  updateSettings({ promoteAsView: true });
+  assert.equal(updateSettings({ currency: 'USD' }).promoteAsView, true);
+  assert.equal(updateSettings({ promoteAsView: 'yes' as unknown as boolean }).promoteAsView, true);
+});
+
+test('autonomous-agents defaults OFF (nothing runs unattended by default)', () => {
+  assert.equal(getSettings().autonomousAgentsEnabled, false);
+  assert.equal(autonomousAgentsEnabled(), false);
+});
+
+test('autonomous-agents toggles on and back off via a boolean patch', () => {
+  assert.equal(updateSettings({ autonomousAgentsEnabled: true }).autonomousAgentsEnabled, true);
+  assert.equal(autonomousAgentsEnabled(), true);
+  assert.equal(updateSettings({ autonomousAgentsEnabled: false }).autonomousAgentsEnabled, false);
+  assert.equal(autonomousAgentsEnabled(), false);
+});
+
+test('autonomous-agents flag is NIL-SAFE — a partial PUT never accidentally enables it', () => {
+  assert.equal(updateSettings({ currency: 'GBP' }).autonomousAgentsEnabled, false);
+  updateSettings({ autonomousAgentsEnabled: true });
+  assert.equal(updateSettings({ currency: 'USD' }).autonomousAgentsEnabled, true);
+  assert.equal(updateSettings({ autonomousAgentsEnabled: 'yes' as unknown as boolean }).autonomousAgentsEnabled, true);
 });

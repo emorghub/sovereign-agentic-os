@@ -89,7 +89,7 @@ test('scheduled agentic-os run: tools dispatch as the resolved OWNER (id/role/do
     'sys-mix',
     { yaml: mixedYaml(), owner: OWNER.id, disabledAgents: [] },
     'Scheduled run',
-    { resolveOwner: async (id) => (id === OWNER.id ? OWNER : null), runOsTeam: wiredRunOsTeam },
+    { resolveOwner: async (id) => (id === OWNER.id ? OWNER : null), runOsTeam: wiredRunOsTeam, autonomousEnabled: () => true },
   );
 
   assert.equal(outcome.ok, true, 'the run succeeded');
@@ -125,6 +125,7 @@ test('scheduled agentic-os run: an unresolvable owner fails 409 with NO service-
         systemCalled = true;
         return Promise.reject(new Error('must not fall back to runSystem'));
       }) as ScheduledDeps['runSystem'],
+      autonomousEnabled: () => true,
     },
   );
 
@@ -155,6 +156,7 @@ test('scheduled hermes run: keeps the runSystem fallback (no owner resolution)',
         runSystemArgs = { systemId, opts };
         return Promise.resolve({ mode: 'runtime', ok: true } as never);
       }) as ScheduledDeps['runSystem'],
+      autonomousEnabled: () => true,
     },
   );
 
@@ -213,7 +215,7 @@ test('S1: scheduled run downgrades a stale Write-bounded grant to Write-approval
     'sys-writer',
     { yaml: directWriteYaml(), owner: OWNER.id, disabledAgents: [] },
     'Scheduled run',
-    { resolveOwner: async () => OWNER, runOsTeam: wiredRunOsTeam },
+    { resolveOwner: async () => OWNER, runOsTeam: wiredRunOsTeam, autonomousEnabled: () => true },
   );
 
   const ran = parseSystem(ranYaml);
@@ -232,8 +234,45 @@ test('S1: a builder owner keeps direct write on a scheduled run', async () => {
     'sys-writer',
     { yaml: directWriteYaml(), owner: builderOwner.id, disabledAgents: [] },
     'Scheduled run',
-    { resolveOwner: async () => builderOwner, runOsTeam: wiredRunOsTeam },
+    { resolveOwner: async () => builderOwner, runOsTeam: wiredRunOsTeam, autonomousEnabled: () => true },
   );
   const ran = parseSystem(ranYaml);
   assert.equal(ran.grants.data[0].capability, 'Write-bounded', 'builder keeps direct write');
+});
+
+// --- 6) platform autonomous-agents gate: OFF ⇒ unattended run refused (403) ----
+
+test('autonomous-agents gate OFF: a scheduled run is refused 403 BEFORE owner resolution or execution', async () => {
+  let resolved = false;
+  let osTeamCalled = false;
+  let systemCalled = false;
+
+  const outcome = await runScheduledSystem(
+    'sys-mix',
+    { yaml: mixedYaml(), owner: OWNER.id, disabledAgents: [] },
+    'Scheduled run',
+    {
+      autonomousEnabled: () => false, // platform default
+      resolveOwner: async () => {
+        resolved = true;
+        return OWNER;
+      },
+      runOsTeam: (() => {
+        osTeamCalled = true;
+        return Promise.reject(new Error('must not run while autonomy is disabled'));
+      }) as ScheduledDeps['runOsTeam'],
+      runSystem: (() => {
+        systemCalled = true;
+        return Promise.reject(new Error('must not run while autonomy is disabled'));
+      }) as ScheduledDeps['runSystem'],
+    },
+  );
+
+  assert.equal(outcome.ok, false, 'the unattended run was refused');
+  assert.equal(outcome.ok === false && outcome.status, 403);
+  assert.match(outcome.ok === false ? outcome.error : '', /disabled by platform policy/);
+  // Fail-closed BEFORE anything happens: no owner resolution, no execution, no fallback.
+  assert.equal(resolved, false, 'gate short-circuits before owner resolution');
+  assert.equal(osTeamCalled, false, 'the governed team never ran');
+  assert.equal(systemCalled, false, 'no runSystem fallback either');
 });

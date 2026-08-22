@@ -3,7 +3,7 @@
  */
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Markdown from '@/components/Markdown';
 import type {
   StageSuggestions,
@@ -41,6 +41,7 @@ type Turn = { role: 'user' | 'assistant'; content: string };
 export default function StageAssistantChat({
   appId,
   stage,
+  endpoint,
   intro,
   starters = [],
   onApplyPurpose,
@@ -52,12 +53,20 @@ export default function StageAssistantChat({
   specTargetLabel,
   onApplyImprovements,
   renderDataPlan,
+  renderSuggestions,
   nextSteps = [],
+  autoFirePrompt,
 }: {
   /** The app the assistant reads under the caller's governance (server-side). */
   appId: string;
   /** The guided stage — routed to the stage-scoped prompt server-side. */
-  stage: 'define' | 'design' | 'build' | 'test' | 'publish';
+  stage: string;
+  /**
+   * The assistant POST endpoint. Defaults to the Software route so `SoftwareBuilder`'s
+   * existing mounts are UNCHANGED; a host tab (e.g. Agents) passes its own route so the
+   * SAME chat chrome drives a different governed assistant.
+   */
+  endpoint?: string;
   /** A one-line "what this helper does here", shown above the thread. */
   intro: string;
   /** Optional quick-start prompts shown when the thread is empty. */
@@ -86,12 +95,31 @@ export default function StageAssistantChat({
    */
   renderDataPlan?: (datasets: SuggestedDataset[], dismiss: () => void) => React.ReactNode;
   /**
+   * A host render-prop that REPLACES the built-in Software suggestion cards with the host's
+   * own (e.g. Agents' proposed-team / grant / instruction cards). It receives the raw
+   * `suggestions` object the route returned plus a `dismiss(key)` that clears one field
+   * locally. When supplied, the built-in Software cards are NOT rendered — so the software
+   * defaults stay only for callers that don't pass this. Return null to render nothing.
+   */
+  renderSuggestions?: (
+    suggestions: Record<string, unknown>,
+    helpers: { dismiss: (key: string) => void; SuggestionCard: typeof SuggestionCard },
+  ) => React.ReactNode;
+  /**
    * Host-supplied NEXT STEPS shown at the foot of the thread so the assistant is never a
    * dead end: each either seeds a follow-up prompt (asks the assistant to draft the next
    * artifact) or runs a host action (e.g. jump to Build). Computed by the host from the
    * live design state, so they always point at what to do next.
    */
   nextSteps?: NextStep[];
+  /**
+   * When set, the assistant PROACTIVELY sends this prompt ONCE on entry (ref-guarded, keyed
+   * by `stage`), so helpful suggestions appear the moment the user lands on a stage — no
+   * click needed. Non-blocking: it just seeds the first turn as if the user asked; any
+   * failure surfaces the route's own error and the thread is still fully usable. Change the
+   * key by changing `stage` and it will fire again for the new stage. Undefined = no auto-fire.
+   */
+  autoFirePrompt?: string;
 }) {
   const [thread, setThread] = useState<Turn[]>([]);
   const [suggestions, setSuggestions] = useState<StageSuggestions>({});
@@ -111,7 +139,7 @@ export default function StageAssistantChat({
       setSuggestions({});
       setBusy(true);
       try {
-        const res = await fetch(`/api/apps/${appId}/assistant`, {
+        const res = await fetch(endpoint ?? `/api/apps/${appId}/assistant`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ stage, messages: nextThread }),
@@ -134,8 +162,30 @@ export default function StageAssistantChat({
         setBusy(false);
       }
     },
-    [appId, stage, thread, busy],
+    [appId, stage, endpoint, thread, busy],
   );
+
+  // Proactive auto-suggest on stage ENTRY: fire the host's prompt ONCE per stage, guarded
+  // by a ref keyed on `stage`, and only into an EMPTY thread (never interrupt a live chat).
+  // Non-blocking + dismissible (the returned suggestions/thread behave like any other turn).
+  const firedForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoFirePrompt) return;
+    if (firedForRef.current === stage) return;
+    if (thread.length > 0 || busy) return;
+    firedForRef.current = stage;
+    void send(autoFirePrompt);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, autoFirePrompt]);
+
+  // Host-supplied suggestion rendering takes over entirely when provided (Agents' own
+  // cards). `dismissKey` clears one field of the raw suggestions object locally.
+  const dismissKey = useCallback((key: string) => {
+    setSuggestions((s) => ({ ...(s as Record<string, unknown>), [key]: undefined }) as StageSuggestions);
+  }, []);
+  const hostSuggestions = renderSuggestions
+    ? renderSuggestions(suggestions as Record<string, unknown>, { dismiss: dismissKey, SuggestionCard })
+    : null;
 
   const hasSuggestions =
     !!suggestions.improvedPurpose ||
@@ -189,7 +239,9 @@ export default function StageAssistantChat({
         ) : null}
       </div>
 
-      {hasSuggestions ? (
+      {renderSuggestions ? (
+        hostSuggestions ? <div className="sac-suggestions">{hostSuggestions}</div> : null
+      ) : hasSuggestions ? (
         <div className="sac-suggestions">
           {suggestions.improvedPurpose && onApplyPurpose ? (
             <SuggestionCard
@@ -431,7 +483,7 @@ export default function StageAssistantChat({
  * One suggestion card — a labelled, calm block with an Apply button. Presentation only;
  * the Apply handler is host-provided (it applies locally + persists through governance).
  */
-function SuggestionCard({
+export function SuggestionCard({
   label,
   applyLabel,
   onApply,

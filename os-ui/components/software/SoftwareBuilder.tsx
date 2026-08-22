@@ -2488,14 +2488,23 @@ function PublishStage({
                 />
               </div>
 
-              {/* REPO MISSING → manual heal. `pipeline.forgejo === 'failing'` is the honest
-                  repo-404 signal (refreshActionsStage downgrades a vanished repo). Re-provisions
-                  the scaffold so a subsequent build commits + rebuilds from a clean base. */}
-              {app.pipeline.forgejo === 'failing' ? (
+              {/* REPO NOT READY → manual heal. Two honest states, one recovery:
+                  • `pipeline.forgejo === 'failing'` — the repo VANISHED (404); refreshActionsStage
+                    downgrades a repo that once existed.
+                  • `app.mode === 'offline'` (code apps only) — the repo was NEVER created because
+                    Forgejo was UNREACHABLE at create time. When Forgejo is up again the app can be
+                    stuck offline with no way to recover; `healAppRepo` re-probes and, on a genuine
+                    404, re-provisions the scaffold. A spec app has no repo, so it is excluded.
+                  Both re-run the SAME audited heal endpoint; a subsequent build commits + rebuilds. */}
+              {app.serveMode !== 'spec' && (app.pipeline.forgejo === 'failing' || app.mode === 'offline') ? (
                 <div className="hint" style={{ marginTop: 8, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <span>The app’s repository is missing (404) — CI cannot build until it is re-provisioned.</span>
-                  <button className="btn ghost sm" onClick={onHealRepo} disabled={busy} title="Re-provision the missing repo from the scaffold + any surviving snapshot">
-                    {busy ? <span className="spin" /> : 'Heal repository'}
+                  <span>
+                    {app.pipeline.forgejo === 'failing'
+                      ? 'The app’s repository is missing (404) — CI cannot build until it is re-provisioned.'
+                      : 'The app’s git repository was never created (Forgejo was unreachable at the time) — reconnect to build.'}
+                  </span>
+                  <button className="btn ghost sm" onClick={onHealRepo} disabled={busy} title="Re-probe Forgejo and provision the repo from the scaffold + any surviving snapshot">
+                    {busy ? <span className="spin" /> : app.pipeline.forgejo === 'failing' ? 'Heal repository' : 'Reconnect git'}
                   </button>
                 </div>
               ) : null}
