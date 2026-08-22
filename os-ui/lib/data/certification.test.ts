@@ -127,7 +127,9 @@ test('unshare is blocked while named individuals are granted (lineage-aware)', (
     visibility: 'domain',
     grants: [{ grantee: { kind: 'user', id: 'kenji' }, scope: { rows: [], columns: { mask: [], hide: [] } }, cardinality: 'low', action: 'read' }],
   });
-  applyApprovedPromotion(req, bea);
+  // H1 grant-authority gate: only a people-admin (domain_admin+) may direct a grant at a
+  // named individual, so the approver here is `sara` (admin), not a plain Builder.
+  applyApprovedPromotion(req, sara);
   assert.throws(() => transition(d.id, sara, 'unshare'), (e: DatasetError) => e.status === 409);
 });
 

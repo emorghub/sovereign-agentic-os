@@ -88,6 +88,27 @@ function isMeasureType(t: string): t is MeasureType {
   return (MEASURE_TYPES as readonly string[]).includes(t);
 }
 
+/** A bare column identifier — the SAME strict grammar `lib/data/transform.ts` `qcol()`
+ *  validates before a column reaches SQL: a letter/underscore then letters/digits/
+ *  underscores. Cube members are `{CUBE}.<col>` where `<col>` is exactly such a bare
+ *  name (see `parseFilterSql`, which only ever matches `\w+`). */
+const COLUMN_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Validate a metric column reference before it is interpolated into Cube/Trino SQL.
+ *  A metric's `column`/`filter.column` flows verbatim into executed SQL (the aggregation
+ *  `sql:` and the `{CUBE}.<col>` filter predicate), so an un-validated value is an
+ *  injection sink (`x) UNION SELECT …`, `a"; DROP …`, an expression with parens/quotes).
+ *  Mirrors `transform.ts` `qcol()`: reject anything that is not a bare column name —
+ *  fail-closed, never quote-and-hope. Returns the validated name for interpolation. */
+function assertColumn(col: string, what: string): string {
+  if (!COLUMN_IDENT.test(col)) {
+    throw new MetricError(
+      `invalid ${what} '${col}' — use a plain column name (letters, digits and underscores, starting with a letter or underscore)`,
+    );
+  }
+  return col;
+}
+
 /** The measure's machine name (the Cube member's leaf) — `Revenue` → `revenue`. */
 export function measureName(name: string): string {
   return slug(name);
@@ -120,7 +141,7 @@ function sqlValue(v: string): string {
 
 /** Compile a guided filter into a Cube measure-filter predicate on `{CUBE}`. */
 export function filterSql(f: GuidedFilter): string {
-  const col = `{CUBE}.${f.column}`;
+  const col = `{CUBE}.${assertColumn(f.column.trim(), 'filter column')}`;
   switch (f.operator) {
     case 'equals': return `${col} = ${sqlValue(f.value)}`;
     case 'notEquals': return `${col} <> ${sqlValue(f.value)}`;
@@ -199,7 +220,7 @@ export function measureFromForm(form: MetricForm, siblings?: Measure[]): Measure
 
   const sql = isRatio
     ? `1.0 * {${form.ratio!.numerator.trim()}} / {${form.ratio!.denominator.trim()}}`
-    : form.aggregation === 'count' ? '' : form.column.trim();
+    : form.aggregation === 'count' ? '' : assertColumn(form.column.trim(), 'metric column');
 
   const m: Measure = { name: machineName, type: form.aggregation, sql };
 

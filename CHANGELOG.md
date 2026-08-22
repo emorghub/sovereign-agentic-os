@@ -96,6 +96,19 @@ dead-end with "not materialized". This wave **heals** existing zombies and **pre
 - The per-stage assistant moved to the **top** of each stage and **auto-suggests on stage entry** (proactive, ref-guarded, dismissible).
 - **View vs Edit:** a ready+tested system (built and run at least once) opens in a read-only **View** (trigger/run · live monitor · results + diagnostics, reusing the Run + Evaluate panels); the six-stage builder is **Edit** (✎). Matches the OS-wide Context-tab View/Edit convention.
 
+### os-ui 0.6.156 — 2026-08-22 — Software Design cleanup: remove the vestigial code-app hand-off
+
+- The Software **Design/Epics** view still showed **Push to Jira · Push code to Git · Import Claude design** — code-app-era integration actions that no longer fit the **declarative** apps model (an AppSpec composed + published, no code hand-off). Removed the whole "Ship this design" panel + its now-orphaned local. Backend routes left dormant (no UI surface).
+
+### os-ui 0.6.157 — 2026-08-23 — Overnight hardening wave (Software Build P0 · durable settings · security H0/H1)
+
+Fanned out from the full code + design review (`docs/REVIEW-2026.md`); every item tsc-clean with the full 5493-test suite green.
+
+- **Software Build P0 (cohort blocker).** The declarative Build stage could reach a **dead-end**: an app with stories + granted data + a stale default `draftSpec` fell through all three affordances (auto-generate bailed on any draftSpec; the empty-state only rendered when material was *missing*; the reset was developer-only while Build defaults to Simple) → nothing rendered, no button. New `lib/software/appspec/build-affordance.ts` always resolves the Build stage to ONE honest, actionable outcome and renders a primary **"Build from my design"** button in both Simple and Developer modes. The app assistant's spec fallback is now `client draft → app.draftSpec → app.spec` (it refines work-in-progress declarative apps instead of refusing), and the builder seeds already-satisfied Define/Design stages **green on open** (each still live-gated).
+- **Durable platform settings (MAIN-F1).** `settings` / `security` (egress allowlist) / `tenant` / `plugins` were bare in-memory `let`s that silently reverted on every redeploy **while their routes wrote an audit row claiming it persisted**. They now write through the `os-mirror` + hydrate on boot (the same durable pattern every other store uses), so `promoteAsView` / `autonomousAgentsEnabled` / `codedAppsEnabled` / model-roles / branding survive a pod roll — and the audit trail is honest. Admin routes await hydration before any read.
+- **Security H0 — SQL injection in the metrics builder.** A metric's `column` / `filter.column` reached executed Trino SQL only `.trim()`'d; `guard_read` blocks only `;`/comments, so an injected expression/subquery slipped through. Now IDENT-validated (`assertColumn`, mirroring `transform.ts` `qcol()`) — fail-closed at both sinks.
+- **Security H1 — grant injection at promotion approval.** A promotion persisted the requester's grants verbatim, so a routine approve could leak the asset cross-domain or to named individuals the approver can't authorize. Approval now checks every grant TARGET against the approver's authority (`assertGrantsWithinAuthority`, 403 fail-closed) — in **both** the Data and Files promotion paths.
+
 ## [os-ui 0.6.140] — 2026-08-14 — Remove the in-app tool overlay entirely (embedded tools open in their own tab)
 
 ### Fixed

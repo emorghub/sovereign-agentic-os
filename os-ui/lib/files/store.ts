@@ -26,6 +26,7 @@ import {
   canTransition,
   tierAfter,
   visibilityFor,
+  assertGrantsWithinAuthority,
 } from '../data/index.ts';
 import { canRead } from './dls.ts';
 import { canManageArtifact, type ArtifactScope } from '../governance/edit-scope.ts';
@@ -834,6 +835,11 @@ export function applyApprovedFilePromotion(req: FilePromotionRequest, approver: 
   const gate = promotionGate(a);
   if (!gate.ok) fail(`Promotion blocked — ${gateReason(gate)}`, 400);
 
+  // SEC-H1 (twin of the data-store fix): a promotion persists requester-supplied grants,
+  // so re-check the APPROVER is entitled to every grant TARGET before writing — else a
+  // routine approve could leak the asset cross-domain or to named individuals the approver
+  // can't authorize. Fail-closed (403), reusing the Data-tab governance gate (not forked).
+  assertGrantsWithinAuthority(req.grants, approver, a.domain);
   a.tier = 'asset';
   a.visibility = visibilityFor('asset', req.visibility);
   a.grants = req.grants;

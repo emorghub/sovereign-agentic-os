@@ -8,7 +8,7 @@ import { realForgejo } from '../agents/build/live-clients.ts';
 import { publishApprovedPromotion, rematerializeDomainTable, type PublishOutcome, type RematerializeOutcome } from './publish.ts';
 import { listGovernedDatasets } from './store.ts';
 import { syncAnalyticsRepo } from './analytics-repo.ts';
-import { promoteAsView } from '../platform-admin/settings.ts';
+import { promoteAsView, ensureHydrated as ensureSettingsHydrated } from '../platform-admin/settings.ts';
 import type { MaterializationVerifier, Principal, PromotionRequest } from './store.ts';
 
 /**
@@ -36,6 +36,7 @@ export async function publishPromotionLive(
   req: PromotionRequest,
   approver: Principal,
 ): Promise<PublishOutcome> {
+  await ensureSettingsHydrated(); // restore the persisted promoteAsView flag before the gate read
   const outcome = await publishApprovedPromotion(req, approver, {
     buildPromote: (dataset, principal, write) => buildStage(dataset, 'promote', principal, write),
     verifyDomainTable,

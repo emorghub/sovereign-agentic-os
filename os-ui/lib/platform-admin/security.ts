@@ -12,9 +12,17 @@
  *   version, audit retention, certs/keys posture. These are surfaced, never
  *   editable as raw values, and NEVER include a secret.
  *
- * Pure store (the live source of truth is the egress proxy + OPA bundle);
- * unit-testable. Host normalization mirrors `lib/secrets.ts` egress logic.
+ * DURABILITY: the allowlist is the load-bearing state (it compiles into the OPA
+ * `egress_allow` resource), so it is written THROUGH to the OpenSearch mirror
+ * (`os-egress-allow`) and hydrated on boot — without this a pod roll reverted the
+ * curated allowlist to the seed defaults while the audit row claimed the host was
+ * allowlisted. One doc per host; a `__seeded__` marker records that the default
+ * seed was already applied so a redeploy never resurrects a host an admin removed.
+ * (The demo `requests` list is a transient UI surface — the durable egress-request
+ * store is lib/connections/egress-requests.ts — so it is intentionally NOT mirrored.)
+ * Host normalization mirrors `lib/secrets.ts` egress logic; unit-testable.
  */
+import { osMirror } from '../infra/os-mirror.ts';
 
 function host(endpoint: string): string {
   const raw = (endpoint || '').trim();
@@ -41,6 +49,63 @@ function allow(): Set<string> {
   const g = globalThis as unknown as Record<symbol, Set<string> | undefined>;
   if (!g[ALLOW_KEY]) g[ALLOW_KEY] = new Set<string>(DEFAULT_ALLOW);
   return g[ALLOW_KEY]!;
+}
+
+// Shared durable-mirror core (probe → bootstrap-on-404 → hydrate/write-through):
+// lib/infra/os-mirror.ts. A missing index is CREATED, never mistaken for a dead mirror.
+const mirror = osMirror({ index: 'os-egress-allow' });
+const SEED_MARKER = '__seeded__';
+const HYDRATION_KEY = Symbol.for('soa.platform-admin.egress-allow.hydration');
+function hydrationState(): { p: Promise<void> | null } {
+  const g = globalThis as unknown as Record<symbol, { p: Promise<void> | null } | undefined>;
+  if (!g[HYDRATION_KEY]) g[HYDRATION_KEY] = { p: null };
+  return g[HYDRATION_KEY]!;
+}
+
+/** One mirror doc id per host (hosts contain dots — encode them for the _doc path). */
+function hostDocId(h: string): string {
+  return `host_${h.replace(/[^a-z0-9]/gi, '_')}`;
+}
+function persistHost(h: string): void {
+  mirror.writeThrough(hostDocId(h), { id: hostDocId(h), host: h });
+}
+function unpersistHost(h: string): void {
+  mirror.deleteThrough(hostDocId(h));
+}
+
+/**
+ * Hydrate the allowlist from the mirror once (best-effort). If the mirror already
+ * holds docs (a prior run persisted the seed + any edits), the in-process Set is
+ * REBUILT from them — so a host an admin removed stays removed across the roll. On
+ * a genuinely fresh mirror the seed defaults are persisted once (marked) so the
+ * next pod hydrates the same starting set. FAIL-SOFT: an unreachable mirror leaves
+ * the in-memory defaults in place and never throws.
+ */
+export async function ensureHydrated(): Promise<void> {
+  const st = hydrationState();
+  if (!st.p) st.p = hydrateAllow();
+  return st.p;
+}
+
+async function hydrateAllow(): Promise<void> {
+  const docs = await mirror.hydrate(2000); // null → mirror down → keep in-memory defaults
+  if (docs === null) return;
+  const hosts = new Set<string>();
+  let seeded = false;
+  for (const d of docs as { id?: string; host?: string }[]) {
+    if (d?.id === SEED_MARKER) { seeded = true; continue; }
+    if (typeof d?.host === 'string' && d.host) hosts.add(d.host);
+  }
+  if (!seeded) {
+    // Fresh mirror: persist today's seed once so future pods rebuild the same set.
+    const a = allow();
+    for (const h of a) persistHost(h);
+    mirror.writeThrough(SEED_MARKER, { id: SEED_MARKER, seededAt: new Date().toISOString() });
+    return;
+  }
+  const a = allow();
+  a.clear();
+  for (const h of hosts) a.add(h);
 }
 
 export type EgressRequest = {
@@ -83,12 +148,14 @@ export function addAllowlist(endpoint: string): string {
   const h = host(endpoint);
   if (!h || !h.includes('.')) throw fail('Enter a valid external host (e.g. api.example.com)', 400);
   allow().add(h);
+  persistHost(h);
   return h;
 }
 
 export function removeAllowlist(endpoint: string): string {
   const h = host(endpoint);
   allow().delete(h);
+  unpersistHost(h);
   return h;
 }
 
@@ -103,6 +170,7 @@ export function decideRequest(id: string, decision: 'approved' | 'rejected'): { 
   r.status = decision;
   if (decision === 'approved') {
     allow().add(r.host);
+    persistHost(r.host);
     return { request: r, host: r.host };
   }
   return { request: r };
@@ -145,4 +213,6 @@ export function _reset(): void {
   const a = allow();
   a.clear();
   for (const h of DEFAULT_ALLOW) a.add(h);
+  hydrationState().p = null;
+  mirror.__reset();
 }

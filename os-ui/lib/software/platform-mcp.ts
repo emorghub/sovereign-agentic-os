@@ -28,7 +28,7 @@ import type { ConsumedResource, SurfaceDeclaration } from './model.ts';
 import { asBuildTarget, buildGate, stageDirective, targetProgress, resolveTarget } from './mcp-stages.ts';
 import { resolveGrantedContext } from './grants-context.ts';
 import { normalizeImprovement, type Improvement } from './improvements.ts';
-import { codedAppsEnabled } from '@/lib/platform-admin/settings';
+import { codedAppsEnabled, ensureHydrated as ensureSettingsHydrated } from '@/lib/platform-admin/settings';
 import { PATTERNS, PATTERN_IDS, isImplementedPattern } from './appspec/patterns.ts';
 import { generateAppSpecForApp } from './appspec/generate-server.ts';
 
@@ -317,7 +317,8 @@ export async function callPlatformMcp(
       // makes sense for a coded (image) app. When the platform admin has coded apps OFF
       // (the default), refuse it with a clear message; a Declarative app is authored with
       // set_app_spec, not commit. This mirrors the createApp create-gate so neither UI nor
-      // API nor MCP can build a coded app when off.
+      // API nor MCP can build a coded app when off. Hydrate the persisted flag first.
+      await ensureSettingsHydrated();
       if (!codedAppsEnabled()) {
         throw withStatus(
           new Error('Coded apps are disabled by the platform administrator. Author a Declarative (no-code) app with set_app_spec instead of committing raw code.'),

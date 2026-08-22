@@ -26,6 +26,11 @@ const _realFetch = globalThis.fetch;
 globalThis.fetch = (() => Promise.reject(new Error('offline-stub'))) as typeof fetch;
 
 const { createApp, submitOsBuild, refreshBuildStage, defaultOsBuildState } = await import('./apps.ts');
+// These tests exercise the CODE-app build pipeline (Kaniko/os-build). Coded apps are OFF by
+// default (declarative is the sole default path), so the pipeline is honestly `disabled` unless
+// a platform admin enables them — enable it here so the build-service wiring is under test.
+const { updateSettings } = await import('../platform-admin/settings.ts');
+updateSettings({ codedAppsEnabled: true });
 import type { App } from './apps.ts';
 import type { K8sClient } from './build-service.ts';
 import type { CurrentUser } from '@/lib/core/auth';

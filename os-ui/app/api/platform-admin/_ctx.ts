@@ -9,6 +9,10 @@ import { assertTenantAccess, currentTenantId, type Tenant } from '@/lib/platform
 import { ensureHydrated as ensureDomainsHydrated } from '@/lib/platform-admin/domains';
 import { ensureHydrated as ensureModelsHydrated } from '@/lib/platform-admin/models';
 import { ensureHydrated as ensureTenantUsersHydrated } from '@/lib/platform-admin/tenant-users';
+import { ensureHydrated as ensureTenantHydrated } from '@/lib/platform-admin/tenant';
+import { ensureHydrated as ensureSettingsHydrated } from '@/lib/platform-admin/settings';
+import { ensureHydrated as ensureSecurityHydrated } from '@/lib/platform-admin/security';
+import { ensureHydrated as ensurePluginsHydrated } from '@/lib/platform-admin/plugins';
 import { knownDomains } from '@/lib/platform-admin/users';
 import type { CurrentUser } from '@/lib/core/auth';
 
@@ -36,6 +40,13 @@ export async function adminCtx(): Promise<AdminCtx> {
   await ensureDomainsHydrated(knownDomains);
   await ensureModelsHydrated();
   await ensureTenantUsersHydrated();
+  // Durable admin stores: hydrate the last-saved values before any admin read so a
+  // redeployed pod restores them instead of reverting to defaults (settings flags,
+  // egress allowlist, tenant budget/plan, plugin enablement + marketplace listing).
+  await ensureTenantHydrated();
+  await ensureSettingsHydrated();
+  await ensureSecurityHydrated();
+  await ensurePluginsHydrated();
   const decision = await authorize(`user:${user.id}`, 'admin'); // defense-in-depth, non-fatal
   const tenant = assertTenantAccess(currentTenantId());
   return { user, tenant, opa: decision.policy };

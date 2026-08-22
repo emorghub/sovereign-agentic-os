@@ -12,11 +12,18 @@
  * tier (Supabase) enforces in a real deploy; here it is enforced in-process so
  * the invariant holds offline too.
  *
+ * DURABILITY: the tenant record (envelope, premium cap, plan, residency, locale,
+ * name) is written THROUGH to the OpenSearch mirror (`os-tenant-config`) and
+ * hydrated on boot — without this a pod roll reverted an admin's budget/plan edits
+ * to the seed while the audit row claimed they persisted. One doc, keyed by the
+ * tenant id. FAIL-SOFT: an unreachable mirror keeps the in-process seed.
+ *
  * Server-only by convention (imported only by API routes); kept free of the
  * `server-only` + `@/` imports so the pure logic stays unit-testable under
  * `node --test`.
  */
 import { config } from '../core/config.ts';
+import { osMirror } from '../infra/os-mirror.ts';
 
 export type Residency = 'eu-germany-west-central' | 'eu' | 'other';
 export type Plan = 'sovereign-self-hosted' | 'stackit-managed' | 'stackit-premium';
@@ -48,12 +55,35 @@ function seed(): Tenant {
   };
 }
 
-type TenantState = { tenants: Map<string, Tenant> };
+type TenantState = { tenants: Map<string, Tenant>; hydration: Promise<void> | null };
 const TENANT_KEY = Symbol.for('soa.platform.tenants');
 function tenantState(): TenantState {
   const g = globalThis as unknown as Record<symbol, TenantState | undefined>;
-  if (!g[TENANT_KEY]) g[TENANT_KEY] = { tenants: new Map([[config.deploymentTenant, seed()]]) };
+  if (!g[TENANT_KEY]) g[TENANT_KEY] = { tenants: new Map([[config.deploymentTenant, seed()]]), hydration: null };
   return g[TENANT_KEY]!;
+}
+
+// Shared durable-mirror core (probe → bootstrap-on-404 → hydrate/write-through):
+// lib/infra/os-mirror.ts. A missing index is CREATED, never mistaken for a dead mirror.
+const mirror = osMirror({ index: 'os-tenant-config' });
+
+/** Hydrate the tenant record once from the mirror (best-effort). A stored doc for
+ *  THIS tenant overwrites the seed; anything absent/unreachable keeps the seed. */
+export async function ensureHydrated(): Promise<void> {
+  const s = tenantState();
+  if (!s.hydration) s.hydration = hydrateTenant();
+  return s.hydration;
+}
+
+async function hydrateTenant(): Promise<void> {
+  const own = config.deploymentTenant;
+  const doc = (await mirror.getDoc(own)) as Partial<Tenant> | null;
+  if (doc && typeof doc === 'object' && doc.id === own) {
+    const s = tenantState();
+    // Merge over the seed so a stored doc from before a field existed keeps its seed
+    // default (nil-safe) rather than becoming undefined.
+    s.tenants.set(own, { ...seed(), ...doc, id: own });
+  }
 }
 
 function fail(message: string, status: number): Error {
@@ -93,5 +123,13 @@ export function updateTenant(patch: Partial<Omit<Tenant, 'id' | 'createdAt'>>): 
     createdAt: t.createdAt,
   };
   tenantState().tenants.set(t.id, next);
+  mirror.writeThrough(next.id, next);
   return next;
+}
+
+export function _reset(): void {
+  const s = tenantState();
+  s.tenants = new Map([[config.deploymentTenant, seed()]]);
+  s.hydration = null;
+  mirror.__reset();
 }

@@ -3,7 +3,7 @@
  */
 import type { CurrentUser } from '@/lib/core/auth';
 import { getPublicUser } from '@/lib/platform-admin/users';
-import { autonomousAgentsEnabled } from '@/lib/platform-admin/settings';
+import { autonomousAgentsEnabled, ensureHydrated as ensureSettingsHydrated } from '@/lib/platform-admin/settings';
 import { parseSystem, serializeSystem, downgradeGrantsForRole } from '../system-schema.ts';
 import { governSystemForOwner } from './owner-grants.ts';
 import { isAgenticOsTeam } from './os-tools.ts';
@@ -69,6 +69,9 @@ export async function runScheduledSystem(
   // only runs when a platform admin has enabled autonomous agents. A human-clicked Run
   // uses the interactive route and never reaches here, so it is unaffected. The CronJob
   // keeps firing; each firing no-ops cleanly with this policy message until re-enabled.
+  // Restore the persisted flag first (a redeployed pod must not silently revert to OFF
+  // — or, worse, run because a stale in-memory default said ON).
+  if (!deps.autonomousEnabled) await ensureSettingsHydrated();
   if (!(deps.autonomousEnabled ?? autonomousAgentsEnabled)()) {
     return {
       ok: false,

@@ -11,6 +11,7 @@ import {
   measureFromYaml,
   measureMember,
   sameMeasure,
+  filterSql,
   type MetricForm,
 } from './model.ts';
 import { parseDataset } from '../data/dataset-schema.ts';
@@ -109,6 +110,59 @@ test('metric name label: human name → label auto-set; bare slug → no label (
   const noLabel = measureFromForm({ name: 'monthly_revenue', aggregation: 'count', column: '', dimensions: [] });
   assert.equal(noLabel.name, 'monthly_revenue', 'slug unchanged');
   assert.equal('label' in noLabel, false, 'bare slug → no label (byte-stable)');
+});
+
+// ---- H0: SQL injection in the metrics builder (column / filter.column) -----------
+// A metric's `column` and `filter.column` flow verbatim into executed Cube/Trino SQL
+// (the aggregation `sql:` and the `{CUBE}.<col>` filter predicate). They must be
+// validated as bare column identifiers — an injected expression/subquery is rejected,
+// never quoted-and-hoped, so it can't alter the query shape.
+
+const INJECTIONS = [
+  'x) UNION SELECT password FROM users --',
+  'a"; DROP TABLE orders',
+  "net_amount) FROM t WHERE 1=1 OR ('1'='1",
+  'sum(secret)',
+  'col; DELETE FROM t',
+  'a OR 1=1',
+  'a.b',            // qualified — not a bare column, must be rejected
+  'a-b',            // arithmetic — rejected
+  'a b',            // whitespace — rejected
+  '1col',          // must start with a letter/underscore
+  '',              // empty column for a non-count aggregation
+];
+
+test('H0: an injected aggregation column is REJECTED (never reaches SQL)', () => {
+  for (const bad of INJECTIONS) {
+    assert.throws(
+      () => measureFromForm({ name: 'Evil', aggregation: 'sum', column: bad, dimensions: [] }),
+      /invalid metric column|needs a column/,
+      `sum column '${bad}' must be rejected`,
+    );
+  }
+  // A legitimate bare column still compiles to exactly the column name (unchanged).
+  const ok = measureFromForm({ name: 'Rev', aggregation: 'sum', column: 'net_amount', dimensions: [] });
+  assert.equal(ok.sql, 'net_amount');
+});
+
+test('H0: an injected filter column is REJECTED and cannot alter the predicate shape', () => {
+  for (const bad of INJECTIONS.filter((b) => b !== '')) {
+    assert.throws(
+      () => filterSql({ column: bad, operator: 'equals', value: 'x' }),
+      /invalid filter column/,
+      `filter column '${bad}' must be rejected`,
+    );
+    // …and through the full form path (measureFromForm builds the filter).
+    assert.throws(
+      () => measureFromForm({
+        name: 'Evil', aggregation: 'count', column: '', dimensions: [],
+        filter: { column: bad, operator: 'equals', value: 'x' },
+      }),
+      /invalid filter column/,
+    );
+  }
+  // A legitimate bare filter column compiles to a safe `{CUBE}.<col>` predicate.
+  assert.equal(filterSql({ column: 'status', operator: 'equals', value: 'won' }), "{CUBE}.status = 'won'");
 });
 
 test('formFromMeasure round-trips every generated measure shape onto the SAME member', () => {

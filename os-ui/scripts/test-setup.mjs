@@ -9,5 +9,9 @@ register('./test-alias-hook.mjs', import.meta.url);
 // coded apps ON". The DEDICATED gate test (lib/software/coded-apps-gate.test.ts)
 // explicitly drives the flag OFF to prove the default-off + fail-closed enforcement,
 // so this harness default never hides the gate. Kept greppable + honest.
-const { updateSettings } = await import('../lib/platform-admin/settings.ts');
-updateSettings({ codedAppsEnabled: true });
+// __setForTests flips the flag IN-MEMORY only — unlike updateSettings it never
+// lazily imports os-mirror (→ config), which at bootstrap would freeze `config`
+// before env-before-import tests (e.g. build-stage.test.ts sets SOFTWARE_BUILD_SERVICE)
+// set their env vars. Same in-memory effect, no config side effect.
+const { __setForTests } = await import('../lib/platform-admin/settings.ts');
+__setForTests({ codedAppsEnabled: true });

@@ -1523,6 +1523,53 @@ export function assertPromoteTargetFree(id: string): Dataset {
 }
 
 /**
+ * GRANT-AUTHORITY GATE (fail-closed): the requester supplies `req.grants`, but the
+ * APPROVER is the one authorizing them — so every grant TARGET must be within the
+ * approver's authority, or a routine approve would leak the asset cross-domain / to
+ * named individuals the approver may not authorize. We validate each grant's grantee
+ * against the approver + the dataset's own domain:
+ *   • `domain` grant — the target domain MUST be one the approver governs
+ *     (`approver.domains`) AND the dataset's OWN domain (a promotion publishes into the
+ *     dataset's domain; sharing it to any OTHER domain here is out of scope for a
+ *     Personal→Shared approval — that is a marketplace/cross-domain action).
+ *   • `user`/`group`/`role` grant (a NAMED individual/group) — only a people-admin may
+ *     direct a share at named principals; per the role model a plain Builder is "an
+ *     approver, NOT a people-admin", so this requires `domain_admin`+.
+ * Anything outside the approver's authority is REJECTED (403) with a clear reason —
+ * never silently persisted. A grant list that is empty or only the dataset's own-domain
+ * read grant (the default `requestPromotion` builds) passes untouched.
+ */
+export function assertGrantsWithinAuthority(
+  grants: Grant[],
+  approver: Principal,
+  datasetDomain: string,
+): void {
+  for (const g of grants ?? []) {
+    const t = g.grantee;
+    if (t.kind === 'domain') {
+      if (t.id !== datasetDomain) {
+        fail(
+          `Cannot approve — a promotion grants access to its own domain ('${datasetDomain}'), not to '${t.id}'. Share across domains via the marketplace.`,
+          403,
+        );
+      }
+      if (!approver.domains.includes(t.id)) {
+        fail(`Cannot grant access to domain '${t.id}' — you do not govern it.`, 403);
+      }
+    } else {
+      // user / group / role — a named principal. Only a people-admin (domain_admin+)
+      // may direct a share at named individuals; a Builder approves, it does not people-admin.
+      if (!roleAtLeast(approver.role, 'domain_admin')) {
+        fail(
+          `Cannot grant access to ${t.kind} '${t.id}' — granting to named ${t.kind}s requires a domain admin.`,
+          403,
+        );
+      }
+    }
+  }
+}
+
+/**
  * A post-CTAS existence probe of the promoted domain table, run through the governed
  * query path. Returns whether `iceberg.<domain>.<layer>_<slug>` is queryable AS the
  * approving Builder. Injected so the pure store stays unit-testable (the server wires
@@ -1554,6 +1601,11 @@ export function applyApprovedPromotion(
 ): Dataset {
   const rec = get(req.datasetId);
   const d = validatePromotion(req, approver);
+  // Fail-closed: the requester chose `req.grants`, but the APPROVER authorizes them —
+  // reject any grant target outside the approver's authority BEFORE persisting (else a
+  // routine approve leaks the asset cross-domain / to named individuals). See
+  // {@link assertGrantsWithinAuthority}.
+  assertGrantsWithinAuthority(req.grants, approver, d.domain);
 
   d.tier = 'asset'; // storageFor(asset) === 'trino-iceberg'
   d.visibility = visibilityFor('asset', req.visibility);

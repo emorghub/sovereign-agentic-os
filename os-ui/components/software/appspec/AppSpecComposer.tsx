@@ -34,6 +34,7 @@ import { AppSpecRenderer, type RendererIdentity } from './AppSpecRenderer.tsx';
 import { PATTERNS, isImplementedPattern, type PatternId } from '@/lib/software/appspec/patterns.ts';
 import { parseAppSpec, ROLE_GATES, THEME_CSS_MAX, CUSTOM_HTML_MAX, CUSTOM_CSS_MAX, CUSTOM_JS_MAX, type StoryRef } from '@/lib/software/appspec/schema.ts';
 import { describeApp } from '@/lib/software/appspec/describe.ts';
+import { buildStageAffordance, shouldAutoGenerate } from '@/lib/software/appspec/build-affordance.ts';
 import { parseFunctions } from '@/lib/software/appspec/functions-schema.ts';
 import {
   initialState,
@@ -405,6 +406,23 @@ export default function AppSpecComposer({
   const hasStories = (app.stories?.length ?? 0) > 0;
   const hasData = app.grantedData.length > 0;
   const canGenerate = hasStories;
+  // Whether saved work (a draftSpec or live spec) existed at MOUNT — auto-generate must never run
+  // over it. Captured once (a ref) because a successful autosave refreshes `app` via onSaved, which
+  // would otherwise flip this mid-session and mis-gate a re-eval.
+  const hadSavedWorkAtMount = useRef<boolean>(!!(app.draftSpec || app.spec));
+  // One-shot guard for the auto-generate effect below (declared here so the affordance can read it).
+  const autoFired = useRef(false);
+  // The single, honest affordance for this stage (never a dead-end). `offer-generate` is the case
+  // that used to render nothing: material present but the working draft is still the default (incl.
+  // a stale autosaved default) — we surface a "Build from my design" button in BOTH modes.
+  const affordance = buildStageAffordance({
+    hasStories,
+    hasData,
+    atDefault,
+    generating,
+    autoFired: autoFired.current,
+    hasSavedWork: hadSavedWorkAtMount.current,
+  });
   // The "what changed" note the chat may set after loading a generated/edited spec.
   const [chatSpecLoaded, setChatSpecLoaded] = useState(0);
 
@@ -449,14 +467,25 @@ export default function AppSpecComposer({
   // build from (≥1 story AND ≥1 granted dataset), fire the generator ONCE automatically. Later
   // visits (a saved spec, or a restored draft) load that work untouched — we NEVER regenerate over
   // saved work. No material ⇒ no auto-fire (the calm empty state points to Design / Choose Context).
-  const autoFired = useRef(false);
   useEffect(() => {
     if (!draftReady || autoFired.current) return;
     autoFired.current = true; // one-shot for this mount, regardless of outcome
-    if (app.spec || app.draftSpec) return; // saved work exists — load it, don't regenerate
-    if (!atDefault || !hasStories || !hasData) return; // no material, or user already started
-    void generate();
-    // atDefault/hasStories/hasData are read once at the moment draftReady flips; the ref guards reruns.
+    // The SAME pure decision the render uses — auto-fire only for a fresh, material app with no
+    // saved work; every other case (incl. a stale default draft) resolves to an OFFERED button
+    // in the render below, never a silent dead-end.
+    if (
+      shouldAutoGenerate({
+        hasStories,
+        hasData,
+        atDefault,
+        generating: false,
+        autoFired: false,
+        hasSavedWork: hadSavedWorkAtMount.current,
+      })
+    ) {
+      void generate();
+    }
+    // Inputs are read once at the moment draftReady flips; the ref guards reruns.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftReady]);
 
@@ -516,21 +545,42 @@ export default function AppSpecComposer({
         </div>
       ) : null}
 
-      {/* Calm EMPTY state — a fresh app with NO material to build from (no stories, or no granted
-          data). We do NOT auto-generate; we point the user to the stage that unblocks it. */}
-      {atDefault && !generating && (!hasStories || !hasData) ? (
+      {/* NEVER A DEAD-END (cohort P0 fix): the Build stage always resolves to something actionable.
+          The affordance is a single pure decision (build-affordance.ts):
+          • need-stories / need-data — a fresh app missing material → point to the unblocking stage.
+          • offer-generate           — material present but the working draft is still the default
+                                        (INCLUDING a stale autosaved default that used to render
+                                        nothing) → a primary "Build from my design" button, shown in
+                                        BOTH Simple and Developer so it is never hidden.
+          Rendered only when the generator isn't already running. */}
+      {!generating && (affordance === 'need-stories' || affordance === 'need-data') ? (
         <div className="grant-block" style={{ marginTop: 10, display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <div>
             <div className="section-title" style={{ margin: 0 }}>Let’s build this from your design</div>
             <p className="hint" style={{ margin: '2px 0 0' }}>
-              {!hasStories
+              {affordance === 'need-stories'
                 ? 'Design at least one epic with a user story first — then the assistant builds your app from them.'
                 : 'Grant at least one dataset in Choose Context — then the assistant builds your tabs on real data.'}
             </p>
           </div>
-          {!hasData && onGoContext ? (
+          {affordance === 'need-data' && onGoContext ? (
             <button type="button" className="btn ghost sm" onClick={onGoContext}>Choose Context →</button>
           ) : null}
+        </div>
+      ) : null}
+
+      {!generating && affordance === 'offer-generate' ? (
+        <div className="grant-block" style={{ marginTop: 10, display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div>
+            <div className="section-title" style={{ margin: 0 }}>Build this app from your design</div>
+            <p className="hint" style={{ margin: '2px 0 0' }}>
+              Your epics, user stories and granted data are ready. Generate the tabs from them — then
+              refine here or with the assistant.
+            </p>
+          </div>
+          <button type="button" className="btn" onClick={onGenerateClick} disabled={generating}>
+            {generating ? <span className="spin" /> : 'Build from my design'}
+          </button>
         </div>
       ) : null}
 

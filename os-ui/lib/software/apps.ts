@@ -51,7 +51,7 @@ import { dataPlaneToolsFromGrants, agentToolsFromGrants } from '@/lib/software/g
 import { parseAppManifest, renderAppYaml, defaultOpenApi, resolveSurface } from '@/lib/software/metadata';
 import { osMirror } from '@/lib/infra/os-mirror';
 import { getPublicUser, type PublicUser } from '@/lib/platform-admin/users';
-import { codedAppsEnabled } from '@/lib/platform-admin/settings';
+import { codedAppsEnabled, ensureHydrated as ensureSettingsHydrated } from '@/lib/platform-admin/settings';
 import { createFolder, type FolderScope, type Principal as FolderPrincipal } from '@/lib/folders';
 import { normaliseFolderPath } from '@/lib/core/folders';
 import { type ArtifactVersion, versionLog } from '@/lib/core/versioning';
@@ -2667,7 +2667,9 @@ export async function createApp(
   // OFF (the default), a coded app (`kind:'code'` / the image pipeline) cannot be
   // created — from ANY front door (UI, API, MCP). Declarative (spec) creation is
   // always allowed. This is the server-side gate: the UI merely reflects it, it does
-  // NOT enforce it. Rejected BEFORE any repo/pipeline side effect runs.
+  // NOT enforce it. Rejected BEFORE any repo/pipeline side effect runs. Hydrate the
+  // persisted flag first so a redeployed pod honours the admin's saved decision.
+  if (!specKind) await ensureSettingsHydrated();
   if (!specKind && !codedAppsEnabled()) {
     throw withStatus(
       new Error('Coded apps are disabled by the platform administrator. Create a Declarative (no-code) app instead (kind: "spec").'),

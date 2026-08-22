@@ -2,7 +2,7 @@
 title: "Sovereign Agentic OS"
 subtitle: "The governed, EU-sovereign operating system for data, knowledge, agents and software — where AI gets real, safe hands on your work."
 author: "Orchestrated by Data Masterclass · datamasterclass.com · www.sovereign-agentic.com"
-date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.31) · generated {{DATE}} from commit {{GIT_COMMIT}}"
+date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.156) · generated {{DATE}} from commit {{GIT_COMMIT}}"
 titlepage: true
 titlepage-rule-color: "c8a24a"
 toc: true
@@ -298,9 +298,11 @@ there.
   assets/products — any dataset built to Silver/Gold that you can read is a valid join partner, so
   you can build a curated view entirely from your own private data (its personal lane is read as
   you). The
-  business (Gold) layer that metrics read is **materialized automatically**: a clean single-table
-  ingested dataset **passes through** to a queryable business table with no manual "build Gold"
-  step, and a curated dataset materializes the composition you saved. Measures are defined in the
+  business (Gold) layer that metrics read is **materialized automatically**: after a Bronze commit,
+  **Silver → Gold → documentation → DQ rules build in sequence without manual steps** (best-effort,
+  each stage independent, all overridable); a curated dataset materializes the composition you saved.
+  The **"✨ Suggest quality rules"** action returns structured, editable rule cards (not prose) so you
+  apply the suggestions directly. Measures are defined in the
   Metrics tab, not in the composition, so the business layer stays a pure projection/join and a
   rebuild never wipes them. The **Composition** join picker offers only datasets visible in your
   *active* domain (My / Domain / Company of the operating domain, with the Marketplace as the only
@@ -424,28 +426,32 @@ honestly rather than inventing an answer when retrieval comes back empty.
 ## Build
 
 - **Agents — compose, govern, run.** A domain's **agent systems** (instructions + tools +
-  memory) move through **five phases — Define · Design · Build · Run · Evaluate**. In
-  **Define**, **"What your team can use"** is the interactive grants surface, and a grant here is
-  a **default-on capability**: **every agent in the system inherits the full set of the system's
-  Define grants by default** — you *narrow* an agent to give it less, never scramble to add. Per
-  item you choose **read-only · read + propose · read + write** (a clear labelled selector),
-  capped by the system's overall access setting; a **read + write** grant provisions that agent's
-  matching **write tools** (e.g. `upload_file`, `create_dataset`), and a hard invariant guarantees
-  an agent can never exceed the team's grants. Grants split into two groups — **Plan Items**
-  (Strategy · Big Bets · Operating Model · Workflows) and **Context** (Knowledge · Files · Data ·
-  Connections · Metrics) — and **all four Plan Items are grantable**: granting a pillar or bet
-  provisions its governed read tools (`get_pillar` / `get_big_bet`), DLS-scoped to what the caller
-  may view. Context items grant via a **folder-tree with tri-state checkboxes** — tick a folder to
-  grant everything in it (and future contents, resolved at run time, budget-capped, every resolved
-  item still per-item DLS/OPA-checked so a folder grant is provably a *subset*), or tick individual
-  items. Each **data grant** can target the **medallion layer** the team reads — Bronze, Silver,
-  or Gold — and the picker only offers layers that are actually built, defaulting to the highest
-  (Gold, the curated default). **Design** composes the agents three equivalent ways — a React-Flow
-  graph builder, Monaco YAML editing, or a chat assistant. **Build** (*Build = execute + verify*)
-  provisions and checks the team behind a live progress stepper; **Run** executes it as you and
-  offers a **"Download PDF Results Report"**; **Evaluate** attributes context per agent and offers
-  a **"Download PDF Evaluation Report"** — both fully brand-styled (gold-lotus cover, embedded
-  datamasterclass fonts). Every call routes through **LiteLLM → OPA → Langfuse**.
+  memory) move through **six stages — Define · Grant · Design · Build · Run · Evaluate**. In
+  **Define** you name the system, state its deliverable, and pick the trigger (Manual / On schedule /
+  Called from another system). **Grant** ("What your team can use") is the interactive grants surface,
+  built on the shared `ChooseContextShell` primitive — a **default-on capability** where every agent
+  inherits the full set of the system's grants: you *narrow* an agent to give it less, never scramble
+  to add. Per item you choose **read-only · read + propose · read + write** (a clear labelled selector);
+  a **read + write** grant provisions matching write tools, and a hard invariant guarantees an agent
+  can never exceed the team's grants. Grants split into two groups — **Plan Items** (Strategy · Big Bets ·
+  Operating Model · Workflows) and **Context** (Knowledge · Files · Data · Connections · Metrics) — and
+  **all four Plan Items are grantable**: granting a pillar or bet provisions its governed read tools
+  (`get_pillar` / `get_big_bet`), DLS-scoped to what the caller may view. Context items grant via a
+  **folder-tree with tri-state checkboxes** — tick a folder to grant everything in it (resolved at run
+  time, budget-capped, every resolved item still per-item DLS/OPA-checked). Each **data grant** can
+  target the **medallion layer** the team reads — Bronze, Silver, or Gold — defaulting to the highest
+  built (Gold). **Design** composes the team three equivalent ways — a React-Flow graph builder, Monaco
+  YAML editing, or a **chat assistant that auto-proposes a grounded team on entry** (referencing only
+  granted context, confirmed via the one governed commit path); the stage assistant sits at the top of
+  each stage and **auto-suggests on entry** (proactive, dismissible). **Build** (*execute + verify*)
+  provisions and checks the team behind a live progress stepper; **Run** executes it as you and offers
+  a **"Download PDF Results Report"**; **Evaluate** attributes context per agent and offers a **"Download
+  PDF Evaluation Report"** — both fully brand-styled. A ready+tested system opens in read-only **View**
+  (trigger/run · live monitor · results + diagnostics); the six-stage builder is **Edit** (✎ button),
+  matching the OS-wide View/Edit convention. Unattended triggers (schedule + event/API) are governed by
+  the **Autonomous Agents** platform flag (Admin → Platform Settings) — **OFF by default**; fail-closed
+  if unset; running a system by hand is always available. Every call routes through **LiteLLM → OPA →
+  Langfuse**.
 - **Software — compose a governed app, don't code one.** An app here isn't a coding project you
   build, ship and host — it's a **governed declarative specification** (an *AppSpec*) that the
   trusted OS renders **same-origin**, under the viewer's own session. There's **no per-app repo,
@@ -750,36 +756,43 @@ Northpeak's campaign playbook lives in people's heads. Let's make it retrievable
 Now the payoff. Mara builds an agent team that reads the campaign data, respects the playbook,
 and recommends a budget next-best-action.
 
-1. **Compose.** In **Agents**, Mara drags an *analysis* agent and a *recommendation* agent onto
-   the React-Flow canvas (or edits `system.yaml` directly — same versioned file). Each agent's
-   `AGENT.md` grounds it in the published campaign knowledge.
-2. **Grant resources + tools.** In "What your team can use" she grants the system the
-   Domain-scope campaign datasets, the knowledge workflow, and the `query_data` /
-   `search_knowledge` tools, each at read-only. A validation gate must
-   pass; a sub-agent's grants are always a strict subset of the system's.
-3. **Pick models.** The single **Auto / Reasoning / Execution** toggle shows the real gateway
-   model names (`sovereign-reasoning`, `sovereign-default`) with an internal/external badge.
-4. **Build = execute + verify.** *Build* runs the compiled system and checks it — every call
-   routed **LiteLLM → OPA → Langfuse**.
+1. **Define.** In **Agents**, Mara opens **+ New**, names the system, states its deliverable
+   ("recommend a next-best budget action for each active campaign"), and picks the trigger — Manual
+   for now. Each agent's `AGENT.md` will ground it in the published campaign knowledge.
+2. **Grant resources + tools.** In the **Grant** stage ("What your team can use") she grants the
+   system the Domain-scope campaign datasets, the knowledge workflow, and the `query_data` /
+   `search_knowledge` tools, each at read-only. A hard invariant guarantees a sub-agent's grants
+   are always a strict subset of the system's.
+3. **Design.** The **Design** stage auto-proposes a grounded team on entry — an *analysis* agent
+   and a *recommendation* agent referencing only the granted context — which she confirms via a
+   single Apply card. She can also drag the React-Flow graph or edit `system.yaml` directly. The
+   per-stage AI assistant sits at the top and proactively suggests refinements. The single
+   **Auto / Reasoning / Execution** toggle shows the real gateway model names.
+4. **Build = execute + verify.** *Build* provisions and checks the compiled system behind a live
+   progress stepper — every call routed **LiteLLM → OPA → Langfuse**.
 5. **Run — governed all the way down.** *Run* executes the team **as Mara**. Every tool call
-   the team makes dispatches through the same governed door as her own MCP calls: grant-scoped,
-   OPA-pre-gated, role-floored. The team returns *INCREASE / CUT / HOLD budget for X days +
-   reasoning*. A write pauses for approval and enqueues in **Governance** — the agent is
-   *propose-don't-commit* by default.
+   dispatches through the same governed door as her own MCP calls: grant-scoped, OPA-pre-gated,
+   role-floored. The team returns *INCREASE / CUT / HOLD budget for X days + reasoning*. A write
+   pauses for approval and enqueues in **Governance** — the agent is *propose-don't-commit* by
+   default.
 6. **Evaluate — see what each agent actually used.** The **Evaluate** view attributes context
-   *per agent*: exactly which datasets, docs, files, metrics and connections each agent read,
-   how (tool + read/retrieved/written + a short args hint), each a **clickable deep link** that
-   opens the real artifact (switching scope so it's visible). A granted-vs-used strip flags dead
-   grants. So Mara can prove the team grounded on the campaign knowledge, not on thin air.
+   *per agent*: exactly which datasets, docs, files, metrics and connections each agent read, how
+   (tool + read/retrieved/written + a short args hint), each a **clickable deep link** that opens
+   the real artifact. A granted-vs-used strip flags dead grants.
 7. **Promote.** Once it's good, Mara files a promotion; a Builder shares it (to Domain) so the
-   whole domain can *run* it (but not edit it).
+   whole domain can *run* it (but not edit it). Once the system has been built and run at least
+   once, opening it goes to a read-only **View** — trigger/run controls, live monitor, results and
+   diagnostics — with the **✎ Edit** button to re-enter the six-stage builder.
 
 **Two runtimes, one governed plane.** A system picks **LangGraph** (the default — structured,
 replayable, human-in-the-loop) or the autonomous **Hermes** runtime for long-running work that
 compounds (persistent memory + self-improving skills). Both share one governed plane: Hermes
 reaches models **only** through LiteLLM and tools **only** through the same Platform MCP, so OPA
 still gates every call, Langfuse traces it, and code runs in a kernel-isolated sandbox (Kata
-microVM or gVisor — never host-local). Hermes ships **off by default**.
+microVM or gVisor — never host-local). Hermes ships **off by default**. Unattended triggers
+(cron schedule and event/API callbacks) are additionally governed by the **Autonomous Agents**
+platform flag in **Admin → Platform Settings** — **OFF by default**, enforced fail-closed at the
+single run entrypoint; triggering a system manually is always available regardless of the flag.
 
 ## Golden path 4 — Big Bets & Strategy: tying it to value
 
