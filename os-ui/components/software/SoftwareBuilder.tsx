@@ -619,7 +619,10 @@ export default function SoftwareBuilder({
           ) : null}
           <span className={dep.cls}>{dep.label}</span>
           <span className="badge muted">{version}</span>
-          {app.mode === 'offline' ? <span className="badge muted">git not ready</span> : null}
+          {/* "git not ready" is a CODED-app concept (its source lives in a Forgejo repo). A
+              declarative/spec app serves from its spec via the platform runtime and needs no
+              per-app repo, so the badge is misleading noise there — show it for coded apps only. */}
+          {!isSpecApp && app.mode === 'offline' ? <span className="badge muted">git not ready</span> : null}
         </div>
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
           {/* The top-level Simple⇄Developer toggle drives the RAW CODE-FILES view

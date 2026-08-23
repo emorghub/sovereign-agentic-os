@@ -194,8 +194,16 @@ export default function SimpleBuilder({
   // The per-stage assistant, mounted at the TOP of every stage body. One helper, one
   // endpoint; it auto-suggests on entering each stage (edit-mode only — read-only VIEW
   // never fires it, since nothing can be applied there).
+  //
+  // Define is ASK-FIRST: with no deliverable yet there is nothing to ground a suggestion in,
+  // so we do NOT auto-fire — the assistant's intro/starters invite the user to say what they
+  // want, and it only proactively refines once a description exists. Every other stage keeps
+  // its on-entry suggestion (Grant/Design/Evaluate ground in the description + grants already
+  // captured; Build/Run are plain explanations).
+  const hasDeliverable = !!(system.system.description ?? '').trim();
+  const assistantAutoSuggest = editable && (phase !== 'define' || hasDeliverable);
   const assistant = (
-    <AgentStageAssistant systemId={systemId} system={system} stage={phase} canEdit={editable} onCommit={commit} autoSuggest={editable} />
+    <AgentStageAssistant systemId={systemId} system={system} stage={phase} canEdit={editable} onCommit={commit} autoSuggest={assistantAutoSuggest} />
   );
 
   return (
@@ -695,12 +703,24 @@ function AutoProposeTeam({
 
   const hasAgents = system.agents.length > 0;
   const description = system.system.description ?? '';
+  // GROUNDED-only auto-propose: the stage order is Define → Grant → Design, so by the time
+  // the user reaches Design they should have granted context. We auto-fire ONLY when there is
+  // a real deliverable AND at least one governed grant (data/knowledge/metrics/connections/
+  // files/plan) — an empty-grounding goal-only proposal is exactly what made the proposer
+  // free-associate ("a renewable-energy agent"), so we no longer auto-fire it. A user who
+  // wants a from-goal proposal can still add agents by hand or ask the assistant "Propose a
+  // team" (that path can note what each step will need).
+  const g = system.grants;
+  const hasGrantedContext =
+    g.data.length > 0 || g.knowledge.length > 0 || g.metrics.length > 0 ||
+    g.connections.length > 0 || g.files.length > 0 || g.plan.length > 0;
   const hasGoal = !!description.trim() || (system.outputs?.length ?? 0) > 0;
+  const grounded = hasGoal && hasGrantedContext;
 
   useEffect(() => {
-    // Fire ONCE per mount: only with an empty team + a stated goal, and only if editable.
+    // Fire ONCE per mount: only with an empty team + a GROUNDED goal, and only if editable.
     if (firedRef.current) return;
-    if (hasAgents || !hasGoal || !canEdit || dismissed) return;
+    if (hasAgents || !grounded || !canEdit || dismissed) return;
     firedRef.current = true;
     let alive = true;
     setProposing(true);

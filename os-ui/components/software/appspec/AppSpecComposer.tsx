@@ -401,7 +401,7 @@ export default function AppSpecComposer({
   // the PRIMARY call to action; once a real spec exists it becomes a secondary, confirm-first
   // "Regenerate from design" that REPLACES the working draft.
   const [generating, setGenerating] = useState(false);
-  const [genNote, setGenNote] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const [genNote, setGenNote] = useState<{ kind: 'ok' | 'error'; text: string; issues?: { path: string; reason: string; fix: string }[] } | null>(null);
   const atDefault = useMemo(() => !app.spec && isDefaultDraft(state), [app.spec, state]);
   const hasStories = (app.stories?.length ?? 0) > 0;
   const hasData = app.grantedData.length > 0;
@@ -439,13 +439,21 @@ export default function AppSpecComposer({
     setGenNote(null);
     try {
       const res = await fetch(`/api/apps/${app.id}/spec/generate`, { method: 'POST' });
-      const d = (await res.json().catch(() => ({}))) as { ok?: boolean; spec?: AppSpec; error?: string };
+      const d = (await res.json().catch(() => ({}))) as {
+        ok?: boolean; spec?: AppSpec; error?: string; issues?: { path: string; reason: string; fix: string }[];
+      };
       if (d.ok && d.spec) {
         loadSpec(d.spec);
         const storyCount = new Set(d.spec.tabs.flatMap((t) => (t.stories ?? []).map((s) => s.storyId))).size;
         setGenNote({ kind: 'ok', text: `Generated ${d.spec.tabs.length} tab${d.spec.tabs.length === 1 ? '' : 's'} from ${storyCount} stor${storyCount === 1 ? 'y' : 'ies'} — review and Save.` });
       } else {
-        setGenNote({ kind: 'error', text: d.error ?? 'The build assistant could not generate your app. Add a tab yourself, or try again.' });
+        // Surface the SPECIFIC blockers (e.g. "dataset … is not granted", "column … not in dataset")
+        // the generator hit — the generic "Review the notes" text was a dead-end when no notes showed.
+        const issues = Array.isArray(d.issues) ? d.issues.slice(0, 12) : [];
+        const text = issues.length
+          ? (d.error ?? 'The assistant could not build a valid app from your design yet — here is what to fix:')
+          : (d.error ?? 'The build assistant could not generate your app. Add a tab yourself, or try again.');
+        setGenNote({ kind: 'error', text, issues });
       }
     } catch {
       setGenNote({ kind: 'error', text: 'Could not reach the build assistant. Please try again in a moment.' });
@@ -587,6 +595,15 @@ export default function AppSpecComposer({
       {genNote ? (
         <div className="grant-block" style={{ marginTop: 10 }}>
           <span className={genNote.kind === 'ok' ? 'badge ok' : 'error'} style={{ margin: 0 }}>{genNote.text}</span>
+          {genNote.issues && genNote.issues.length > 0 ? (
+            <ul className="sc-issue-list" style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+              {genNote.issues.map((it, i) => (
+                <li key={i} className="error sc-issue" style={{ listStyle: 'disc' }}>
+                  <span>{it.reason}.</span> <span className="muted">{it.fix}.</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
 

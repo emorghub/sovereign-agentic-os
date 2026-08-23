@@ -13,6 +13,44 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.158 — Software "Generate my app" legibility + Agents grounded auto-propose
+
+Two live-blocker UX fixes.
+
+**Software Build — the "Generate my app" dead-end is gone.** When the generator could not
+produce a valid `AppSpec` after its repair turn, the composer showed
+*"…couldn't produce a valid app from your design. Review the notes…"* — but it **never rendered
+the notes**: the client dropped the server's typed `issues[]`, so the user faced a message that
+promised guidance it didn't show. The composer now surfaces those `issues` inline (e.g.
+*"dataset … is not granted to this app — grant it in Context"*, *"column … not in dataset — use
+one of: …"*), for both the manual **Generate** button and the auto-generate-on-open path. This
+turns a dead-end into the exact, actionable blocker. (The generator/validator logic is unchanged
+— it was already fail-soft on store blips; the bug was purely that the UI hid its output.)
+
+**Agents — the Design auto-proposer no longer fires ungrounded.** It previously proposed a team
+whenever a goal *or* an output existed, even with **no granted context** — which let the reasoning
+model free-associate (a "renewable-energy agent" unrelated to the domain's strategy/big-bets/data).
+It now waits for a real deliverable **AND** at least one granted context
+(data · knowledge · metrics · connections · files · plan). Since the stage order is
+Define → **Grant** → Design, by Design the user should already have granted context, so the
+proposal is grounded in it. A goal-only proposal can still be built by hand.
+
+**Agents — the Define assistant is ask-first.** It stays at the top of Define but only
+auto-suggests once a description exists; with an empty deliverable it shows its intro/starters
+inviting the user to say what they want, rather than proposing before intent is captured.
+
+**Software Design — reuse existing data instead of proposing a new dataset.** The Design
+assistant's data-resolution rule told it to *bind an existing dataset if one is visible*, but it
+was only fed the app's **already-granted** context — so it never saw the datasets that exist and
+are grantable but not yet bound, and always fell through to "propose a NEW dataset". It now also
+receives the caller's **grantable (but unbound) artifacts**, with an explicit "PREFER binding over
+creating" ordering, so it reuses the governed data that's already there.
+
+**Software — the "git not ready" badge no longer shows on declarative apps.** A declarative/spec
+app serves from its spec via the platform runtime and needs no per-app Forgejo repo, so "git not
+ready" was misleading noise there. It now shows only for coded apps (whose source really does live
+in a repo). "Draft" (deploy state) is unchanged.
+
 ### os-ui 0.6.141 — Self-heal the "domain gold table not materialized" drift (probe-before-claim + reconcile sweep + zombie-asset prevention)
 
 The recurring #96 / #151 materialization-gap class, diagnosed live on `ds_ylney9n5q5`

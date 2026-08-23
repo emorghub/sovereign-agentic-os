@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# One-shot guarded deploy of os-ui 0.6.157 — overnight P-bundle (all tsc-clean + 5493 tests green):
-#  P0 SOFTWARE BUILD (cohort blocker): the declarative Build stage no longer dead-ends — a new
-#     build-affordance always resolves to one actionable outcome + a "Build from my design" button in
-#     BOTH Simple & Developer; the app assistant falls back client-draft -> draftSpec -> spec (reads
-#     work-in-progress apps); already-satisfied Define/Design show green on open. Vestigial Ship-Design
-#     panel (Jira / Git push / import) removed.
-#  F1 DURABILITY: platform-admin settings/security(egress)/tenant/plugins now write through the
-#     os-mirror + hydrate on boot — promoteAsView / autonomousAgentsEnabled / codedAppsEnabled &
-#     model roles/branding survive a redeploy (no more silent revert + lying audit row).
-#  SECURITY H0: metric column/filter are IDENT-validated before SQL (assertColumn) — closes an
-#     injection past guard_read. H1: promotion approval now checks the approver may grant to each
-#     TARGET domain/user (assertGrantsWithinAuthority) — closes a cross-domain/named-user leak; the
-#     identical twin in the FILES promotion path is closed too.
-#  Carries all of 0.6.155/0.6.156.
+# One-shot guarded deploy of os-ui 0.6.158 — two live-blocker UX fixes (tsc-clean + tests green):
+#  SOFTWARE BUILD (cohort blocker): the "Generate my app" failure was a DEAD-END — the message said
+#     "Review the notes" but the composer never rendered the notes (it dropped the server's `issues`).
+#     Now the SPECIFIC blockers are surfaced inline (e.g. "dataset … is not granted", "column … not in
+#     dataset — use one of …"), so the user (and we) can see and fix exactly what stopped generation.
+#     Both the manual "Generate" button and the auto-generate-on-open path share the same surface.
+#  AGENTS (grounding): the Design auto-proposer no longer fires ungrounded — it waits for a real goal
+#     AND at least one granted context (data/knowledge/metrics/connections/files/plan), so it can't
+#     free-associate a "renewable-energy agent". The Define assistant is ASK-FIRST: it stays at the top
+#     but only auto-suggests once a description exists (empty ⇒ its intro invites the user to say what
+#     they want), instead of proposing before intent is captured.
+#  SOFTWARE DESIGN (grounding): the Design assistant now also sees the caller's GRANTABLE-but-unbound
+#     artifacts (not only already-granted ones), so its data-resolution rule REUSES an existing dataset
+#     (bind) instead of always proposing a NEW one. Ordering is now explicit: granted → available → new.
+#  SOFTWARE HONESTY: the "git not ready" header badge shows only for CODED apps (whose source lives in
+#     a Forgejo repo); a declarative/spec app serves from its spec and needs no repo, so the badge is
+#     gone there.
+#  Carries all of 0.6.157.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export KUBECONFIG="${KUBECONFIG:-deploy/kubeconfig.yaml}"
-IMG=ghcr.io/aborek/sovereign-os/os-ui:0.6.157
+IMG=ghcr.io/aborek/sovereign-os/os-ui:0.6.158
 
 echo "==> building $IMG for linux/amd64 (nodes are amd64; Colima defaults to arm64)"
 # --platform pins the node arch; --provenance=false avoids a buildx attestation
@@ -38,12 +42,12 @@ if [ -z "$DIGEST" ] || [ "$DIGEST" = "sha256:" ]; then
 fi
 echo "==> digest: $DIGEST"
 
-echo "==> helm upgrade (pinned to 0.6.157@$DIGEST)"
+echo "==> helm upgrade (pinned to 0.6.158@$DIGEST)"
 # No release-wide --wait: pre-existing broken resources (mail, wireguard,
 # sample-sklearn) would trip it. We verify os-ui specifically below.
 helm -n agentic-os upgrade agentic-os charts/sovereign-agentic-os \
   --reuse-values --force-conflicts \
-  --set osUI.image.tag="0.6.157@$DIGEST" \
+  --set osUI.image.tag="0.6.158@$DIGEST" \
   --set queryTool.image.tag="0.6.2"   # MUST be an explicit --set every deploy: `--reuse-values`
                                        # ignores the chart values.yaml pin and reverts query-tool to
                                        # the last release's 0.6.1, dropping the promote-as-view
@@ -57,4 +61,4 @@ kubectl -n agentic-os rollout status deploy/os-ui --timeout=6m
 echo "==> ACTUAL running image (config digest, not just the spec):"
 kubectl -n agentic-os get pods -l app=os-ui -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.status.containerStatuses[0].imageID}{"  started="}{.status.startTime}{"\n"}{end}'
 kubectl -n agentic-os get deploy os-ui -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
-echo "DEPLOY_06157_OK"
+echo "DEPLOY_06158_OK"

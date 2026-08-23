@@ -87,6 +87,24 @@ function grantsDigest(available: AvailableContext): string {
   return lines.join('\n') || '(no grantable artifacts visible to you yet)';
 }
 
+/**
+ * The Design stage's "reuse before create" digest: the artifacts the caller can BIND that are
+ * NOT already granted to this app. Without this, Design only saw ALREADY-granted context and so
+ * its data-resolution rule always fell through to "propose a NEW dataset" — it could never see
+ * the existing dataset it should bind. Excludes already-granted ids (those are in Granted context).
+ */
+function bindableDigest(available: AvailableContext, grants: ContextGrants): string {
+  const lines: string[] = [];
+  for (const kind of SW_GRANT_KINDS) {
+    const grantedIds = new Set(((grants[kind] ?? []) as { id: string }[]).map((g) => g.id));
+    const items = (available[kind] ?? []).filter((i) => !grantedIds.has(i.id));
+    if (items.length === 0) continue;
+    const shown = items.slice(0, 40).map((i) => `${i.id} — ${i.name} [${i.scope}]`);
+    lines.push(`${kind}:\n  ${shown.join('\n  ')}`);
+  }
+  return lines.join('\n');
+}
+
 /** The epic shape the Design digest reads (requirements + per-story spec presence). */
 type DesignEpicDigest = {
   title: string;
@@ -156,7 +174,7 @@ function systemFor(stage: Stage): string {
         'You are the Design-stage assistant for a BUSINESS user (not a developer). You help SPECIFY a governed app by walking DOWN an artifact ladder: EPICs → each epic\'s REQUIREMENTS (technical/ux/governance) → USER STORIES → each story\'s SPEC (features = what it does, nfrs = how well, rules = governance/business rules).',
         'Ground every suggestion in the "Context from Define" block below (the chosen template, the app name/description and purpose) — never invent features the app is not about.',
         'You can SUGGEST: whole new epics (with description, requirements, and 2-3 stories); requirements for EXISTING epics that lack them (referenced by exact title); user stories for EXISTING epics (referenced by exact title); a spec (features/nfrs/rules) for the story the user is currently specifying; and a DATA PLAN — the datasets the app needs.',
-        'DATA-RESOLUTION RULE — before this app can be built, every data-needing story must have its data RESOLVED: either an existing dataset is bound to the app, or a new one is created. Do NOT wait to discover data needs at build time. Read the stories/specs and identify the DATA ENTITIES the app needs (e.g. "employees", "cases", "service centers"). For each need: (1) if a SUITABLE existing dataset is visible in the "Granted context" / context below, prefer BINDING it via suggestedGrants (never duplicate an existing dataset); (2) otherwise propose a NEW dataset in suggestedDatasets with an inferred column schema, and choose fill: "empty" (schema only) when the user will load real data later, or "dummy" (with realistic sample rows) when the story should be immediately demoable. Ask the user which dataset for which purpose. Never invent columns unrelated to the story.',
+        'DATA-RESOLUTION RULE — before this app can be built, every data-needing story must have its data RESOLVED: either an existing dataset is bound to the app, or a new one is created. Do NOT wait to discover data needs at build time. Read the stories/specs and identify the DATA ENTITIES the app needs (e.g. "employees", "cases", "service centers"). For each need, in THIS ORDER: (1) if it is ALREADY in "Granted context", it is resolved — do nothing; (2) ELSE look in the "Available to grant" list below for an existing dataset whose name/subject fits the need, and if one fits, BIND it via suggestedGrants by its exact id (this is STRONGLY PREFERRED — reusing governed data beats making new data); (3) ONLY when NEITHER lists contain a suitable dataset, propose a NEW one in suggestedDatasets with an inferred column schema, choosing fill: "empty" (schema only) when the user will load real data later, or "dummy" (with realistic sample rows) when the story should be immediately demoable. Prefer binding over creating; never duplicate a dataset that already exists in Granted or Available. Never invent columns unrelated to the story.',
         'FULL-TREE RULE — build the whole branch in ONE proposal, never in separate turns. When you propose epics, each epic MUST already include its "requirements" (technical/ux/governance) AND its "stories", and EACH story MUST already include its "spec" (features/nfrs/rules). When you propose stories for an existing epic, EACH story MUST already include its "spec". Do NOT defer requirements or specs to a later turn or tell the user to add them separately — you create the epic, its requirements, its stories AND their features/NFRs/rules together, in the same Apply.',
         'Keep it HONEST: propose real, specific requirements/features/NFRs/rules grounded in the app\'s purpose and the Context from Define — 2-4 concrete features per story, 1-2 real NFRs, 1-2 real governance/business rules. Do not pad with filler or generic boilerplate; if a story genuinely needs only one feature, give one.',
         'User stories use the "As a … I want … so that …" form with a short acceptance criterion.',
@@ -168,7 +186,7 @@ function systemFor(stage: Stage): string {
         '  "suggestedEpicRequirements"?: [ { "epicTitle": exact title of an existing epic, "requirements": { "technical"?: string, "ux"?: string, "governance"?: string } } ],',
         '  "suggestedStories"?: [ { "epicTitle": exact title of an existing epic, "stories": [ { "title": string, "asA": string, "iWant": string, "soThat": string, "acceptance": string, "spec": { "features": string[], "nfrs": string[], "rules": string[] } } ] } ],',
         '  "suggestedSpec"?: { "features"?: string[], "nfrs"?: string[], "rules"?: string[] },',
-        '  "suggestedGrants"?: [ { "kind": "data", "id": exact id of an EXISTING granted dataset from the context, "access"?: "read-only", "reason": short why } ],',
+        '  "suggestedGrants"?: [ { "kind": one of connections|data|knowledge|files|metrics, "id": exact id of an existing artifact from the "Granted context" or "Available to grant" lists, "access"?: "read-only", "reason": short why } ],',
         '  "suggestedDatasets"?: [ { "name": string (the entity, e.g. "employees"), "purpose": short which story it serves, "columns": [ { "name": string, "type": string } ] (REQUIRED, non-empty), "fill": "empty"|"dummy", "rows"?: number (for dummy; default 25, max 100) } ] }',
         'For suggestedDatasets: infer a realistic, minimal column schema from the story (id + the fields it needs). Use suggestedGrants to BIND an existing dataset instead whenever one already fits — do not create a duplicate.',
         'Example of ONE full-tree epic (shape, keep content real): { "title": "Reminders", "description": "…", "requirements": { "technical": "Runs a daily scheduled job", "ux": "One-click snooze", "governance": "Sends only to opted-in users" }, "stories": [ { "title": "Send a due-date reminder", "asA": "user", "iWant": "an email before a task is due", "soThat": "I don\'t miss it", "acceptance": "Email arrives 24h before due", "spec": { "features": ["Compose reminder email", "Schedule 24h before due"], "nfrs": ["Sends within 1 min of trigger"], "rules": ["Only to opted-in users"] } } ] }',
@@ -208,6 +226,7 @@ function contextBlock(
   },
   available: AvailableContext | null,
   grantedContext: string,
+  bindable: string,
 ): string {
   const surface = [app.surface.ui ? 'UI' : '', app.surface.api ? 'API' : ''].filter(Boolean).join(' + ') || 'unknown';
   const pipeline = Object.entries(app.pipeline).map(([k, v]) => `${k}=${v}`).join(', ') || '(no pipeline yet)';
@@ -227,6 +246,9 @@ function contextBlock(
         // The REAL granted artifacts (DLS-scoped) so specs reference real columns/members,
         // never invented ones. Empty grants ⇒ '' (filtered out, zero prompt cost).
         grantedContext,
+        // The artifacts the caller could BIND but hasn't yet — so the data-resolution rule can
+        // REUSE an existing dataset instead of always proposing a new one. Empty ⇒ '' (filtered).
+        bindable ? `Available to grant (existing artifacts you can BIND by exact id — PREFER these over creating new):\n${bindable}` : '',
         'Current epics:',
         epicsDigest(app.epics),
       ].filter(Boolean).join('\n');
@@ -272,18 +294,22 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       turns.push({ role: 'user', content: stage === 'define' ? 'Help me improve the purpose and suggest context to grant.' : stage === 'design' ? 'Suggest epics and user stories from the purpose.' : 'Help me with this stage.' });
     }
 
-    // Define needs the DLS-scoped grantable set so it references real ids.
+    // Define AND Design both need the DLS-scoped grantable set: Define suggests grants from it;
+    // Design uses it to REUSE (bind) an existing dataset instead of proposing a duplicate.
     const available =
-      stage === 'define' ? await availableContext(user, SW_GRANT_KINDS) : null;
+      stage === 'define' || stage === 'design' ? await availableContext(user, SW_GRANT_KINDS) : null;
 
     // Design grounds the spec in the REAL granted context (data schema, knowledge, metrics,
     // files, connections), resolved AS the caller so it never leaks anything they can't see.
     const grantedContext =
       stage === 'design' ? await resolveGrantedContext(app.grants as ContextGrants, user) : '';
+    // …and the bindable-but-not-yet-granted artifacts, so the data-resolution rule can reuse them.
+    const bindable =
+      stage === 'design' && available ? bindableDigest(available, app.grants as ContextGrants) : '';
 
     const messages = [
       { role: 'system' as const, content: systemFor(stage) },
-      { role: 'user' as const, content: contextBlock(stage, app, available, grantedContext) },
+      { role: 'user' as const, content: contextBlock(stage, app, available, grantedContext, bindable) },
       ...turns,
     ];
 
