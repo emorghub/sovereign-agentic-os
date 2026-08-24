@@ -13,6 +13,29 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.162 — Software apps no longer disappear after a mirror hiccup (cache null-poison fix)
+
+**Root cause of "apps disappear after being created":** the app registry's bulk-hydrate did
+`const docs = (await mirror.hydrate(500)) ?? []` — collapsing the mirror's two distinct return
+values, **`null` (OpenSearch UNREACHABLE)** and **`[]` (reachable-but-empty)**, into the same
+empty list, then **cached it as authoritative**. So a *transient* mirror blip at the first
+list-after-boot poisoned the app tiles empty for the **entire pod lifetime** — every app vanished
+from the list until the next restart (the same "marked mirror dead forever" hole `os-mirror.ts`
+warns about, re-introduced at the cache layer). Frequent redeploys made it routine.
+
+**Fix (`lib/software/apps.ts` `getCache`):** a `hydrated` flag now separates "cache is the
+mirror's authoritative snapshot" from "cache built during an outage". On `null` (unreachable) the
+cache is kept (so this pod's in-process creates are retained) but left **not-hydrated**, so the
+**next read re-hydrates from the mirror the moment it recovers** — apps persisted before this boot
+or by other pods reappear instead of staying hidden. On a healthy read the persisted docs are
+folded in, preserving any in-process-only apps still queued for write-through. `writeThrough` was
+already durable (it queues on an outage and replays on heal), so no write-side change was needed.
+
+NOTE: the same `hydrate(...) ?? []` shortcut exists in several other stores (metrics, big-bets,
+science, marketplace, tile-order, some admin registries). Those that cache the result have the
+same latent "disappear-after-a-blip" risk and warrant a follow-up hardening audit (agents, core
+artifacts, security, plugins already handle `null` correctly).
+
 ### os-ui 0.6.161 — Workflows "My" isolation, Knowledge-tab simplification, tab rename, + two grounding fixes
 
 - **Business Workflows — "My" is owner-only.** The workflow list bucketed by visibility, and

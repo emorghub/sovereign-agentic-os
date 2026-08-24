@@ -984,11 +984,14 @@ export const APP_TEMPLATES: { key: AppTemplateKey; label: string; blurb: string 
 
 // ----------------------------------------------------------------- Registry ---
 
-type AppCacheState = { cache: Map<string, App> | null };
+// `hydrated` distinguishes "cache is the mirror's authoritative snapshot" from "cache exists
+// but the mirror was UNREACHABLE at load, so it may be missing persisted apps" — the latter must
+// re-hydrate on the next read once the mirror is back (so apps never disappear for the pod's life).
+type AppCacheState = { cache: Map<string, App> | null; hydrated: boolean };
 const APP_STATE_KEY = Symbol.for('soa.apps.cache');
 function appCacheState(): AppCacheState {
   const g = globalThis as unknown as Record<symbol, AppCacheState | undefined>;
-  if (!g[APP_STATE_KEY]) g[APP_STATE_KEY] = { cache: null };
+  if (!g[APP_STATE_KEY]) g[APP_STATE_KEY] = { cache: null, hydrated: false };
   return g[APP_STATE_KEY]!;
 }
 
@@ -1121,14 +1124,30 @@ async function getAppByIdWithMirror(appId: string): Promise<App | null> {
 
 async function getCache(): Promise<Map<string, App>> {
   const s = appCacheState();
-  if (s.cache) return s.cache;
+  // A fully-hydrated cache is authoritative — serve it. A cache that exists but is NOT yet
+  // hydrated (built during a mirror outage) falls through to RE-hydrate below.
+  if (s.cache && s.hydrated) return s.cache;
+  const docs = await mirror.hydrate(500); // null → mirror UNREACHABLE; [] → reachable-but-empty
+  if (docs === null) {
+    // Mirror unreachable: keep an in-process cache so THIS pod's creates are retained, but leave
+    // hydrated=FALSE so the next read re-hydrates from the mirror the moment it recovers — and
+    // apps persisted before this boot / by other pods reappear. Caching an empty map as if it
+    // were authoritative (the old `?? []`) poisoned the list empty for the whole pod lifetime:
+    // every app "disappeared" from the tiles until the next restart. A by-id read
+    // (getAppByIdWithMirror) still hits the mirror directly meanwhile.
+    if (!s.cache) s.cache = new Map();
+    return s.cache;
+  }
+  // Mirror reachable: the persisted docs are the truth for the ids they contain. Fold them in,
+  // preserving any in-process-only apps created during an outage (still queued for write-through).
   const map = new Map<string, App>();
-  const docs = (await mirror.hydrate(500)) ?? []; // null → mirror down → in-memory only
   for (const app of docs as App[]) {
     hydrateAppDoc(app);
     map.set(app.id, app);
   }
+  if (s.cache) for (const [appId, app] of s.cache) if (!map.has(appId)) map.set(appId, app);
   s.cache = map;
+  s.hydrated = true;
   return map;
 }
 
@@ -3467,6 +3486,7 @@ export function newId(prefix: string): string {
 export function __resetAppsCache(): void {
   const s = appCacheState();
   s.cache = null;
+  s.hydrated = false;
   mirror.__reset();
   versions.__reset();
 }
