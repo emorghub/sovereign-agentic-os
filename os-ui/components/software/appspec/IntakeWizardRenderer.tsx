@@ -8,6 +8,7 @@ import { Alert, Badge, Button, Input, Select } from '@/lib/app-ui/index.ts';
 import { Forbidden, type OsClient, type RecordResult } from '@/lib/app-sdk/index.ts';
 import type { FormField } from '@/lib/software/appspec/schema.ts';
 import type { IntakeWizardConfig } from '@/lib/software/appspec/patterns.ts';
+import { isRealSave } from '@/lib/software/appspec/interactive-logic.ts';
 
 /**
  * Render the `intake-wizard` pattern: a multi-step click-through that collects fields across
@@ -104,7 +105,7 @@ export function IntakeWizardRenderer({ view, os }: { view: IntakeWizardConfig; o
 
   // Completed state — an honest result card, never a fake "saved".
   if (status === 'done' && result) {
-    const live = result.source === 'live-app';
+    const live = isRealSave(result.source);
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 520 }}>
         <Alert variant={live ? 'success' : 'info'}>

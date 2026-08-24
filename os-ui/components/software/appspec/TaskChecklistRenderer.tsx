@@ -9,7 +9,7 @@ import { Forbidden, type OsClient, type QueryResult } from '@/lib/app-sdk/index.
 import type { TaskChecklistConfig } from '@/lib/software/appspec/patterns.ts';
 import { pickSourceRows, recordsToGrid, type SourceRow } from '@/lib/software/appspec/interactive-logic-select.ts';
 import { doneTaskIds, recordsFromList } from '@/lib/software/appspec/records-reduce.ts';
-import { actorStamp } from '@/lib/software/appspec/interactive-logic.ts';
+import { actorStamp, isRealSave } from '@/lib/software/appspec/interactive-logic.ts';
 
 /**
  * Render the `task-checklist` pattern: a checklist over the app's own `records` OR a granted
@@ -84,7 +84,7 @@ export function TaskChecklistRenderer({ view, os }: { view: TaskChecklistConfig;
       setBusyId(task.id);
       try {
         const r = await os.records.add({ taskId: task.id, done: next, by, at: new Date().toISOString() });
-        if (r.source !== 'live-app') setNotLive(true);
+        if (!isRealSave(r.source)) setNotLive(true);
         await refreshDone();
       } catch (err: unknown) {
         if (err instanceof Forbidden) setError(err.reason);

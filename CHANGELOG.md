@@ -13,6 +13,26 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.165 — Fix: saving a record inside an OS-built app falsely said "Not saved for real (demo-seed)"
+
+An interactive OS-built app (a `form`, `intake-wizard`, `assignment`, `approval-queue`, or
+`task-checklist`) writes through the governed `os.records.add` door, whose durable home is the
+**OS-side app-records store** — the default static-SPA template has no backend of its own. That store
+labels its results `source:'os-records-store'`. But the renderers + the shared `classifyWriteResult`
+only treated `source:'live-app'` as a real save, so a record that **did** persist to the durable
+store was reported to the user as *"Not saved for real — the app runner is not live (demo-seed)."*
+
+- **`isRealSave(source)`** — one shared predicate (in `interactive-logic.ts`): a real save is
+  `'os-records-store'` OR `'live-app'`; only `'demo-seed'` is illustrative. Used by
+  `classifyWriteResult` and all five interactive renderers (Form, IntakeWizard, Assignment,
+  ApprovalQueue, TaskChecklist), so no site can regress to a `live-app`-only check.
+- **SDK type** — `RecordResult.source` now includes `'os-records-store'` (it always answered with it
+  at runtime; the type had omitted it), with docs stating both store and pod are real saves.
+- No change to what persists — the write was always durable; only the honesty label was wrong.
+  Reads were unaffected (`recordsFromList` keys off `items`).
+
+Carries all of 0.6.164.
+
 ### os-ui 0.6.164 — Fix: a fully-built, published Software app vanishes after a pod restart
 
 **Root cause (persistence, not the publish path).** A published app was correctly kept in the

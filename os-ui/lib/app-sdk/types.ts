@@ -43,13 +43,18 @@ export type AppRecord = Record<string, unknown>;
 
 /**
  * A record-op result. The OS labels every result with its SOURCE so an app can be
- * honest in its UI: `'live-app'` (proxied to the deployed app's real service) or
- * `'demo-seed'` (deterministic seed with a `note`, when the app runner is not live).
+ * honest in its UI. Three sources, TWO of which are real, durable saves:
+ *   • `'os-records-store'` — answered from the durable OS-side app-records store. This
+ *     is the DEFAULT write door for the static-SPA template (it has no backend of its
+ *     own), so it is the NORMAL success for the four `os.records.*` ops.
+ *   • `'live-app'` — proxied to the deployed app's real in-cluster service.
+ *   • `'demo-seed'` — deterministic seed with a `note`, when the app runner is not live
+ *     and no store answered (illustrative only; NEVER a real save).
  * The remaining fields are the app's own payload, passed through unchanged.
  */
 export interface RecordResult {
-  /** `'live-app'` when the deployed app answered; `'demo-seed'` when it is not live. */
-  source: 'live-app' | 'demo-seed';
+  /** Real saves: `'os-records-store'` (durable OS store) or `'live-app'` (app pod). `'demo-seed'` is illustrative only. */
+  source: 'os-records-store' | 'live-app' | 'demo-seed';
   /** Present on a demo-seed result — the honest "this is illustrative data" note. */
   note?: string;
   /** Anything else the app's endpoint returned (items/item/added/file/… ), unshaped. */

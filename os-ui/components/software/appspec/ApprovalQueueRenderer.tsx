@@ -9,7 +9,7 @@ import { Forbidden, type OsClient, type QueryResult } from '@/lib/app-sdk/index.
 import type { ApprovalQueueConfig } from '@/lib/software/appspec/patterns.ts';
 import { pickSourceRows, recordsToGrid, type SourceRow } from '@/lib/software/appspec/interactive-logic-select.ts';
 import { latestDecisions, recordsFromList, type Decision } from '@/lib/software/appspec/records-reduce.ts';
-import { actorStamp } from '@/lib/software/appspec/interactive-logic.ts';
+import { actorStamp, isRealSave } from '@/lib/software/appspec/interactive-logic.ts';
 
 /**
  * Render the `approval-queue` pattern: list pending items (from the app's own `records` OR a
@@ -93,7 +93,7 @@ export function ApprovalQueueRenderer({ view, os }: { view: ApprovalQueueConfig;
       setBusyId(item.id);
       try {
         const r = await os.records.add({ itemId: item.id, [decisionField]: decision, decision, reason, by, at: new Date().toISOString() });
-        if (r.source !== 'live-app') setNotLive(true);
+        if (!isRealSave(r.source)) setNotLive(true);
         await refreshDecisions();
         setReasons((p) => ({ ...p, [item.id]: '' }));
       } catch (err: unknown) {

@@ -22,13 +22,25 @@ export function coerceField(type: FieldType, raw: string): unknown {
 }
 
 /**
- * Classify a `records.add` result HONESTLY into what the UI should say. `'live-app'` is the only
- * real save; a `'demo-seed'` (app runner not live) is illustrative, never claimed as saved.
+ * Is this record-op source a REAL, durable save? BOTH the durable OS-side app-records store
+ * (`'os-records-store'` — the default write door for the static-SPA template) and a live app pod
+ * (`'live-app'`) persist for real; only `'demo-seed'` is illustrative. The single source of truth
+ * so no renderer regresses to an `=== 'live-app'`-only check (which wrongly reported the durable
+ * store's saves as "not saved for real").
+ */
+export function isRealSave(source: RecordResult['source'] | undefined): boolean {
+  return source === 'os-records-store' || source === 'live-app';
+}
+
+/**
+ * Classify a `records.add` result HONESTLY into what the UI should say. A real save is either the
+ * durable OS store or a live app pod (see {@link isRealSave}); a `'demo-seed'` (runner not live) is
+ * illustrative, never claimed as saved.
  */
 export type WriteOutcome = { saved: boolean; tone: 'success' | 'info'; message: string };
 
 export function classifyWriteResult(result: RecordResult, savedMessage: string): WriteOutcome {
-  if (result.source === 'live-app') return { saved: true, tone: 'success', message: savedMessage };
+  if (isRealSave(result.source)) return { saved: true, tone: 'success', message: savedMessage };
   return {
     saved: false,
     tone: 'info',
