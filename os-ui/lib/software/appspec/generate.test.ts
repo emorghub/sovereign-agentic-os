@@ -57,11 +57,13 @@ test('the prompt carries the epics and stories (with their ids)', () => {
   assert.match(user, /See all orders/);
 });
 
-test('the prompt enumerates only cookbook patterns (records-table is offered)', () => {
+test('the prompt enumerates cookbook patterns including the 3.5d in-place-edit ones', () => {
   const { system } = buildGeneratePrompt(material());
   assert.match(system, /records-table/);
-  // a not-yet-implemented pattern must NOT be offered
-  assert.doesNotMatch(system, /editable-grid/);
+  // in-place-edit patterns are now implemented and included in the catalogue
+  assert.match(system, /editable-grid/);
+  assert.match(system, /kanban-workflow/);
+  assert.match(system, /action-detail/);
 });
 
 test('parseGeneratedSpec accepts a good spec wired to granted data and real columns', () => {

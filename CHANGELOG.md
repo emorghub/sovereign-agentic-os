@@ -13,6 +13,32 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.166 — Editable records: in-place edit/delete for OS-built apps (3 new interactive patterns)
+
+OS-built apps can now **edit and delete** their own records in place — not just append. The three
+previously-deferred interactive patterns are now real, end-to-end:
+
+- **`editable-grid`** — an inline-editable table (add row, edit cells → Save, Delete).
+- **`kanban-workflow`** — cards grouped into status columns; move a card to write its new status.
+- **`action-detail`** — a record + governed action buttons that each set a field to a value.
+
+**The store stays append-only + auditable** — this is a supersede/tombstone model, not destructive
+mutation:
+
+- SDK gains `os.records.update(id, record)` (appends a record that supersedes a logical row,
+  carrying `_key`) and `os.records.remove(id)` (appends a reversible `_deleted` tombstone). BOTH go
+  through the *same governed `add` door* — no new route, no new OPA gate, no new store verb, same
+  auto-approved envelope. Delete is reversible; the full edit history is retained (free audit + undo).
+- New pure reducer `reduceByKey` (`records-reduce.ts`) collapses the append log to current rows:
+  latest append per `_key` wins, tombstones hidden, creation-order stable, reserved keys stripped;
+  each row's `id` is its logical key. The existing single-key reducers (decisions, done-flags) are
+  special cases of the same "reduce the log" philosophy, now generalized to keyed upsert.
+- Config parsers + the three renderers (all using the honest `isRealSave` save-labelling + surfacing
+  governed `Forbidden` verbatim), wired into the runtime switch, authorable-by-selection in the
+  Compose UI (bespoke editors), and offered to the generator/assistant catalogue.
+
+No change to the store's durability or scoping. Carries all of 0.6.165.
+
 ### os-ui 0.6.165 — Fix: saving a record inside an OS-built app falsely said "Not saved for real (demo-seed)"
 
 An interactive OS-built app (a `form`, `intake-wizard`, `assignment`, `approval-queue`, or

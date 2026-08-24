@@ -69,10 +69,10 @@ test('the assist system frame states the edit contract (change only what is aske
   assert.match(system, /return the CURRENT spec UNCHANGED/);
 });
 
-test('the assist system frame still enumerates only cookbook patterns (records-table offered)', () => {
+test('the assist system frame enumerates cookbook patterns including 3.5d in-place-edit ones', () => {
   const { system } = buildAssistPrompt(material(), currentSpec(), 'x');
   assert.match(system, /records-table/);
-  assert.doesNotMatch(system, /editable-grid/);
+  assert.match(system, /editable-grid/);
 });
 
 test('the instruction is trimmed before embedding', () => {

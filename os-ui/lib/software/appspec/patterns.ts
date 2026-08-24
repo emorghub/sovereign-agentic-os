@@ -80,7 +80,8 @@ export type PatternCategory = 'view' | 'interactive';
 
 /**
  * The patterns with real renderers: the 4 flagship (3.5a) + the 7 VIEW patterns (3.5b) + the 4
- * INTERACTIVE append patterns (3.5c: `form`, `assignment`, `approval-queue`, `task-checklist`).
+ * INTERACTIVE append patterns (3.5c: `form`, `assignment`, `approval-queue`, `task-checklist`) +
+ * the 3 IN-PLACE-EDIT patterns (3.5d: `editable-grid`, `kanban-workflow`, `action-detail`).
  */
 export const IMPLEMENTED_PATTERNS = [
   'records-table',
@@ -98,6 +99,9 @@ export const IMPLEMENTED_PATTERNS = [
   'assignment',
   'approval-queue',
   'task-checklist',
+  'editable-grid',
+  'kanban-workflow',
+  'action-detail',
 ] as const satisfies readonly PatternId[];
 export type ImplementedPatternId = (typeof IMPLEMENTED_PATTERNS)[number];
 
@@ -261,6 +265,45 @@ export type TaskChecklistConfig = {
   assigneeField?: string;
 };
 
+// — 3.5d IN-PLACE-EDIT patterns (writes via os.records.update / os.records.remove) —
+
+/**
+ * `editable-grid` — an inline-editable table over the app's OWN records. Rows come from
+ * `reduceByKey(recordsFromList(await os.records.list()))`; each cell is editable inline;
+ * saving a row calls `os.records.update(row.id, editedRow)`; adding a row calls
+ * `os.records.add(newRow)`; deleting a row calls `os.records.remove(row.id)`.
+ */
+export type EditableGridConfig = {
+  source: 'records';
+  columns: { field: string; label?: string; type: FieldType }[];
+};
+
+/**
+ * `kanban-workflow` — the app's OWN records displayed as Kanban columns grouped by
+ * `statusField`. Moving a card (via ‹ › buttons) calls `os.records.update` to write the new
+ * status. All columns are defined by `columns`; each card shows `titleField` + optional
+ * `subtitleFields`.
+ */
+export type KanbanWorkflowConfig = {
+  source: 'records';
+  statusField: string;
+  columns: { value: string; label: string }[];
+  titleField: string;
+  subtitleFields?: string[];
+};
+
+/**
+ * `action-detail` — a record picker over the app's OWN records; selecting a record shows its
+ * `fields` and exposes a list of `actions` that each call `os.records.update` to set a single
+ * field to a fixed value (e.g. "Approve" sets `status` to `'approved'`).
+ */
+export type ActionDetailConfig = {
+  source: 'records';
+  titleField: string;
+  fields: { field: string; label?: string }[];
+  actions: { label: string; setField: string; setValue: string }[];
+};
+
 /**
  * The config union. Not-yet-implemented patterns carry an OPAQUE config: it parsed
  * structurally as a plain object (no slots enforced yet — their phase adds the parser), so a
@@ -284,6 +327,9 @@ export type PatternConfig =
   | AssignmentConfig
   | ApprovalQueueConfig
   | TaskChecklistConfig
+  | EditableGridConfig
+  | KanbanWorkflowConfig
+  | ActionDetailConfig
   | OpaqueConfig;
 
 // ---------------------------------------------------------------- config sub-parsers ----
@@ -762,6 +808,110 @@ function parseTaskChecklistConfig(ctx: Ctx, obj: Record<string, unknown>, path: 
   return { source, titleField, ...(assigneeField !== undefined ? { assigneeField } : {}) };
 }
 
+// — 3.5d IN-PLACE-EDIT parsers —
+
+/** Parse one `editable-grid` column: `{ field, label?, type }`. */
+function parseEditableGridColumn(ctx: Ctx, raw: unknown, path: string): { field: string; label?: string; type: FieldType } | undefined {
+  if (!isObject(raw)) {
+    bad(ctx, path, 'column must be an object', 'use { field, label?, type }');
+    return undefined;
+  }
+  const field = reqString(ctx, raw, 'field', `${path}.field`);
+  const label = optString(ctx, raw, 'label', `${path}.label`);
+  const type = reqEnum<FieldType>(ctx, raw, 'type', FIELD_TYPES, `${path}.type`);
+  if (field === undefined || type === undefined) return undefined;
+  return { field, type, ...(label !== undefined ? { label } : {}) };
+}
+
+function parseEditableGridConfig(ctx: Ctx, obj: Record<string, unknown>, path: string): EditableGridConfig | undefined {
+  const source = reqEnum(ctx, obj, 'source', ['records'] as const, `${path}.source`);
+  const colsRaw = reqArray(ctx, obj, 'columns', `${path}.columns`);
+  if (source === undefined || !colsRaw) return undefined;
+  const columns: EditableGridConfig['columns'] = [];
+  colsRaw.forEach((c, i) => {
+    const col = parseEditableGridColumn(ctx, c, `${path}.columns[${i}]`);
+    if (col) columns.push(col);
+  });
+  return { source, columns };
+}
+
+/** Parse one `kanban-workflow` column: `{ value, label }`. */
+function parseKanbanColumn(ctx: Ctx, raw: unknown, path: string): { value: string; label: string } | undefined {
+  if (!isObject(raw)) {
+    bad(ctx, path, 'column must be an object', 'use { value, label }');
+    return undefined;
+  }
+  const value = reqString(ctx, raw, 'value', `${path}.value`);
+  const label = reqString(ctx, raw, 'label', `${path}.label`);
+  if (value === undefined || label === undefined) return undefined;
+  return { value, label };
+}
+
+function parseKanbanWorkflowConfig(ctx: Ctx, obj: Record<string, unknown>, path: string): KanbanWorkflowConfig | undefined {
+  const source = reqEnum(ctx, obj, 'source', ['records'] as const, `${path}.source`);
+  const statusField = reqString(ctx, obj, 'statusField', `${path}.statusField`);
+  const titleField = reqString(ctx, obj, 'titleField', `${path}.titleField`);
+  const subtitleFields = optStringArray(ctx, obj, 'subtitleFields', `${path}.subtitleFields`);
+  const colsRaw = reqArray(ctx, obj, 'columns', `${path}.columns`);
+  if (source === undefined || statusField === undefined || titleField === undefined || !colsRaw) return undefined;
+  const columns: { value: string; label: string }[] = [];
+  colsRaw.forEach((c, i) => {
+    const col = parseKanbanColumn(ctx, c, `${path}.columns[${i}]`);
+    if (col) columns.push(col);
+  });
+  return {
+    source,
+    statusField,
+    titleField,
+    columns,
+    ...(subtitleFields !== undefined ? { subtitleFields } : {}),
+  };
+}
+
+/** Parse one `action-detail` field: `{ field, label? }`. */
+function parseActionDetailField(ctx: Ctx, raw: unknown, path: string): { field: string; label?: string } | undefined {
+  if (!isObject(raw)) {
+    bad(ctx, path, 'field must be an object', 'use { field, label? }');
+    return undefined;
+  }
+  const field = reqString(ctx, raw, 'field', `${path}.field`);
+  const label = optString(ctx, raw, 'label', `${path}.label`);
+  if (field === undefined) return undefined;
+  return { field, ...(label !== undefined ? { label } : {}) };
+}
+
+/** Parse one `action-detail` action: `{ label, setField, setValue }`. */
+function parseActionDetailAction(ctx: Ctx, raw: unknown, path: string): { label: string; setField: string; setValue: string } | undefined {
+  if (!isObject(raw)) {
+    bad(ctx, path, 'action must be an object', 'use { label, setField, setValue }');
+    return undefined;
+  }
+  const label = reqString(ctx, raw, 'label', `${path}.label`);
+  const setField = reqString(ctx, raw, 'setField', `${path}.setField`);
+  const setValue = reqString(ctx, raw, 'setValue', `${path}.setValue`);
+  if (label === undefined || setField === undefined || setValue === undefined) return undefined;
+  return { label, setField, setValue };
+}
+
+function parseActionDetailConfig(ctx: Ctx, obj: Record<string, unknown>, path: string): ActionDetailConfig | undefined {
+  const source = reqEnum(ctx, obj, 'source', ['records'] as const, `${path}.source`);
+  const titleField = reqString(ctx, obj, 'titleField', `${path}.titleField`);
+  const fieldsRaw = reqArray(ctx, obj, 'fields', `${path}.fields`);
+  const actionsRaw = reqArray(ctx, obj, 'actions', `${path}.actions`);
+  if (source === undefined || titleField === undefined || !fieldsRaw || !actionsRaw) return undefined;
+  const fields: { field: string; label?: string }[] = [];
+  fieldsRaw.forEach((f, i) => {
+    const fld = parseActionDetailField(ctx, f, `${path}.fields[${i}]`);
+    if (fld) fields.push(fld);
+  });
+  const actions: { label: string; setField: string; setValue: string }[] = [];
+  actionsRaw.forEach((a, i) => {
+    const act = parseActionDetailAction(ctx, a, `${path}.actions[${i}]`);
+    if (act) actions.push(act);
+  });
+  return { source, titleField, fields, actions };
+}
+
 /**
  * The placeholder config parser for a not-yet-implemented pattern: accept ANY object (its
  * phase adds the real slot validation). This keeps a spec referencing a coming-soon pattern
@@ -1006,10 +1156,43 @@ export const PATTERNS: Record<PatternId, PatternDef> = {
     },
   },
 
-  // ---- interactive patterns, coming soon (need os.records.update or the 3.5d DSL) ----
-  'editable-grid': comingSoon('editable-grid', 'Editable grid', 'interactive', 'An inline-editable table that writes governed records.'),
-  'kanban-workflow': comingSoon('kanban-workflow', 'Kanban workflow', 'interactive', 'A status board whose tiles can be moved between columns (writes the status).'),
-  'action-detail': comingSoon('action-detail', 'Action detail', 'interactive', 'A record detail with governed actions attached.'),
+  // ---- interactive IN-PLACE-EDIT patterns (3.5d — os.records.update / os.records.remove) ----
+  'editable-grid': {
+    id: 'editable-grid',
+    label: 'Editable grid',
+    category: 'interactive',
+    description: 'An inline-editable table that writes governed records.',
+    implemented: true,
+    parseConfig: parseEditableGridConfig,
+    summarize: (c) => {
+      const cfg = c as EditableGridConfig;
+      return `An editable table over the app's own records with ${cfg.columns.length} column${cfg.columns.length === 1 ? '' : 's'}: ${cfg.columns.map((col) => col.label ?? col.field).join(', ')}.`;
+    },
+  },
+  'kanban-workflow': {
+    id: 'kanban-workflow',
+    label: 'Kanban workflow',
+    category: 'interactive',
+    description: 'A status board whose tiles can be moved between columns (writes the status).',
+    implemented: true,
+    parseConfig: parseKanbanWorkflowConfig,
+    summarize: (c) => {
+      const cfg = c as KanbanWorkflowConfig;
+      return `A Kanban board over the app's own records, grouped by ${cfg.statusField} into ${cfg.columns.length} column${cfg.columns.length === 1 ? '' : 's'}: ${cfg.columns.map((col) => col.label).join(', ')}.`;
+    },
+  },
+  'action-detail': {
+    id: 'action-detail',
+    label: 'Action detail',
+    category: 'interactive',
+    description: 'A record detail with governed actions attached.',
+    implemented: true,
+    parseConfig: parseActionDetailConfig,
+    summarize: (c) => {
+      const cfg = c as ActionDetailConfig;
+      return `Shows a record from the app's own log (titled by ${cfg.titleField}) with ${cfg.actions.length} action${cfg.actions.length === 1 ? '' : 's'}: ${cfg.actions.map((a) => a.label).join(', ')}.`;
+    },
+  },
 };
 
 /**

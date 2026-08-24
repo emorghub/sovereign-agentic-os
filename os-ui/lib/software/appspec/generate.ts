@@ -82,6 +82,9 @@ function patternCatalogue(): string {
     assignment: 'config: { source:{datasetId}, itemLabelField, assignTo:{datasetId,optionLabelField}, extraFields? }',
     'approval-queue': "config: { source:'records'|{datasetId}, titleField, subtitleFields?, decisionField?, reasonRequired? }",
     'task-checklist': "config: { source:'records'|{datasetId}, titleField, assigneeField? }",
+    'editable-grid': "config: { source:'records', columns:[{field,label?,type:'text'|'number'|'date'|'boolean'}] }",
+    'kanban-workflow': "config: { source:'records', statusField, titleField, columns:[{value,label}], subtitleFields? }",
+    'action-detail': "config: { source:'records', titleField, fields:[{field,label?}], actions:[{label,setField,setValue}] }",
   };
   return PATTERN_IDS.filter(isImplementedPattern)
     .map((id) => {

@@ -146,6 +146,16 @@ export interface OsClient {
     list(): Promise<RecordResult>;
     add(record: AppRecord): Promise<RecordResult>;
     get(id: string): Promise<RecordResult>;
+    /**
+     * In-place UPDATE of a logical row, append-only under the hood: this appends a NEW record that
+     * SUPERSEDES row `id` (the id you got from `add`/`list`). `os.records.list()` returns the whole
+     * log; reduce it with `reduceByKey` (or the pattern renderers do) to see the current row — the
+     * latest append wins. The full history stays in the log (free audit + undo). Same governed
+     * `add`-tool path as `add`, so it obeys the same envelope + returns the same `RecordResult`.
+     */
+    update(id: string, record: AppRecord): Promise<RecordResult>;
+    /** Soft-DELETE (reversible tombstone) of a logical row — appends a `_deleted` marker for `id`. */
+    remove(id: string): Promise<RecordResult>;
     export(): Promise<RecordResult>;
   };
 }
@@ -405,6 +415,23 @@ export function createOsClient(opts: OsClientOptions = {}): OsClient {
         const r = await request<{ result: RecordResult }>(
           `${recordsBase()}/${encodeURIComponent(id)}`,
         );
+        return r.result;
+      },
+      // update/remove are APPEND-ONLY sugar: they POST a superseding record ({ _key }) / tombstone
+      // ({ _key, _deleted }) via the SAME governed add door — no new route, gate, or store verb.
+      // Reduce the log with `reduceByKey` to see current state (the pattern renderers do this).
+      async update(id: string, record: AppRecord): Promise<RecordResult> {
+        const r = await request<{ result: RecordResult }>(recordsBase(), {
+          method: 'POST',
+          body: { record: { ...record, _key: id } },
+        });
+        return r.result;
+      },
+      async remove(id: string): Promise<RecordResult> {
+        const r = await request<{ result: RecordResult }>(recordsBase(), {
+          method: 'POST',
+          body: { record: { _key: id, _deleted: true } },
+        });
         return r.result;
       },
       async export(): Promise<RecordResult> {

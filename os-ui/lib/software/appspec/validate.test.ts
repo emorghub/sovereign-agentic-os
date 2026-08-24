@@ -250,12 +250,12 @@ test('an intake-wizard writes to app records — no dataset check, no false issu
   assert.deepEqual(warnings, []);
 });
 
-test('a coming-soon (deferred interactive) pattern (opaque config) validates clean', async () => {
+test('a kanban-workflow pattern with a valid config validates clean', async () => {
   const spec = parse({
     version: 2,
     name: 'App',
     description: 'x',
-    tabs: [{ id: 't1', label: 'Board', body: { kind: 'pattern', pattern: 'kanban-workflow', config: { anything: true } } }],
+    tabs: [{ id: 't1', label: 'Board', body: { kind: 'pattern', pattern: 'kanban-workflow', config: { source: 'records', statusField: 'status', titleField: 'title', columns: [{ value: 'todo', label: 'To Do' }, { value: 'done', label: 'Done' }] } } }],
   });
   const { issues } = await validateAppSpec(app([]), spec, amir);
   assert.deepEqual(issues, []);

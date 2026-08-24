@@ -138,6 +138,9 @@ import type {
   AssignmentConfig,
   IntakeWizardConfig,
   ChartExplorerConfig,
+  EditableGridConfig,
+  KanbanWorkflowConfig,
+  ActionDetailConfig,
 } from '@/lib/software/appspec/patterns.ts';
 import type { AppFunction, AggOp } from '@/lib/software/appspec/functions-schema.ts';
 
@@ -1008,6 +1011,9 @@ function ConfigForm({
     if (pattern === 'landing') return <LandingEditor config={config as LandingConfig} app={app} schemas={schemas} functionIds={functionIds} onConfig={onConfig} />;
     if (pattern === 'intake-wizard') return <WizardEditor config={config as IntakeWizardConfig} onConfig={onConfig} />;
     if (pattern === 'assignment') return <AssignmentEditor config={config as AssignmentConfig} app={app} schemas={schemas} onConfig={onConfig} />;
+    if (pattern === 'editable-grid') return <EditableGridEditor config={config as EditableGridConfig} onConfig={onConfig} />;
+    if (pattern === 'kanban-workflow') return <KanbanWorkflowEditor config={config as KanbanWorkflowConfig} onConfig={onConfig} />;
+    if (pattern === 'action-detail') return <ActionDetailEditor config={config as ActionDetailConfig} onConfig={onConfig} />;
   }
 
   const slots = slotsFor(pattern);
@@ -1718,6 +1724,111 @@ function AssignmentEditor({ config, app, schemas, onConfig }: { config: Assignme
         <div className="sc-slot-label">Extra fields<span className="muted"> (optional)</span></div>
         <div className="hint sc-slot-help">Any extra data to capture with the assignment (e.g. a note or due date).</div>
         <FieldBuilder fields={extras} onChange={(fields) => onConfig({ ...config, ...(fields.length > 0 ? { extraFields: fields } : { extraFields: undefined }) })} />
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------ editable-grid editor ----
+
+const GRID_FIELD_TYPES: FieldType[] = ['text', 'number', 'date', 'boolean'];
+
+function EditableGridEditor({ config, onConfig }: { config: EditableGridConfig; onConfig: (c: PatternConfig) => void }) {
+  const cols = config.columns;
+  const set = (next: typeof cols) => onConfig({ ...config, columns: next });
+  return (
+    <div className="sc-config" style={{ marginTop: 6 }}>
+      <div className="sc-slot">
+        <div className="sc-slot-label">Columns</div>
+        <div className="hint sc-slot-help">Define the fields users can see and edit inline. Data comes from this app's own governed record log.</div>
+        {cols.length === 0 ? <p className="hint">No columns yet — add one below.</p> : null}
+        {cols.map((col, i) => (
+          <div key={i} className="row sc-formfield" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+            <input className="sb-input" placeholder="field_name" value={col.field} onChange={(e) => set(cols.map((x, j) => (j === i ? { ...x, field: e.target.value } : x)))} style={{ width: 130 }} />
+            <input className="sb-input" placeholder="Label (optional)" value={col.label ?? ''} onChange={(e) => set(cols.map((x, j) => (j === i ? { ...x, label: e.target.value || undefined } : x)))} style={{ width: 150 }} />
+            <select className="sb-select" value={col.type} onChange={(e) => set(cols.map((x, j) => (j === i ? { ...x, type: e.target.value as FieldType } : x)))}>
+              {GRID_FIELD_TYPES.map((t) => (<option key={t} value={t}>{t}</option>))}
+            </select>
+            <button type="button" className="sc-mini sc-mini-danger" aria-label="Remove column" title="Remove column" onClick={() => set(cols.filter((_, j) => j !== i))}>×</button>
+          </div>
+        ))}
+        <button type="button" className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => set([...cols, { field: '', type: 'text' }])}>+ Add column</button>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------ kanban-workflow editor ----
+
+function KanbanWorkflowEditor({ config, onConfig }: { config: KanbanWorkflowConfig; onConfig: (c: PatternConfig) => void }) {
+  const cols = config.columns;
+  return (
+    <div className="sc-config" style={{ marginTop: 6 }}>
+      <div className="sc-slot">
+        <div className="sc-slot-label">Status field</div>
+        <div className="hint sc-slot-help">The record field whose value determines which column a card sits in.</div>
+        <input className="sb-input" placeholder="e.g. status" value={config.statusField} onChange={(e) => onConfig({ ...config, statusField: e.target.value })} />
+      </div>
+      <div className="sc-slot">
+        <div className="sc-slot-label">Title field</div>
+        <div className="hint sc-slot-help">The field shown as each card's title.</div>
+        <input className="sb-input" placeholder="e.g. title" value={config.titleField} onChange={(e) => onConfig({ ...config, titleField: e.target.value })} />
+      </div>
+      <div className="sc-slot">
+        <div className="sc-slot-label">Columns</div>
+        <div className="hint sc-slot-help">The status values and their display labels, in order.</div>
+        {cols.length === 0 ? <p className="hint">No columns yet — add one below.</p> : null}
+        {cols.map((col, i) => (
+          <div key={i} className="row sc-formfield" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+            <input className="sb-input" placeholder="value (e.g. todo)" value={col.value} onChange={(e) => onConfig({ ...config, columns: cols.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)) })} style={{ width: 130 }} />
+            <input className="sb-input" placeholder="Label (e.g. To Do)" value={col.label} onChange={(e) => onConfig({ ...config, columns: cols.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)) })} style={{ width: 150 }} />
+            <button type="button" className="sc-mini sc-mini-danger" aria-label="Remove column" title="Remove column" onClick={() => onConfig({ ...config, columns: cols.filter((_, j) => j !== i) })}>×</button>
+          </div>
+        ))}
+        <button type="button" className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => onConfig({ ...config, columns: [...cols, { value: '', label: '' }] })}>+ Add column</button>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------ action-detail editor ----
+
+function ActionDetailEditor({ config, onConfig }: { config: ActionDetailConfig; onConfig: (c: PatternConfig) => void }) {
+  const fields = config.fields;
+  const actions = config.actions;
+  return (
+    <div className="sc-config" style={{ marginTop: 6 }}>
+      <div className="sc-slot">
+        <div className="sc-slot-label">Title field</div>
+        <div className="hint sc-slot-help">The record field used to label each record in the picker.</div>
+        <input className="sb-input" placeholder="e.g. title" value={config.titleField} onChange={(e) => onConfig({ ...config, titleField: e.target.value })} />
+      </div>
+      <div className="sc-slot">
+        <div className="sc-slot-label">Fields to display</div>
+        <div className="hint sc-slot-help">The fields shown in the detail panel for the selected record.</div>
+        {fields.length === 0 ? <p className="hint">No fields yet — add one below.</p> : null}
+        {fields.map((f, i) => (
+          <div key={i} className="row sc-formfield" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+            <input className="sb-input" placeholder="field_name" value={f.field} onChange={(e) => onConfig({ ...config, fields: fields.map((x, j) => (j === i ? { ...x, field: e.target.value } : x)) })} style={{ width: 130 }} />
+            <input className="sb-input" placeholder="Label (optional)" value={f.label ?? ''} onChange={(e) => onConfig({ ...config, fields: fields.map((x, j) => (j === i ? { ...x, label: e.target.value || undefined } : x)) })} style={{ width: 150 }} />
+            <button type="button" className="sc-mini sc-mini-danger" aria-label="Remove field" title="Remove field" onClick={() => onConfig({ ...config, fields: fields.filter((_, j) => j !== i) })}>×</button>
+          </div>
+        ))}
+        <button type="button" className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => onConfig({ ...config, fields: [...fields, { field: '' }] })}>+ Add field</button>
+      </div>
+      <div className="sc-slot">
+        <div className="sc-slot-label">Actions</div>
+        <div className="hint sc-slot-help">Buttons that set a field to a fixed value when clicked (e.g. Approve sets status → approved).</div>
+        {actions.length === 0 ? <p className="hint">No actions yet — add one below.</p> : null}
+        {actions.map((a, i) => (
+          <div key={i} className="row sc-formfield" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+            <input className="sb-input" placeholder="Button label" value={a.label} onChange={(e) => onConfig({ ...config, actions: actions.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)) })} style={{ width: 120 }} />
+            <input className="sb-input" placeholder="Field to set" value={a.setField} onChange={(e) => onConfig({ ...config, actions: actions.map((x, j) => (j === i ? { ...x, setField: e.target.value } : x)) })} style={{ width: 120 }} />
+            <input className="sb-input" placeholder="Value to write" value={a.setValue} onChange={(e) => onConfig({ ...config, actions: actions.map((x, j) => (j === i ? { ...x, setValue: e.target.value } : x)) })} style={{ width: 120 }} />
+            <button type="button" className="sc-mini sc-mini-danger" aria-label="Remove action" title="Remove action" onClick={() => onConfig({ ...config, actions: actions.filter((_, j) => j !== i) })}>×</button>
+          </div>
+        ))}
+        <button type="button" className="btn ghost sm" style={{ marginTop: 8 }} onClick={() => onConfig({ ...config, actions: [...actions, { label: '', setField: '', setValue: '' }] })}>+ Add action</button>
       </div>
     </div>
   );
