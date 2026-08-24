@@ -2,7 +2,7 @@
 title: "Sovereign Agentic OS"
 subtitle: "The governed, EU-sovereign operating system for data, knowledge, agents and software — where AI gets real, safe hands on your work."
 author: "Orchestrated by Data Masterclass · datamasterclass.com · www.sovereign-agentic.com"
-date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.158) · generated {{DATE}} from commit {{GIT_COMMIT}}"
+date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.162) · generated {{DATE}} from commit {{GIT_COMMIT}}"
 titlepage: true
 titlepage-rule-color: "c8a24a"
 toc: true
@@ -225,10 +225,12 @@ there.
 
 ## Entry
 
-- **Home — the golden-path launcher.** The warm front door after you pick a domain. An
-  illustrated launcher of the golden paths (Data, Knowledge, Agents, Software, Science,
-  Metrics, Dashboards, Big Bets, Marketplace, Connections), each card with a role-aware
-  action. It *only* orients and routes — the live view lives one click away in Cockpit.
+- **Home — the golden-path launcher.** The warm front door after you pick a domain. It opens
+  with **Talk to the OS** — *"What do you want to build or do today?"* — type an intent and the
+  one governed **Ask the OS** assistant opens already working on it. Below sits an illustrated
+  launcher of the golden paths (Data, Knowledge, Agents, Software, Science, Metrics, Dashboards,
+  Big Bets, Marketplace, Connections), each card with a role-aware action. It *only* orients and
+  routes — the live view lives one click away in Cockpit.
 - **Cockpit — what's moving, what needs you.** A persona-ordered live overview: a pulse strip
   (*Needs you · In progress · Your items · Spend* vs. cap), your work-in-progress, and a
   scannable "top items, by type" board. Cockpit *reads and routes* — it never recomputes
@@ -253,11 +255,12 @@ there.
   Model*, each a fixed set of sections — **General · Strategy · Business · Organization ·
   Architecture · Data · Glossary** — governed per scope (My = owner, Domain = domain_admin+,
   Company = admin). It's the durable, structured backbone agents can be granted as context.
-- **Workflows — the process spine.** A **workflow** per business process (ordered steps ·
+- **Business Workflows — the process spine.** A **workflow** per business process (ordered steps ·
   business rules · expert knowledge, each step owned by a Human / Software / Agent / external
   actor), retrievable and grantable to agents — with a **Data & Metrics** tab that links the
   governed datasets and KPIs the process runs on, each a scope-badged chip deep-linking to the
-  real artifact.
+  real artifact. Your **My** list shows only your own drafts (a colleague's personal draft never
+  clutters it); promote to Domain to share.
 - **MCP** *(Builder+)* — the setup surface for connecting external AI clients over MCP.
 - **Tutorials.** An illustrated, hands-on tutorial for every tab — fourteen today, each kept
   in step with its tab's current journey — reached from Home or a tab header, that can
@@ -267,8 +270,10 @@ there.
 
 - **Knowledge — the domain's captured know-how.** Human-authored reference knowledge, made
   retrievable by a knowledge agent behind document-level security. Mark a decision rule **hard**
-  and it compiles into an OPA guardrail. (The structured backbone — Operating Model, Strategy,
-  Big Bets, Workflows — lives in the Plan section; Knowledge is the reference library.)
+  and it compiles into an OPA guardrail. **New knowledge** creates a note directly (the Knowledge
+  tab is notes only; business processes live in Business Workflows). (The structured backbone —
+  Operating Model, Strategy, Big Bets, Business Workflows — lives in the Plan section; Knowledge is
+  the reference library.)
 - **Files — a calm governed drive.** Any unstructured file — documents, images, audio, video —
   added via **＋ New** (**Upload a file** or **New note (markdown)** written in place) and
   auto-indexed (parse → embed → hybrid OpenSearch) so agents can search and cite it. Opening a
