@@ -312,7 +312,13 @@ export function listWorkflows(user: Principal, opts: { includeArchived?: boolean
       marketplace.push(summarise(rec));
     } else if (rec.visibility === 'Shared') {
       domain.push(summarise(rec));
-    } else {
+    } else if (rec.owner === user.id) {
+      // "My" (Personal tier) is OWNER-ONLY in the LIST. A Builder+ may still VIEW a
+      // same-domain colleague's Personal draft by direct link (canView) or through agent
+      // retrieval/DLS (instructor stewardship) — but another person's Personal workflow
+      // belongs to none of My/Domain/Company, so it must not surface in this list. Without
+      // this, once every cohort participant is a Builder, everyone saw everyone's personal
+      // business processes under "My".
       mine.push(summarise(rec));
     }
   }

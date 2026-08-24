@@ -143,6 +143,37 @@ function tabPurpose(tab: McpTab): string {
 }
 
 /**
+ * The GRANT-SCOPED context brief: the EXACT governed resource ids the system may use, per
+ * kind, built straight from `system.grants` (by run time these are concrete ids — folder
+ * grants are already expanded upstream by `resolveFolderGrantsForRun`). It is the data-plane
+ * counterpart to {@link grantedToolBrief}: the tool brief says which TOOLS you may call, this
+ * says which RESOURCES you may pass them. Empty ⇒ '' (contributes nothing). Ids only (no
+ * names/columns — the agent resolves those via its granted get_* discovery companion).
+ */
+function grantedContextBrief(sys: System): string {
+  const g = sys.grants;
+  const rows: string[] = [];
+  const add = (label: string, items: { id?: string }[] | undefined) => {
+    const ids = (items ?? []).map((i) => i.id).filter((id): id is string => !!id && id.length > 0);
+    if (ids.length > 0) rows.push(`- ${label}: ${ids.join(', ')}`);
+  };
+  add('datasets', g.data);
+  add('knowledge', g.knowledge);
+  add('files', g.files);
+  add('metrics', g.metrics);
+  add('connections', g.connections);
+  add('plan (pillars / bets / operating-manual)', g.plan);
+  if (rows.length === 0) return '';
+  return [
+    'These are the ONLY governed resources you may act on. A discovery/list tool may return',
+    'OTHER ids that exist in the domain — you are NOT authorized to use them and any action on',
+    'them is DENIED. Use ONLY the ids below (resolve their schema with your granted get_* tool):',
+    '',
+    ...rows,
+  ].join('\n');
+}
+
+/**
  * The preamble for a general agentic-os team: OS rules + a tool-free PURPOSE line for
  * each tab the grants touch + the GRANT-SCOPED tool brief (exactly the tools this
  * system may call — {@link grantedToolBrief}). It deliberately does NOT inject the
@@ -161,6 +192,14 @@ export function osPreamble(user: CurrentUser, sys: System): string {
   if (purposes.length > 0) {
     parts.push('', '--- WORKSPACE (the OS areas your grants touch) ---', ...purposes.map((p) => `- ${p}`));
   }
+  // GRANTED CONTEXT — the EXACT resource ids this system may touch. A discovery tool
+  // (list_datasets/list_knowledge/…) runs as the human owner and can surface OTHER items
+  // in the domain the system was NOT granted; calling an action tool on one of those is
+  // DENIED by OPA. Naming the authorized ids here — the data-plane counterpart to the
+  // grant-scoped tool brief — stops the model wandering onto ungranted context and then
+  // hitting a denial. Fail-open on shape: absent grants contribute nothing.
+  const ctx = grantedContextBrief(sys);
+  if (ctx) parts.push('', '--- YOUR GRANTED CONTEXT (the ONLY resource ids you may use) ---', ctx);
   parts.push('', '--- YOUR GRANTED TOOLS (your complete, authoritative toolset) ---', grantedToolBrief(user, sys));
   // The build spec names `create_software` as its entry point — inject it only when
   // that tool is genuinely granted, so it never advertises an ungranted capability.

@@ -13,6 +13,30 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.161 — Workflows "My" isolation, Knowledge-tab simplification, tab rename, + two grounding fixes
+
+- **Business Workflows — "My" is owner-only.** The workflow list bucketed by visibility, and
+  `canView` lets any Builder+ see a same-domain colleague's *Personal* draft — so once every cohort
+  participant is a Builder, everyone saw everyone's personal processes under **My**. The list's My
+  bucket is now **owner-scoped**; a colleague's Personal draft is no longer surfaced there (a Builder
+  can still open one by direct link, and agent-retrieval/DLS stewardship is unchanged).
+- **Knowledge tab — "New knowledge" creates a note directly.** Removed the General-vs-Workflow type
+  chooser: the Knowledge tab is only knowledge now, so **New knowledge** opens a note straight in the
+  editor. (Workflows are authored on their own tab.)
+- **Tab rename:** **Business Processes → Business Workflows** (nav label, page header, back buttons,
+  agent context picker, MCP nav orientation, tutorials).
+- **Software Generate — column discipline + more repair turns.** The reasoning model was substituting
+  conventional columns (`status`/`priority`/`description`/`attachments`) for a dataset's real ones,
+  failing validation. The prompt now forbids assuming conventional columns (map to the closest real
+  one, or omit the field), and generation does up to **3 attempts (2 repair turns)** re-seeded with
+  the exact valid columns — so it converges on real schemas instead of dead-ending.
+- **Agents — granted-context grounding in the run preamble.** An agent granted an action tool auto-gets
+  discovery companions (`list_datasets` …) that run as the human owner and can surface *ungranted*
+  domain items — which the model then tried to use (OPA-denied). The run preamble now names the
+  system's **exact granted resource ids** with an explicit "these are the ONLY resources you may use;
+  a discovery tool may surface others — you are not authorized to use them" rule (the data-plane
+  counterpart to the grant-scoped tool brief).
+
 ### os-ui 0.6.160 — Tutorials refreshed for 0.6.158 + a "Talk to the OS" front door on Home
 
 - **Tutorials:** the Software tutorial (step + walkthrough) now covers the 0.6.158 behaviour — Build

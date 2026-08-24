@@ -140,6 +140,12 @@ export function buildGeneratePrompt(m: GenerateMaterial): GeneratePrompt {
     '   catalogue below, or you omit it. NEVER invent a pattern id.',
     '3. Reference ONLY the datasetIds, metricIds and columns listed in the brief. NEVER invent a',
     '   dataset id, metric id, agent id, or a column name — use the exact real column names given.',
+    '   The datasets are REAL and may NOT have the fields you expect: do NOT assume a conventional',
+    '   column like status, priority, description, created_at, updated_at, attachments, title or',
+    '   assignee exists. Map each story concept to the CLOSEST real column that IS listed (e.g. a',
+    '   "status" concept might map to a real `resolved` or `case_type` column); if NO listed column',
+    '   fits, OMIT that field entirely. A smaller tab wired to real columns beats an invalid one —',
+    '   an invented column fails validation and wastes the whole app.',
     '4. Link each tab to the story it satisfies via "stories":[{ "epicId","storyId" }] using the',
     '   exact ids from the brief.',
     '5. Prefer 2–6 focused tabs. Give each a short "label" and, when natural, an emoji "icon".',
@@ -213,5 +219,10 @@ export function repairInstruction(issues: SpecIssue[]): string {
     'Your previous JSON was rejected. Fix EXACTLY these issues and return the corrected JSON AppSpec',
     '(one JSON object, no prose). Do not introduce new datasetIds, metricIds or columns:',
     lines,
+    '',
+    'Each "use one of: …" note lists the ONLY real columns of that dataset. Replace every rejected',
+    'column with one from its list, or if NONE fits the field\'s intent, DELETE that field/column',
+    'entirely (a valid tab with fewer fields is required; an invented column is not acceptable). Do',
+    'NOT re-use any column name that was just rejected.',
   ].join('\n');
 }

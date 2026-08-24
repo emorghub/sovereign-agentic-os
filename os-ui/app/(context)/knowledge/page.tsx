@@ -4,7 +4,7 @@
 'use client';
 
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import PageHeader from '@/components/PageHeader';
 import Markdown from '@/components/Markdown';
 import { roleAtLeast, type Role } from '@/lib/core/session';
@@ -66,7 +66,6 @@ export default function KnowledgePage() {
 
 function KnowledgePageInner() {
   const searchParams = useSearchParams();
-  const router = useRouter();
   const { notifyApprovalFiled } = useApprovalNotifier();
   const confirm = useConfirm();
   // Clicking the Knowledge sidebar link returns to this page root (and closes any open detail).
@@ -88,8 +87,6 @@ function KnowledgePageInner() {
   const [pkPromoting, setPkPromoting] = useState(false);
   const [confirmDemoteId, setConfirmDemoteId] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
-  // "＋ New knowledge" type chooser (General knowledge · Workflow); null = closed.
-  const [chooserOpen, setChooserOpen] = useState(false);
 
   // Folder navigation state for "My knowledge"
   const [pkFolder, setPkFolder] = useState<string>('/');
@@ -209,7 +206,6 @@ function KnowledgePageInner() {
       });
       const d = await res.json();
       if (!res.ok) { setPkMsg(d.error ?? 'Could not create.'); return; }
-      setChooserOpen(false);
       await loadPersonal();
       // A NEW entry opens DIRECTLY in Edit (the OS-wide artifact model).
       setPkOpenId(d.id);
@@ -454,7 +450,7 @@ function KnowledgePageInner() {
           <p className="lead" style={{ margin: 0, maxWidth: 720 }}>
             Reference knowledge (markdown) that grounds your agents.
           </p>
-          <button className="btn" onClick={() => { setPkMsg(''); setChooserOpen(true); }}>＋ New knowledge</button>
+          <button className="btn" onClick={() => { setPkMsg(''); setKScope('mine'); void createPersonal(); }} disabled={pkCreating}>{pkCreating ? <span className="spin" /> : '＋ New knowledge'}</button>
         </div>
 
         {/* Scope switcher — the OS-wide four groups. */}
@@ -613,48 +609,6 @@ function KnowledgePageInner() {
         </>)}
       </div>
 
-      {/* ＋ New knowledge — the OS-wide TYPE chooser. General knowledge is authored
-          here; a Workflow (business process) is authored on its own tab, which already
-          carries the full steps/rules/swimlane editor + PDF export. */}
-      {chooserOpen ? (
-        <div className="k-chooser-backdrop" role="dialog" aria-modal="true" aria-label="New knowledge" onClick={() => setChooserOpen(false)}>
-          <div className="k-chooser" onClick={(ev) => ev.stopPropagation()}>
-            <div className="k-chooser-head">
-              <span className="k-chooser-title">New knowledge</span>
-              <button className="btn ghost sm" onClick={() => setChooserOpen(false)}>✕</button>
-            </div>
-            <p className="hint" style={{ marginTop: 0 }}>What kind of knowledge do you want to add?</p>
-
-            <button
-              type="button"
-              className="k-chooser-option"
-              onClick={() => { setKScope('mine'); void createPersonal(); }}
-              disabled={pkCreating}
-            >
-              <span className="k-chooser-option-title">{pkCreating ? <span className="spin" /> : 'General knowledge'}</span>
-              <span className="k-chooser-option-desc">
-                A free-form markdown note — how you work, key contacts, context.
-              </span>
-            </button>
-
-            <button
-              type="button"
-              className="k-chooser-option"
-              onClick={() => { setChooserOpen(false); router.push('/workflows'); }}
-            >
-              <span className="k-chooser-option-title">Workflow →</span>
-              <span className="k-chooser-option-desc">
-                A business process — steps, rules and expert knowledge. Authored on the <strong>Business Processes</strong> tab.
-              </span>
-            </button>
-
-            {pkCreating ? null : (
-              <div className="hint" style={{ marginTop: 4 }}>General knowledge opens straight in the editor.</div>
-            )}
-          </div>
-        </div>
-      ) : null}
-
       {/* Folder picker modal — used by the "Move…" button on any knowledge entry. */}
       <FolderPickerModal
         open={pkMoveId !== null}
@@ -772,57 +726,4 @@ const KnowledgeStyles = `
   background: var(--panel);
 }
 
-/* ＋ New knowledge — the type chooser (General knowledge · Workflow). */
-.k-chooser-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  z-index: 60;
-}
-.k-chooser {
-  width: min(460px, 100%);
-  background: var(--panel);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  padding: 20px 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.35);
-}
-.k-chooser-head { display: flex; align-items: center; justify-content: space-between; }
-.k-chooser-title {
-  font-family: var(--font-head);
-  font-weight: 600;
-  font-size: 16px;
-  letter-spacing: 0.3px;
-}
-.k-chooser-option {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  text-align: left;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-input);
-  color: var(--text);
-  cursor: pointer;
-  transition: border-color 0.14s, box-shadow 0.14s;
-}
-.k-chooser-option:hover:not(:disabled) {
-  border-color: var(--gold-line);
-  box-shadow: 0 0 0 1px var(--gold-line);
-}
-.k-chooser-option:disabled { opacity: 0.7; cursor: default; }
-.k-chooser-option-title {
-  font-family: var(--font-head);
-  font-weight: 600;
-  font-size: 14px;
-}
-.k-chooser-option-desc { font-size: 12.5px; line-height: 1.5; color: var(--text-muted); }
 `;
