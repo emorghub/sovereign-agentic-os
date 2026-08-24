@@ -1019,14 +1019,43 @@ function withStatus(err: Error, status: number): Error {
 
 // Shared durable-mirror core (probe → bootstrap-on-404 → hydrate/write-through):
 // lib/os-mirror.ts. A missing index is CREATED, never mistaken for a dead mirror.
-const mirror = osMirror({ index: config.appsIndex });
+// Fresh-index safety: a brand-new os-apps index is created with `dynamic:false` and a raised
+// field-count limit. An app doc carries arbitrary, wildly-varying spec JSON (cookbook-pattern
+// configs), which under OpenSearch's DEFAULT dynamic mapping either explodes the 1000-field
+// limit or type-conflicts across apps — the PUT is then rejected and a fully-built PUBLISHED app
+// silently fails to persist (it "disappears" on the next pod roll). `dynamic:false` stores every
+// field in `_source` (so retrieval is unaffected — we only GET-by-id and match_all) without
+// indexing arbitrary sub-fields. NOTE: this only applies when the index is first CREATED; an
+// existing index is fixed by the spec/draftSpec string-persist below, which needs no reindex.
+const mirror = osMirror({
+  index: config.appsIndex,
+  createBody: { settings: { 'index.mapping.total_fields.limit': 4000 }, mappings: { dynamic: false } },
+});
 
 // Durable, per-artifact version history. Snapshots the user-editable doc content
 // (designDecisions, dataDescriptions, docs) before each meaningful mutation.
 const versions = versionLog('app');
 
+/**
+ * The doc actually persisted to the mirror. The app's two BIG, ARBITRARY-SHAPE fields —
+ * `spec` and `draftSpec` (cookbook-pattern configs whose keys/types vary per app) — are
+ * serialized to JSON STRINGS (`specJson` / `draftSpecJson`) and the object fields dropped, so
+ * OpenSearch maps them as ONE text field each instead of dynamically mapping every nested key.
+ * That is what stops the field-limit blowout / type-conflict that made a fully-built PUBLISHED
+ * app fail to write and vanish. It also works on the EXISTING index (new field names never
+ * clash with the old `spec` OBJECT mapping). `hydrateAppDoc` reverses it (parses the strings
+ * back, with legacy-object fallback). Nothing else about the doc changes.
+ */
+function toPersistedDoc(a: App): Record<string, unknown> {
+  const { spec, draftSpec, ...rest } = a as App & { spec?: unknown; draftSpec?: unknown };
+  const doc: Record<string, unknown> = { ...rest };
+  if (spec !== undefined) doc.specJson = JSON.stringify(spec);
+  if (draftSpec !== undefined) doc.draftSpecJson = JSON.stringify(draftSpec);
+  return doc;
+}
+
 function writeThrough(a: App): void {
-  mirror.writeThrough(a.id, a);
+  mirror.writeThrough(a.id, toPersistedDoc(a));
 }
 
 /** The versioned slice of an app — the user-editable documentation fields. */
@@ -1070,6 +1099,20 @@ export function normalizeAppMembers(raw: unknown, owner: string): AppMember[] {
  *  persisted app doc needs on load. Shared by the bulk hydrate AND the by-id mirror
  *  fallback so both paths yield an identical, ready-to-use App. */
 function hydrateAppDoc(app: App): App {
+  // Reverse toPersistedDoc: the spec/draftSpec are stored as JSON STRINGS (specJson /
+  // draftSpecJson) so OpenSearch never dynamic-maps their arbitrary sub-fields. Parse them back
+  // into the object fields the app model uses. Legacy docs (persisted as the raw `spec`/`draftSpec`
+  // OBJECT, pre-0.6.164) have no *Json field and fall through unchanged. A corrupt string is
+  // ignored (leave the field undefined) rather than throwing away the whole app.
+  const raw = app as App & { specJson?: unknown; draftSpecJson?: unknown };
+  if (typeof raw.specJson === 'string') {
+    try { app.spec = JSON.parse(raw.specJson); } catch { /* leave spec as-is */ }
+    delete raw.specJson;
+  }
+  if (typeof raw.draftSpecJson === 'string') {
+    try { app.draftSpec = JSON.parse(raw.draftSpecJson); } catch { /* leave draftSpec as-is */ }
+    delete raw.draftSpecJson;
+  }
   // Back-compat: apps persisted before surface-detection get one inferred from
   // their scaffold (a persisted declaration still wins over the heuristic).
   if (!app.surface) {

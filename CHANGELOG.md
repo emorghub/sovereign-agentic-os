@@ -13,6 +13,48 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.164 — Fix: a fully-built, published Software app vanishes after a pod restart
+
+**Root cause (persistence, not the publish path).** A published app was correctly kept in the
+in-process cache and correctly *sent* to the OpenSearch mirror — but the mirror write was being
+**silently rejected**, so the app never became durable and was gone on the next pod restart. The
+app doc carries two big, arbitrary-shape fields — `spec` and `draftSpec` (the declarative cookbook
+config, whose nested keys and types vary per app). The `os-apps` index used **default dynamic
+mappings**, so every app added its own sub-fields; across apps this hit the 1000-field limit and/or
+produced a cross-doc type conflict, and OpenSearch **rejected the PUT**. Publishing writes the
+largest spec of an app's life, which is why the loss showed up *specifically* once an app was fully
+built and published.
+
+- **Persist the variable fields as opaque JSON strings.** `spec`/`draftSpec` now serialize to
+  `specJson`/`draftSpecJson` (one text field each) on write and parse back on hydrate — OpenSearch
+  never dynamic-maps their internals, so no field-limit blowout and no type conflict. Legacy docs
+  (stored as the raw objects) still hydrate via a fallback; a corrupt string is skipped, not fatal.
+- **Heal the existing index.** On the first healthy probe, the mirror idempotently reconciles the
+  two live-updatable settings on the *already-created* `os-apps` index — raises
+  `index.mapping.total_fields.limit` to 4000 and sets mapping `dynamic:false` — so the fix takes
+  effect without a reindex. A freshly-created index gets the same via `createBody`.
+- No behaviour change for callers; `setAppSpec`/`publishApp` are unchanged.
+
+Carries all of 0.6.163.
+
+### os-ui 0.6.163 — Connectors marked "under construction" (honest preview) across UI, MCP + docs
+
+The external connectors are not yet end-to-end tested, so the OS now says so plainly everywhere they
+surface — no false "ready" signal:
+
+- **Connections gallery (UI):** every connector tile's corner badge changed from a teal **"ready"**
+  to an amber **"under construction"**, and a gallery-wide banner up top sets the expectation —
+  *"Connectors are under construction. Every connector is a preview that hasn't been end-to-end
+  tested yet — configure and explore, but don't rely on them in production until verified."*
+- **MCP:** `list_connection_templates` and `create_connection` now open with an explicit
+  UNDER CONSTRUCTION (PREVIEW) note instructing the agent to tell the user connectors are untested
+  and shouldn't be relied on in production.
+- **Docs:** the OS Guide's Connections section, the MCP-facing `connections.guide.md`, and the
+  Connections tutorial all carry the under-construction/preview caveat. OS Guide PDF regenerated.
+
+Creating/testing a connector is still allowed (so they *can* be exercised and verified) — this is an
+honesty label, not a hard gate.
+
 ### os-ui 0.6.162 — Software apps no longer disappear after a mirror hiccup (cache null-poison fix)
 
 **Root cause of "apps disappear after being created":** the app registry's bulk-hydrate did

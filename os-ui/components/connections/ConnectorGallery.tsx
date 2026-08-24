@@ -117,6 +117,18 @@ export default function ConnectorGallery({
 
   return (
     <>
+      {/* Under-construction notice — every connector is a PREVIEW that has not been end-to-end
+          tested yet, so the tiles carry a "under construction" badge and this banner sets the
+          expectation up front. Configure and explore, but do not rely on them in production. */}
+      <div className="conn-wip-banner" role="note">
+        <span className="conn-wip-banner-ico" aria-hidden="true">🚧</span>
+        <span className="conn-wip-banner-text">
+          <strong>Connectors are under construction.</strong> Every connector below is a preview
+          that hasn’t been end-to-end tested yet — you can configure and explore them, but don’t
+          rely on them in production until they’re verified.
+        </span>
+      </div>
+
       {/* Search bar + stack jump-links */}
       <div style={{ marginBottom: 22 }}>
         <div className="conn-search">
@@ -183,7 +195,7 @@ export default function ConnectorGallery({
                     const id = connectorIdentity(c.identityKey, { platform: c.platform, label: c.label, fallbackValue: c.blurb });
                     return (
                       <div className="conn-tile" key={c.key} style={markStyle(id.accent) as CSSProperties}>
-                        <span className="conn-tile-ready" aria-hidden="true"><span className="dot" />ready</span>
+                        <span className="conn-tile-wip" title="This connector is under construction — not yet tested"><span className="dot" />under construction</span>
                         <div className="conn-tile-top">
                           <span className="conn-mono" aria-hidden="true">{id.monogram}</span>
                           <div className="conn-tile-heading">

@@ -2,7 +2,7 @@
 title: "Sovereign Agentic OS"
 subtitle: "The governed, EU-sovereign operating system for data, knowledge, agents and software — where AI gets real, safe hands on your work."
 author: "Orchestrated by Data Masterclass · datamasterclass.com · www.sovereign-agentic.com"
-date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.162) · generated {{DATE}} from commit {{GIT_COMMIT}}"
+date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.164) · generated {{DATE}} from commit {{GIT_COMMIT}}"
 titlepage: true
 titlepage-rule-color: "c8a24a"
 toc: true
@@ -345,7 +345,10 @@ there.
 - **Connections — governed bridges to outside systems.** A Connection is `credentials +
   endpoint + a set of governed tools`, never a raw pipe — used to bring data in and to expose
   external APIs/MCPs as tools. You grant **use**, never the token; **reads are automatic, writes
-  are approval-gated** (destructive ops blocked), and secrets are write-only. The Supported
+  are approval-gated** (destructive ops blocked), and secrets are write-only. **⚠️ The connectors
+  are currently *under construction*: every one is a preview that has not been end-to-end tested
+  yet — each gallery tile carries an "under construction" badge and the gallery a banner. Configure
+  and explore them, but don't rely on a connector in production until it's verified.** The Supported
   Connectors gallery is **grouped by vendor stack** (Microsoft · Google · AWS · Databricks ·
   Snowflake · Salesforce · Kajabi · Atlassian · Open source · Other) and searchable. When nothing in the
   gallery fits, a **Custom Connector** lets you add your own **REST/GraphQL API** or **MCP
