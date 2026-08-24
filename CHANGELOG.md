@@ -13,6 +13,22 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.159 — MCP + documentation alignment for the 0.6.158 fixes
+
+Docs-and-guidance only (no behaviour change). Brings the MCP tool descriptions, the MCP-facing
+Software guide and the end-user OS Guide into line with what 0.6.158 changed:
+
+- **`generate_app_spec` (MCP):** its failure `{ ok:false, issues[] }` is now documented as the SAME
+  machine-actionable `{ path, reason, fix }` the validator emits — "act on the issues and retry,
+  never dead-end; bind an EXISTING granted dataset before assuming a new one must be created."
+- **Software MCP guide (`software.guide.md`):** the Design + Choose Context step now says explicitly
+  "reuse before you create — `list_datasets` first and BIND an existing dataset that fits; only
+  create a new one when nothing suitable exists."
+- **OS Guide (MD + regenerated PDF):** Build App documents that an auto-generate that can't validate
+  lists the exact `{path,reason,fix}` blockers inline (never a note-less dead-end); Choose Context
+  documents that the assistant reuses an existing dataset before proposing a new one. Version stamp
+  bumped to os-ui 0.6.158.
+
 ### os-ui 0.6.158 — Software "Generate my app" legibility + Agents grounded auto-propose
 
 Two live-blocker UX fixes.

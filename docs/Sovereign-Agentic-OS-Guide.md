@@ -2,7 +2,7 @@
 title: "Sovereign Agentic OS"
 subtitle: "The governed, EU-sovereign operating system for data, knowledge, agents and software — where AI gets real, safe hands on your work."
 author: "Orchestrated by Data Masterclass · datamasterclass.com · www.sovereign-agentic.com"
-date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.156) · generated {{DATE}} from commit {{GIT_COMMIT}}"
+date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.158) · generated {{DATE}} from commit {{GIT_COMMIT}}"
 titlepage: true
 titlepage-rule-color: "c8a24a"
 toc: true
@@ -477,11 +477,18 @@ honestly rather than inventing an answer when retrieval comes back empty.
     Metrics · Files · Knowledge · Agents · Connections** — by reference, never by copying and never
     with raw credentials. Per type you can **use existing** (pick governed artifacts you're
     entitled to and grant them) or **create new** — a fresh, possibly-empty dataset / file /
-    knowledge is created for you in an **"App «Name»"** folder, granted, and ready to fill. A tab
-    can only read a dataset the app was granted; anything else is a blocking validation issue.
+    knowledge is created for you in an **"App «Name»"** folder, granted, and ready to fill. The
+    assistant **reuses before it creates**: it sees the governed data you already have and offers to
+    **bind an existing dataset** whenever one fits, rather than spinning up a duplicate — a new one
+    is proposed only when nothing suitable exists. A tab can only read a dataset the app was granted;
+    anything else is a blocking validation issue.
   - **Build App — it builds itself, then you refine by chat.** Open **Build App** and the OS
     **auto-generates the whole app** from your epics, user stories and granted data — a validated
-    spec of pattern tabs wired to real columns. From there you **refine with the built-in chat
+    spec of pattern tabs wired to real columns. If it *can't* produce a valid app, it never
+    dead-ends: it lists the **exact blockers to fix** inline — the same machine-actionable
+    `{ path, reason, fix }` issues the validator emits (e.g. *"dataset … is not granted — grant it
+    in Choose Context"* or *"column … not in the dataset — use one of …"*) — so you know precisely
+    what to grant or adjust, then Generate again. From there you **refine with the built-in chat
     assistant**: it explains what's built, and you say *"make Orders a kanban by status"* or
     *"add a KPI tab for total revenue"* — it applies the change *directly*, schema- and
     governance-validated, and the live preview updates (an instruction it can't satisfy changes
