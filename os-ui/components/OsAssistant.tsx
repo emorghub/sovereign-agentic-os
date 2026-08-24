@@ -121,6 +121,20 @@ export default function OsAssistant() {
     [loading, messages, pathname, page],
   );
 
+  // OPEN-FROM-ANYWHERE bridge: other surfaces (e.g. the Home "Talk to the OS" hero) open this one
+  // GLOBAL assistant by dispatching `os-assistant:open`, optionally seeding a prompt to send at once.
+  // This keeps ONE assistant instance (no duplicate drawer/state) while letting Home feel like a
+  // dedicated entry point.
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const prompt = (e as CustomEvent<{ prompt?: string }>).detail?.prompt?.trim();
+      setOpen(true);
+      if (prompt) void send(prompt);
+    };
+    window.addEventListener('os-assistant:open', onOpen as EventListener);
+    return () => window.removeEventListener('os-assistant:open', onOpen as EventListener);
+  }, [send]);
+
   // The assistant acts AS the signed-in user; hide the surface when signed out.
   if (!user) return null;
 

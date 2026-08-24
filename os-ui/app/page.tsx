@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { currentUser } from '@/lib/core/auth';
 import { homeFeed } from '@/lib/home/feed';
 import HomeLauncher from '@/components/home/HomeLauncher';
+import HomeTalkToOs from '@/components/home/HomeTalkToOs';
 import McpDrawer from '@/components/McpDrawer';
 
 export const dynamic = 'force-dynamic';
@@ -68,6 +69,10 @@ export default async function HomePage() {
       </header>
 
       <div className="content home-content">
+        {/* Talk to the OS — the front-door assistant entry: type intent, it opens the one global
+            OS Assistant already answering. */}
+        <HomeTalkToOs />
+
         {/* MCP connect CTA — prominent invite to drive the OS from Claude/ChatGPT */}
         <div className="mcp-cta-banner">
           <div className="mcp-cta-banner-text">

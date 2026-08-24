@@ -36,12 +36,12 @@ const software: TutorialDef = {
     {
       illustration: 'document',
       title: 'Choose Context — grant the six types',
-      body: 'Bind the governed context the app may use — Data · Metrics · Files · Knowledge · Agents · Connections — by reference, never raw credentials. Per type: "use existing" (pick governed artifacts you\'re entitled to and grant them) or "create new" (a fresh, possibly-empty dataset/file/knowledge is created in an "App «Name»" folder, granted, and ready to fill). Intelligence enters only as a granted agent; connections are mediated, never held as credentials. A tab can only read what the app was granted.',
+      body: 'Bind the governed context the app may use — Data · Metrics · Files · Knowledge · Agents · Connections — by reference, never raw credentials. Per type: "use existing" (pick governed artifacts you\'re entitled to and grant them) or "create new" (a fresh, possibly-empty dataset/file/knowledge is created in an "App «Name»" folder, granted, and ready to fill). The assistant reuses before it creates — it offers to bind a dataset you already have whenever one fits, rather than spinning up a duplicate. Intelligence enters only as a granted agent; connections are mediated, never held as credentials. A tab can only read what the app was granted.',
     },
     {
       illustration: 'agent',
       title: 'Build App — it builds itself, then you refine',
-      body: 'Open Build App and the OS auto-generates the whole app from your epics, user stories and granted data — a validated spec of cookbook-pattern tabs wired to your real columns. Refine with the chat assistant: it explains what\'s built, and you say "make Orders a kanban by status" or "add a KPI tab for total revenue" — it applies the change directly, schema- and governance-validated, and the live preview updates (an impossible instruction changes nothing and is explained). You can also edit any pattern by hand. Two grouped, confirm-gated controls: "Reset based on Design" and "Start from blank". There is no Save button — every change autosaves as a draft, so the app always shows in your tiles as "Draft".',
+      body: 'Open Build App and the OS auto-generates the whole app from your epics, user stories and granted data — a validated spec of cookbook-pattern tabs wired to your real columns. If it can\'t produce a valid app it never dead-ends: it lists the exact blockers to fix inline — the same { path, reason, fix } notes the validator emits ("dataset … is not granted — grant it in Choose Context", "column … not in the dataset — use one of …") — so you know precisely what to grant or adjust, then Generate again. Refine with the chat assistant: it explains what\'s built, and you say "make Orders a kanban by status" or "add a KPI tab for total revenue" — it applies the change directly, schema- and governance-validated, and the live preview updates (an impossible instruction changes nothing and is explained). You can also edit any pattern by hand. Two grouped, confirm-gated controls: "Reset based on Design" and "Start from blank". There is no Save button — every change autosaves as a draft, so the app always shows in your tiles as "Draft".',
     },
     {
       illustration: 'publish',
@@ -82,14 +82,14 @@ const software: TutorialDef = {
       sandboxAnchor: ANCHORS.software.sandbox,
       route: '/software',
       title: 'Choose Context — grant the six types',
-      body: 'Grant the governed context the app may use across six types — Data · Metrics · Files · Knowledge · Agents · Connections. Per type, "add existing" grants artifacts you\'re entitled to, or "create new" makes a fresh, possibly-empty dataset/file/knowledge in an "App «Name»" folder and grants it. No raw credentials — connections are mediated and intelligence enters only as a granted agent.',
+      body: 'Grant the governed context the app may use across six types — Data · Metrics · Files · Knowledge · Agents · Connections. Per type, "add existing" grants artifacts you\'re entitled to, or "create new" makes a fresh, possibly-empty dataset/file/knowledge in an "App «Name»" folder and grants it. Reuse first: the assistant offers to bind a dataset you already have when one fits, instead of creating a duplicate. No raw credentials — connections are mediated and intelligence enters only as a granted agent.',
     },
     {
       anchor: ANCHORS.software.build,
       sandboxAnchor: ANCHORS.software.sandbox,
       route: '/software',
       title: 'Build App — auto-generate, then refine by chat',
-      body: 'Build App auto-generates the whole app from your epics and granted data — cookbook-pattern tabs mapped to your real columns. Refine with the chat assistant ("make Orders a kanban by status") — it applies edits directly, schema-validated, and the live preview updates — or edit a pattern by hand. "Reset based on Design" regenerates; "Start from blank" starts over (both confirm-gated). No Save button: every change autosaves as a draft.',
+      body: 'Build App auto-generates the whole app from your epics and granted data — cookbook-pattern tabs mapped to your real columns. If it can\'t validate, it lists the exact { path, reason, fix } blockers inline (e.g. grant a missing dataset, or use a real column) — never a dead-end — so you fix them and Generate again. Refine with the chat assistant ("make Orders a kanban by status") — it applies edits directly, schema-validated, and the live preview updates — or edit a pattern by hand. "Reset based on Design" regenerates; "Start from blank" starts over (both confirm-gated). No Save button: every change autosaves as a draft.',
     },
     {
       anchor: ANCHORS.software.publish,

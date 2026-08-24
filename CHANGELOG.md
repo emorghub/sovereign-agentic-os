@@ -13,6 +13,18 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.160 — Tutorials refreshed for 0.6.158 + a "Talk to the OS" front door on Home
+
+- **Tutorials:** the Software tutorial (step + walkthrough) now covers the 0.6.158 behaviour — Build
+  App lists the exact `{ path, reason, fix }` blockers inline when it can't auto-generate (never a
+  dead-end), and Choose Context reuses an existing dataset before proposing a new one. The Agents
+  Design step notes the proposed team is grounded in the stated goal + granted context, not a guess.
+- **Home "Talk to the OS":** a prominent front-door entry — *"What do you want to build or do
+  today?"* — sits at the top of Home. Typing an intent opens the ONE global OS Assistant already
+  answering (it dispatches an `os-assistant:open` event the shell-mounted assistant listens for, so
+  there is no duplicate assistant/state). Empty submit just opens it. The assistant remains the same
+  governed PLAN→ACT surface (acts as you, through the OS's own MCP, fully audited).
+
 ### os-ui 0.6.159 — MCP + documentation alignment for the 0.6.158 fixes
 
 Docs-and-guidance only (no behaviour change). Brings the MCP tool descriptions, the MCP-facing
