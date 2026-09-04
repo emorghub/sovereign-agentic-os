@@ -560,6 +560,39 @@ export function grantedToolSpecs(user: CurrentUser, sys: System, nodeTools?: str
   }));
 }
 
+/**
+ * The GRANT-SCOPED tool brief injected into a run's system prompt — a plain-text
+ * listing of EXACTLY the tools this system may drive (name + one-line description),
+ * built from the SAME {@link grantedToolSpecs} set advertised to the model. This is
+ * the discovery-layer counterpart to the manifest scoping: the prompt can name only
+ * granted tools, so the model is never TOLD about a tool (e.g. `create_software`,
+ * `build_gold_join`) it cannot call — which is what led it to attempt ungranted
+ * tools when the full per-tab CONTEXT.md tool catalog was injected instead.
+ *
+ * Fail-closed: an empty granted set yields an explicit "no tools" brief (advertise
+ * nothing), never a fallback to the whole catalog.
+ */
+export function grantedToolBrief(user: CurrentUser, sys: System): string {
+  const specs = grantedToolSpecs(user, sys);
+  if (specs.length === 0) {
+    return 'You have been granted NO tools. You cannot take any action — explain this plainly.';
+  }
+  const lines = specs.map((s) => `- ${s.name} — ${firstLine(s.description)}`);
+  return [
+    'You may call ONLY the tools listed here — this is your COMPLETE toolset. Any tool',
+    'not on this list is NOT available to you; do not attempt it or reference it as an',
+    'option. Consume granted resources by reference via the tools you hold.',
+    '',
+    ...lines,
+  ].join('\n');
+}
+
+/** The first non-empty line of a (possibly multi-line) tool description, trimmed. */
+function firstLine(text: string): string {
+  const line = text.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? '';
+  return line;
+}
+
 /** Injected collaborators (default to the real governed libs; tests inject spies). */
 export type OsToolDeps = {
   /** Governance-queue enqueue for a held (requires_approval) write. */

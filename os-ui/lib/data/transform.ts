@@ -645,8 +645,13 @@ export type PublishPlan = {
   layer: 'gold' | 'silver';
   /** `CREATE SCHEMA IF NOT EXISTS iceberg.<domain>` — run first (idempotent). */
   schemaSql: string;
-  /** The single allowlisted promote CTAS (guard-shaped, one statement, no comments). */
+  /** The single allowlisted promote statement (guard-shaped, one statement, no comments):
+   *  a `CREATE OR REPLACE TABLE … AS SELECT` (physical copy) or, when `asView`, a
+   *  `CREATE OR REPLACE VIEW … AS SELECT * FROM …` (governed pass-through). */
   sql: string;
+  /** How the domain artifact is materialized — `'view'` under the promote-as-view flag,
+   *  else `'table'`. Recorded on the dataset so demote/reconcile pick the right path. */
+  artifact: 'view' | 'table';
 };
 
 /**
@@ -660,26 +665,39 @@ export type PublishPlan = {
  * The read of `iceberg.personal_<owner>.…` inside the CTAS is only possible through
  * the one-time, read-only promotion release on `sourceSchema` (trino.rego
  * `data.governance.releases`), pushed just before and withdrawn right after.
+ *
+ * `asView` (promote-as-view flag): when true the publish emits a governed VIEW
+ * (`CREATE OR REPLACE VIEW <target> AS SELECT * FROM <source>`) instead of the physical
+ * CTAS copy — the view is a live pass-through to the owner's personal lane, so it never
+ * drifts (demote = DROP VIEW; reconcile is a no-op). The read path is UNCHANGED: consumers
+ * still read `<target>`, now a view. The SAME domain grant/governance push targets `<target>`.
+ * Absent/false ⇒ today's CTAS copy, byte-for-byte.
  */
-export function publishPlan(d: {
-  name: string;
-  slug?: string;
-  domain: string;
-  owner: string;
-  versions: { silver: { built: boolean }; gold: { built: boolean } };
-}): PublishPlan {
+export function publishPlan(
+  d: {
+    name: string;
+    slug?: string;
+    domain: string;
+    owner: string;
+    versions: { silver: { built: boolean }; gold: { built: boolean } };
+  },
+  opts: { asView?: boolean } = {},
+): PublishPlan {
   const layer = d.versions.gold.built ? 'gold' : d.versions.silver.built ? 'silver' : null;
   if (!layer) throw new TransformError('nothing to publish — build a Silver or Gold version first');
-  const s = physicalSlug(d); // FROZEN — the promotion CTAS copies the ACTUAL personal table
+  const s = physicalSlug(d); // FROZEN — the promotion copies/points at the ACTUAL personal table
   const sourceSchema = personalSchema(d.owner);
   const source = `iceberg.${sourceSchema}.${layer}_${s}`;
   const target = `iceberg.${domainSchema(d.domain)}.${layer}_${s}`;
   assertFqn(source, 'publish source');
   assertFqn(target, 'publish target');
   const schemaSql = `create schema if not exists iceberg.${domainSchema(d.domain)}`;
-  const sql = `create or replace table ${target} as select * from ${source}`;
+  const artifact: 'view' | 'table' = opts.asView ? 'view' : 'table';
+  const sql = opts.asView
+    ? `create or replace view ${target} as select * from ${source}`
+    : `create or replace table ${target} as select * from ${source}`;
   assertNoSqlMeta(sql, 'compiled SQL'); // defense in depth: never emit a guard-failing statement
-  return { source, sourceSchema, target, layer, schemaSql, sql };
+  return { source, sourceSchema, target, layer, schemaSql, sql, artifact };
 }
 
 /** One picked join, resolved SERVER-SIDE: the route turns each picked datasetId into

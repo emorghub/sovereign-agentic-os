@@ -6,7 +6,7 @@ import type { CurrentUser } from '@/lib/core/auth';
 import { ROLES, type Role } from '@/lib/core/session';
 import { config } from '@/lib/core/config';
 import { PLATFORM_MCP_TOOLS, callPlatformMcp } from '@/lib/software/platform-mcp';
-import { codedAppsEnabled } from '@/lib/platform-admin/settings';
+import { codedAppsEnabled, ensureHydrated as ensureSettingsHydrated } from '@/lib/platform-admin/settings';
 import { authorize, queryRun, trace } from '@/lib/infra/governed';
 import { servePredict } from '@/lib/science/serve';
 import type { ChurnFeatures } from '@/lib/science';
@@ -552,6 +552,7 @@ const discoveryTools: McpTool[] = [
       }));
       // os-ui 0.6.133: when coded apps are OFF, the coded-only tools are advertised as
       // GATED (with an honest reason), never as available — Declarative authoring stays open.
+      await ensureSettingsHydrated(); // restore the persisted flag before advertising availability
       const coded = codedAppsEnabled();
       const codedGated = (name: string) => !coded && CODED_ONLY_TOOLS.has(name);
       const available = rows.filter((r) => roleCanUse(user.role, r.minRole) && !codedGated(r.name));

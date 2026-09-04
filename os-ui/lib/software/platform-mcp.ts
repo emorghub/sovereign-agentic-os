@@ -28,7 +28,7 @@ import type { ConsumedResource, SurfaceDeclaration } from './model.ts';
 import { asBuildTarget, buildGate, stageDirective, targetProgress, resolveTarget } from './mcp-stages.ts';
 import { resolveGrantedContext } from './grants-context.ts';
 import { normalizeImprovement, type Improvement } from './improvements.ts';
-import { codedAppsEnabled } from '@/lib/platform-admin/settings';
+import { codedAppsEnabled, ensureHydrated as ensureSettingsHydrated } from '@/lib/platform-admin/settings';
 import { PATTERNS, PATTERN_IDS, isImplementedPattern } from './appspec/patterns.ts';
 import { generateAppSpecForApp } from './appspec/generate-server.ts';
 
@@ -112,7 +112,7 @@ export const PLATFORM_MCP_TOOLS: { name: string; description: string; write: boo
   {
     name: 'generate_app_spec',
     description:
-      "SCAFFOLD A DECLARATIVE APP from its DESIGN. Reads the app's epics + user stories + per-story spec (features/NFRs/rules) and its GRANTED context (datasets with their REAL columns, metrics, agents), then asks the OS reasoning model to compose a complete, validated AppSpec whose tabs are cookbook patterns wired ONLY to granted ids + real columns. Returns `{ ok: true, spec }` (a validated AppSpec — NOT yet persisted; review it with the returned `spec` / get_app_spec, then author it live with set_app_spec) or `{ ok: false, error, issues? }` when the design is empty (grant/design first) or the model can't produce a valid spec. This is the AI-coder scaffold: one call to go from a designed app to a valid spec, without hand-writing tabs. Role: owner or an owning-domain builder+ (same gate as set_app_spec). Next: set_app_spec to publish it live.",
+      "SCAFFOLD A DECLARATIVE APP from its DESIGN. Reads the app's epics + user stories + per-story spec (features/NFRs/rules) and its GRANTED context (datasets with their REAL columns, metrics, agents), then asks the OS reasoning model to compose a complete, validated AppSpec whose tabs are cookbook patterns wired ONLY to granted ids + real columns. Returns `{ ok: true, spec }` (a validated AppSpec — NOT yet persisted; review it with the returned `spec` / get_app_spec, then author it live with set_app_spec) or `{ ok: false, error, issues? }` when the design is empty (grant/design first) or the model can't produce a valid spec. The failure `issues[]` are the SAME machine-actionable `{ path, reason, fix }` the validator emits — each names the exact fix (grant the missing dataset via design_software / Choose Context, restore a deleted dataset, or use a real column) — so on failure, ACT on the issues and retry, never dead-end; bind an EXISTING granted dataset before assuming a new one must be created. This is the AI-coder scaffold: one call to go from a designed app to a valid spec, without hand-writing tabs. Role: owner or an owning-domain builder+ (same gate as set_app_spec). Next: set_app_spec to publish it live.",
     write: false,
   },
   {
@@ -317,7 +317,8 @@ export async function callPlatformMcp(
       // makes sense for a coded (image) app. When the platform admin has coded apps OFF
       // (the default), refuse it with a clear message; a Declarative app is authored with
       // set_app_spec, not commit. This mirrors the createApp create-gate so neither UI nor
-      // API nor MCP can build a coded app when off.
+      // API nor MCP can build a coded app when off. Hydrate the persisted flag first.
+      await ensureSettingsHydrated();
       if (!codedAppsEnabled()) {
         throw withStatus(
           new Error('Coded apps are disabled by the platform administrator. Author a Declarative (no-code) app with set_app_spec instead of committing raw code.'),

@@ -1,5 +1,9 @@
 # Connections — golden path
 
+> **⚠️ Under construction (preview).** Every connector is currently a preview that has NOT been
+> end-to-end tested. You can configure and explore them, but do not rely on any connector in
+> production until it is verified — and tell the user this plainly before connecting one.
+
 ## What this is
 
 The Connections tab stores named credentials for external systems — databases, APIs, SaaS tools, data warehouses. A connection is consumed by reference: software and agents declare which connection they need, and the OS injects credentials at runtime. The model executing a tool call never sees raw credentials. In the cross-tab spine, connections are the entry point for the software pathway; software wires to connections, and software output can close the loop back into the Bronze data tier.

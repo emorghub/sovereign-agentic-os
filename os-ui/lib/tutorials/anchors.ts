@@ -71,6 +71,10 @@ export const ANCHORS = {
   },
   agents: {
     sandbox: 'agents.sandbox',
+    // The Simple builder is Define · Grant · Design · Build · Run · Evaluate. The anchor
+    // STRING values stay stable ('agents.tools'/'agents.run') so existing tutorial content
+    // keeps resolving — only which stage they mark moved: `tools` → the Grant stage (the
+    // Choose-Context grant surface), `run` → the Run stage (the run + results step).
     define: 'agents.define',
     tools: 'agents.tools',
     run: 'agents.run',

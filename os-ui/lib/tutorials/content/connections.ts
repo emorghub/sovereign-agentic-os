@@ -14,7 +14,7 @@ const connections: TutorialDef = {
   hook: {
     illustration: 'connect',
     title: 'The governed bridge to outside systems',
-    body: 'Connect a Google Drive, a database, or any API. The secret never leaves Secrets Manager; agents get a governed tool, never a raw token.',
+    body: 'Connect a Google Drive, a database, or any API. The secret never leaves Secrets Manager; agents get a governed tool, never a raw token. Note: the connectors are currently under construction — each is a preview that hasn’t been end-to-end tested yet, so explore them but don’t rely on one in production until it’s verified.',
     byRole: {
       builder: {
         body: 'Connect external systems, set the capability profile, and promote connections to the domain — credentials stay locked; agents get governed tools.',

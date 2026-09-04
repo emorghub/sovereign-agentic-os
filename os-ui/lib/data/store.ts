@@ -33,7 +33,7 @@ import {
 import { transparencyGate, gateReason } from './transparency.ts';
 import { CUBE_ARTIFACT, EXPOSURE_ARTIFACT, scaffoldCubeYaml, scaffoldExposureYaml, metricSqlReady, metricCubeReady } from './metrics.ts';
 import { SEMANTIC_ARTIFACT, scaffoldSemanticYaml } from './semantic.ts';
-import { assetTarget, productTarget, reuseSourceFqn, personalSchema, domainSchema, physicalSlug, versionTarget } from './store-fqn.ts';
+import { assetTarget, productTarget, reuseSourceFqn, personalSchema, domainSchema, physicalSlug, versionTarget, slug } from './store-fqn.ts';
 import { config } from '../core/config.ts';
 import { osMirror } from '../infra/os-mirror.ts';
 import { type ArtifactVersion, versionLog } from '../core/versioning.ts';
@@ -611,6 +611,24 @@ export function listGovernedDatasets(): Dataset[] {
 }
 
 /**
+ * EVERY live dataset (all tiers, all owners), UNSCOPED and excluding archived records —
+ * the footprint universe the physical-delete guard reads to protect a table another live
+ * dataset still occupies via a name/slug collision (see {@link sharedFootprintFqns}).
+ * Includes personal (`dataset`-tier) records so a same-owner personal-lane collision is
+ * also protected — the reason `listGovernedDatasets` alone is not enough for the DELETE path.
+ * Server-side callers only — never expose through a user-facing route.
+ */
+export function listAllDatasets(): Dataset[] {
+  ensureSeeded();
+  const out: Dataset[] = [];
+  for (const rec of ds().store.values()) {
+    if (rec.archived) continue;
+    out.push(parseDataset(rec.yaml));
+  }
+  return out;
+}
+
+/**
  * UNSCOPED single-dataset read for the sync scheduler (mirrors the agents store's
  * `systemForScheduler`): a CronJob trigger carries no human session, so the executor
  * loads the record by id, then resolves the OWNER's live identity and runs AS them.
@@ -972,7 +990,9 @@ export function buildVersion(
   // owner's personal lane — the governed domain copy now holds a prior snapshot (or lacks
   // the new layer entirely). Flag it STALE until the publish CTAS re-runs. Bronze builds
   // (incl. sync freshness marks) don't touch the domain copy directly and stay unflagged.
-  if (d.tier !== 'dataset' && layer !== 'bronze') d.domainTableStale = true;
+  // A VIEW-promoted domain artifact is a live pass-through to this personal lane — a rebuild
+  // is reflected instantly, so it NEVER goes stale (only a physical table copy drifts).
+  if (d.tier !== 'dataset' && layer !== 'bronze' && d.domainArtifact !== 'view') d.domainTableStale = true;
   persist(rec, d, { author: user.id, summary: `build ${layer}` });
   return d;
 }
@@ -1009,7 +1029,9 @@ export function buildGoldJoin(
   // reads — is now a PRIOR snapshot: this rebuild only rewrote the owner's personal-lane
   // Gold. Flag it STALE so the domain copy is honestly known to be behind until the publish
   // CTAS re-runs (auto-refreshed by a builder+ rebuilder in the route, else surfaced + re-promoted).
-  if (d.tier !== 'dataset') d.domainTableStale = true;
+  // A VIEW-promoted domain artifact is a live pass-through — a Gold rebuild is reflected
+  // instantly, so it never drifts (only a physical table copy goes stale).
+  if (d.tier !== 'dataset' && d.domainArtifact !== 'view') d.domainTableStale = true;
   persist(rec, d, { author: user.id, summary: 'build gold join' });
   return d;
 }
@@ -1463,6 +1485,91 @@ export function validatePromotion(req: PromotionRequest, approver: Principal): D
 }
 
 /**
+ * GUARD (data-loss, name/slug collision): a dataset's domain table is keyed on its
+ * `physicalSlug`, not its id, so two datasets with the same slug in one domain materialize
+ * into the SAME `iceberg.<domain>.<layer>_<slug>` table — they overwrite each other, and
+ * demoting/deleting one drops the shared table out from under the other.
+ *
+ * Called at the promote boundary (BEFORE materialization): the domain copy lives at
+ * `iceberg.<domain>.<layer>_<physicalSlug>`, keyed on the dataset NAME-slug — so two datasets
+ * with the same name/slug in ONE domain would resolve to the SAME physical table (overwriting
+ * each other on publish; a demote/delete of one orphaning the other — the zombie class). We do
+ * NOT pin/rename a physical slug to dodge it: that slug ALSO names the OWNER's personal-lane
+ * table (`personal_<owner>.gold_<slug>`), so mutating it would break the owner's own dataset and
+ * the promote→demote round-trip (the personal read would resolve to a table that was never
+ * built). Instead REJECT the colliding promote with an actionable 409 — the owner renames, then
+ * promotes into their own shared table. A unique target passes UNTOUCHED (byte-stable — no
+ * rename, no version churn, personal lane intact). Any pre-existing collision stays protected
+ * from data loss by the retire-guard (`sharedFootprintFqns` in physical-delete).
+ */
+export function assertPromoteTargetFree(id: string): Dataset {
+  const rec = get(id);
+  const d = parseDataset(rec.yaml);
+  const target = assetTarget(d);
+  const clash = [...ds().store.values()].find((r) => {
+    if (r.id === id) return false;
+    const o = parseDataset(r.yaml);
+    return o.tier !== 'dataset' && o.domain === d.domain && assetTarget(o) === target;
+  });
+  if (clash) {
+    const other = parseDataset(clash.yaml);
+    fail(
+      `Another shared dataset (“${other.name}”) already publishes to the domain table “${target}”. ` +
+        `Rename this dataset before promoting so it gets its own shared table.`,
+      409,
+    );
+  }
+  return d; // unique → promote proceeds; the personal-lane slug is never touched
+}
+
+/**
+ * GRANT-AUTHORITY GATE (fail-closed): the requester supplies `req.grants`, but the
+ * APPROVER is the one authorizing them — so every grant TARGET must be within the
+ * approver's authority, or a routine approve would leak the asset cross-domain / to
+ * named individuals the approver may not authorize. We validate each grant's grantee
+ * against the approver + the dataset's own domain:
+ *   • `domain` grant — the target domain MUST be one the approver governs
+ *     (`approver.domains`) AND the dataset's OWN domain (a promotion publishes into the
+ *     dataset's domain; sharing it to any OTHER domain here is out of scope for a
+ *     Personal→Shared approval — that is a marketplace/cross-domain action).
+ *   • `user`/`group`/`role` grant (a NAMED individual/group) — only a people-admin may
+ *     direct a share at named principals; per the role model a plain Builder is "an
+ *     approver, NOT a people-admin", so this requires `domain_admin`+.
+ * Anything outside the approver's authority is REJECTED (403) with a clear reason —
+ * never silently persisted. A grant list that is empty or only the dataset's own-domain
+ * read grant (the default `requestPromotion` builds) passes untouched.
+ */
+export function assertGrantsWithinAuthority(
+  grants: Grant[],
+  approver: Principal,
+  datasetDomain: string,
+): void {
+  for (const g of grants ?? []) {
+    const t = g.grantee;
+    if (t.kind === 'domain') {
+      if (t.id !== datasetDomain) {
+        fail(
+          `Cannot approve — a promotion grants access to its own domain ('${datasetDomain}'), not to '${t.id}'. Share across domains via the marketplace.`,
+          403,
+        );
+      }
+      if (!approver.domains.includes(t.id)) {
+        fail(`Cannot grant access to domain '${t.id}' — you do not govern it.`, 403);
+      }
+    } else {
+      // user / group / role — a named principal. Only a people-admin (domain_admin+)
+      // may direct a share at named individuals; a Builder approves, it does not people-admin.
+      if (!roleAtLeast(approver.role, 'domain_admin')) {
+        fail(
+          `Cannot grant access to ${t.kind} '${t.id}' — granting to named ${t.kind}s requires a domain admin.`,
+          403,
+        );
+      }
+    }
+  }
+}
+
+/**
  * A post-CTAS existence probe of the promoted domain table, run through the governed
  * query path. Returns whether `iceberg.<domain>.<layer>_<slug>` is queryable AS the
  * approving Builder. Injected so the pure store stays unit-testable (the server wires
@@ -1483,13 +1590,31 @@ export type MaterializationVerifier = (fqn: string, principal: string) => Promis
  * a live publish, or a tier can flip while the gold lives only in `personal_<owner>`
  * (the Northpeak gap).
  */
-export function applyApprovedPromotion(req: PromotionRequest, approver: Principal): Dataset {
+export function applyApprovedPromotion(
+  req: PromotionRequest,
+  approver: Principal,
+  /** How the domain artifact was materialized (promote-as-view). `'view'` records that the
+   *  publish created a governed VIEW (demote = DROP VIEW; reconcile is a no-op); absent/`'table'`
+   *  is the classic physical copy. Recorded on the dataset so demote/reconcile pick the right
+   *  path. NEVER migrates an existing record — only a fresh promote sets it. */
+  artifact: 'view' | 'table' = 'table',
+): Dataset {
   const rec = get(req.datasetId);
   const d = validatePromotion(req, approver);
+  // Fail-closed: the requester chose `req.grants`, but the APPROVER authorizes them —
+  // reject any grant target outside the approver's authority BEFORE persisting (else a
+  // routine approve leaks the asset cross-domain / to named individuals). See
+  // {@link assertGrantsWithinAuthority}.
+  assertGrantsWithinAuthority(req.grants, approver, d.domain);
 
   d.tier = 'asset'; // storageFor(asset) === 'trino-iceberg'
   d.visibility = visibilityFor('asset', req.visibility);
   d.grants = req.grants;
+  // Promote-as-view: record the artifact kind so demote drops the right object and reconcile
+  // treats a view as always-materialized. Only 'view' is stored (byte-stable; a table promote
+  // clears any stray marker so a demote→re-promote round-trip that flips models stays honest).
+  if (artifact === 'view') d.domainArtifact = 'view';
+  else delete d.domainArtifact;
   // #146: a governed shared asset becomes part of the analytics-as-code estate —
   // mark it git-backed so the promote hook records its dbt model + schema.yml in the
   // `analytics` mono-repo (observability mirror; the runtime CTAS is unchanged). The

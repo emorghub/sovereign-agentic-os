@@ -7,7 +7,7 @@ import { roleModel } from '@/lib/models/roles';
 import { inputBudget, modelContext } from '@/lib/models/context-windows';
 import type { CurrentUser } from '@/lib/core/auth';
 import { ALL_MCP_TOOLS, isMcpTab, listToolsForRole, toolsForTab, type McpTab } from '@/lib/mcp/server';
-import { loadTabContext, tabTitle } from '@/lib/tabs/context';
+import { loadTabContext } from '@/lib/tabs/context';
 import { trace as gvTrace } from '@/lib/infra/agent-governed';
 import { tabToolExecutor, liteLlmCaller } from '@/lib/assistant/runtime';
 import { trackUsage, type ToolSpec, type AgenticStep, type LlmCall, type UsageTracker } from '@/lib/assistant/agentic';
@@ -20,6 +20,7 @@ import { runAgenticGraph, runNode, type AgenticGraphResult, type AgenticGraphDep
 import { liveEmbedder } from '@/lib/infra/context/librarian-live.ts';
 import {
   grantedToolSpecs,
+  grantedToolBrief,
   grantedToolExecutor,
   resolveGrantedTools,
   type OsToolDeps,
@@ -128,19 +129,82 @@ function grantedTabs(sys: System): McpTab[] {
 }
 
 /**
- * The preamble for a general agentic-os team: OS rules + the CONTEXT.md for every
- * tab the system's grants touch (so a data+knowledge team is grounded in BOTH tabs'
- * environment references), and — only when software tools are granted — the build
- * spec. Mirrors `preamble()` but tab-agnostic.
+ * The tool-FREE purpose line of a tab's CONTEXT.md — the `**Purpose:** …` sentence.
+ * It grounds the agent in what the tab is FOR without listing any tool the system
+ * may not hold (the CONTEXT.md tool catalog + golden paths do that, and are the
+ * exact leak that advertised ungranted tools). Returns '' when no Purpose line is
+ * present, so an ungrounded tab simply contributes nothing.
  */
-export function osPreamble(sys: System): string {
+function tabPurpose(tab: McpTab): string {
+  const ctx = loadTabContext(tab);
+  const line = ctx.split('\n').find((l) => l.trim().startsWith('**Purpose:**'));
+  if (!line) return '';
+  return line.replace(/\*\*/g, '').trim();
+}
+
+/**
+ * The GRANT-SCOPED context brief: the EXACT governed resource ids the system may use, per
+ * kind, built straight from `system.grants` (by run time these are concrete ids — folder
+ * grants are already expanded upstream by `resolveFolderGrantsForRun`). It is the data-plane
+ * counterpart to {@link grantedToolBrief}: the tool brief says which TOOLS you may call, this
+ * says which RESOURCES you may pass them. Empty ⇒ '' (contributes nothing). Ids only (no
+ * names/columns — the agent resolves those via its granted get_* discovery companion).
+ */
+function grantedContextBrief(sys: System): string {
+  const g = sys.grants;
+  const rows: string[] = [];
+  const add = (label: string, items: { id?: string }[] | undefined) => {
+    const ids = (items ?? []).map((i) => i.id).filter((id): id is string => !!id && id.length > 0);
+    if (ids.length > 0) rows.push(`- ${label}: ${ids.join(', ')}`);
+  };
+  add('datasets', g.data);
+  add('knowledge', g.knowledge);
+  add('files', g.files);
+  add('metrics', g.metrics);
+  add('connections', g.connections);
+  add('plan (pillars / bets / operating-manual)', g.plan);
+  if (rows.length === 0) return '';
+  return [
+    'These are the ONLY governed resources you may act on. A discovery/list tool may return',
+    'OTHER ids that exist in the domain — you are NOT authorized to use them and any action on',
+    'them is DENIED. Use ONLY the ids below (resolve their schema with your granted get_* tool):',
+    '',
+    ...rows,
+  ].join('\n');
+}
+
+/**
+ * The preamble for a general agentic-os team: OS rules + a tool-free PURPOSE line for
+ * each tab the grants touch + the GRANT-SCOPED tool brief (exactly the tools this
+ * system may call — {@link grantedToolBrief}). It deliberately does NOT inject the
+ * full per-tab CONTEXT.md tool catalog or golden paths: those enumerate EVERY tool of
+ * the tab regardless of grants, which advertised ungranted tools (build_gold_join,
+ * run_quality_checks, index_knowledge, create_software …) to the model and led it to
+ * attempt them. Discovery is now scoped to grants at BOTH the manifest and the prompt.
+ * The build spec is injected ONLY when `create_software` is actually granted (it names
+ * that tool as the entry point). `user` role-scopes the brief so the prompt can never
+ * name a tool above the runner's role.
+ */
+export function osPreamble(user: CurrentUser, sys: System): string {
   const tabs = grantedTabs(sys);
   const parts = [OS_TEAM_RULES];
-  for (const tab of tabs) {
-    const ctx = loadTabContext(tab);
-    if (ctx) parts.push('', `--- ${tabTitle(tab)} TAB CONTEXT (authoritative environment reference) ---`, ctx);
+  const purposes = tabs.map((tab) => tabPurpose(tab)).filter((p) => p.length > 0);
+  if (purposes.length > 0) {
+    parts.push('', '--- WORKSPACE (the OS areas your grants touch) ---', ...purposes.map((p) => `- ${p}`));
   }
-  if (tabs.includes('software')) {
+  // GRANTED CONTEXT — the EXACT resource ids this system may touch. A discovery tool
+  // (list_datasets/list_knowledge/…) runs as the human owner and can surface OTHER items
+  // in the domain the system was NOT granted; calling an action tool on one of those is
+  // DENIED by OPA. Naming the authorized ids here — the data-plane counterpart to the
+  // grant-scoped tool brief — stops the model wandering onto ungranted context and then
+  // hitting a denial. Fail-open on shape: absent grants contribute nothing.
+  const ctx = grantedContextBrief(sys);
+  if (ctx) parts.push('', '--- YOUR GRANTED CONTEXT (the ONLY resource ids you may use) ---', ctx);
+  parts.push('', '--- YOUR GRANTED TOOLS (your complete, authoritative toolset) ---', grantedToolBrief(user, sys));
+  // The build spec names `create_software` as its entry point — inject it only when
+  // that tool is genuinely granted, so it never advertises an ungranted capability.
+  const granted = new Set(resolveGrantedTools(sys).mcpNames);
+  if (granted.has('create_software')) {
     const spec = loadBuildSpec();
     if (spec) parts.push('', '--- BUILD SPEC (canonical — the exact template, tool sequence, governance) ---', spec);
   }
@@ -199,7 +263,7 @@ export async function runOsTeam(input: RunOsTeamInput): Promise<AgenticGraphResu
     callTool: grantedToolExecutor(input.user, sys, input.systemId, input.toolDeps),
     embed: embedder.embed,
     embedSource: embedder.lastSource,
-    preamble: osPreamble(sys),
+    preamble: osPreamble(input.user, sys),
     reasoningModel: roleModel('reasoning'),
     // ACT/tool-calling fallback model (a per-agent pin still wins). The `tools`
     // role defaults to Qwen for clean OpenAI tool_calls; the harmony-format

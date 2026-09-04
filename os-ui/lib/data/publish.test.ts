@@ -11,11 +11,14 @@ import {
   requestPromotion,
   getDataset,
   listGovernedDatasets,
+  transition,
+  renameDataset,
   type Principal,
   type PromotionRequest,
 } from './store.ts';
 import { DatasetError, type Dataset } from './dataset-schema.ts';
 import { publishApprovedPromotion, type PublishWrite } from './publish.ts';
+import { assetTarget } from './store-fqn.ts';
 import { publishPlan } from './transform.ts';
 import { buildCubeModels } from './cube-models.ts';
 import { governanceFor } from './policy/compiler.ts';
@@ -89,6 +92,31 @@ test('approval triggers a REAL apply: the promote CTAS is executed with the APPR
   );
   assert.equal(write.schemaSql, 'create schema if not exists iceberg.sales');
   assert.equal(write.releaseSchema, 'personal_amir');
+});
+
+test('promote-as-view: with asView the publish emits a VIEW + records domainArtifact:view', async () => {
+  const { id, req } = ready();
+  const fb = fakeBuild(true);
+  const out = await publishApprovedPromotion(req, bea, { ...fb.deps, asView: true });
+  assert.equal(out.ok, true);
+  // The threaded statement is a governed VIEW over the owner's personal lane — NOT a CTAS copy.
+  assert.equal(
+    fb.calls[0].write.transformSql,
+    'create or replace view iceberg.sales.gold_orders as select * from iceberg.personal_amir.gold_orders',
+  );
+  // The dataset records that its domain artifact is a view (demote/reconcile branch on this).
+  assert.equal(getDataset(id, amir).domainArtifact, 'view');
+  // The read path is UNCHANGED: consumers still read the same domain FQN.
+  assert.equal(out.ok && out.fqn, 'iceberg.sales.gold_orders');
+});
+
+test('promote-as-view OFF (default): the publish is a physical CTAS copy, no view marker', async () => {
+  const { id, req } = ready();
+  const fb = fakeBuild(true);
+  const out = await publishApprovedPromotion(req, bea, fb.deps); // asView omitted ⇒ table
+  assert.equal(out.ok, true);
+  assert.match(fb.calls[0].write.transformSql, /^create or replace table /);
+  assert.equal(getDataset(id, amir).domainArtifact, undefined, 'table promote records no view marker');
 });
 
 test('the promote build sees the POST-promotion governance so OPA gets the promoted FQN', async () => {
@@ -279,6 +307,30 @@ test('re-materialize re-runs the SAME publish CTAS (right FQNs) as the operating
   assert.equal(getDataset(id, amir).domainTableStale, undefined, 'STALE cleared on ✓');
 });
 
+test('promote-as-view: a rebuild NEVER flags the view stale (a view is a live pass-through)', async () => {
+  const { id, req } = ready();
+  await publishApprovedPromotion(req, bea, { ...fakeBuild(true).deps, asView: true });
+  assert.equal(getDataset(id, amir).domainArtifact, 'view');
+  // Rebuilding the owner's personal Gold would flag a TABLE-promoted dataset stale; a VIEW
+  // reads through live, so it must stay in sync.
+  buildVersion(id, amir, 'gold', { quality: 'passing', artifact: 'g2' });
+  assert.equal(getDataset(id, amir).domainTableStale, undefined, 'a view never drifts');
+});
+
+test('promote-as-view: re-materialize is a NO-OP (no CTAS re-run) and reports ok on the view FQN', async () => {
+  const { id, req } = ready();
+  await publishApprovedPromotion(req, bea, { ...fakeBuild(true).deps, asView: true });
+  buildVersion(id, amir, 'gold', { quality: 'passing', artifact: 'g2' });
+  const { rematerializeDomainTable } = await import('./publish.ts');
+  const fb = fakeBuild(true);
+  const out = await rematerializeDomainTable(id, bea, fb.deps);
+  assert.equal(out.ok, true);
+  assert.equal(out.ok && out.fqn, 'iceberg.sales.gold_orders');
+  // No CTAS re-run and no probe — a view is always-materialized by construction.
+  assert.equal(fb.calls.length, 0, 'no CTAS re-run for a view');
+  assert.equal(fb.probes.length, 0, 'no probe for a view');
+});
+
 test('re-materialize is idempotent: refreshing an already-in-sync table is a harmless ✓', async () => {
   const { id, req } = ready();
   await publishApprovedPromotion(req, bea, fakeBuild(true).deps);
@@ -333,4 +385,103 @@ test('re-materialize refuses a dataset that was never promoted', async () => {
   const out = await rematerializeDomainTable(d.id, amir, fakeBuild(true).deps);
   assert.equal(out.ok, false);
   assert.match((out as { error: string }).error, /not promoted/);
+});
+
+// ── ZOMBIE-ASSET ROUND-TRIP (0.6.141 root-cause prevention): promote → demote → re-promote ──
+// The durable invariant: a dataset must never claim SERVED without a physical domain table.
+// promote flips to asset (fail-closed: the table must exist) AND appears in the governed/Cube
+// list; a demote (unshare) moves it back to `dataset` so it LEAVES the governed serving set
+// (no zombie); a re-promote is fail-closed AGAIN (a build ✓ with an absent table is refused).
+
+test('round-trip: promote → served & in the governed list; demote → NOT served (no zombie); re-promote → fail-closed again', async () => {
+  const { id, req } = ready();
+
+  // PROMOTE — fail-closed materialization gate + the tier flips to a served asset.
+  const up = await publishApprovedPromotion(req, bea, fakeBuild(true).deps);
+  assert.equal(up.ok, true);
+  assert.equal(getDataset(id, amir).tier, 'asset');
+  assert.ok(listGovernedDatasets().some((d) => d.id === id), 'a served asset is in the Cube/governed set');
+
+  // DEMOTE (unshare) — the store moves it OUT of the domain tier, so it can no longer be
+  // read as a served domain asset (dropped from listGovernedDatasets → Cube stops serving it).
+  // Unshare needs BOTH the Builder floor AND govern authority (owner / in-domain admin) — a
+  // domain_admin in the dataset's domain satisfies both (the DemoteButton's real actor).
+  const dom: Principal = { id: 'dora', domains: ['sales'], role: 'domain_admin' };
+  const demoted = transition(id, dom, 'unshare');
+  assert.equal(demoted.tier, 'dataset', 'back to a private dataset');
+  assert.equal(demoted.owner, amir.id, 'ownership stays with the ORIGINAL creator after demote');
+  assert.equal(demoted.slug, undefined, 'the physical slug is never pinned → personal lane byte-stable across the round-trip');
+  assert.equal(demoted.grants.length, 0, 'sharing grants are dropped');
+  assert.ok(!listGovernedDatasets().some((d) => d.id === id), 'a demoted dataset is NOT served (no zombie)');
+
+  // RE-PROMOTE — fail-closed is re-enforced: a build ✓ but an ABSENT domain table refuses the
+  // flip (tier stays dataset), so a re-promote can never resurrect a served-but-empty zombie.
+  const req2 = requestPromotion(id, amir, { visibility: 'domain' });
+  await assert.rejects(
+    () => publishApprovedPromotion(req2, bea, fakeBuild(true, undefined, /* domainTableLive */ false).deps),
+    (e: DatasetError) => e.status === 502,
+  );
+  assert.equal(getDataset(id, amir).tier, 'dataset', 'a re-promote whose CTAS did not land does NOT flip');
+
+  // A re-promote whose CTAS DOES land flips it back to a served asset — the happy path is intact.
+  const req3 = requestPromotion(id, amir, { visibility: 'domain' });
+  const up2 = await publishApprovedPromotion(req3, bea, fakeBuild(true).deps);
+  assert.equal(up2.ok, true);
+  assert.equal(getDataset(id, amir).tier, 'asset');
+  assert.ok(listGovernedDatasets().some((d) => d.id === id), 're-promote restores serving');
+});
+
+// ── PROMOTE COLLISION GUARD (data-loss, name/slug collision) ──
+// The bug: the domain table is keyed on the name-slug, not the id, so two datasets that
+// resolve to the same `gold_<slug>` in ONE domain overwrite each other and orphan a sibling.
+// The guard REJECTS the colliding promote (409) rather than pinning a physical slug — the slug
+// also names the owner's personal-lane table, so mutating it would break the owner's own dataset
+// and the promote→demote round-trip. Rename, then promote into your own shared table.
+
+/** A ready-to-promote dataset with an explicit NAME (unique within the domain). */
+function readyNamed(name: string): { id: string; req: PromotionRequest } {
+  const d = createDataset(amir, { name });
+  buildVersion(d.id, amir, 'bronze', { quality: 'passing', artifact: 'b' });
+  buildVersion(d.id, amir, 'silver', { quality: 'passing', artifact: 's' });
+  buildVersion(d.id, amir, 'gold', { quality: 'passing', artifact: 'g' });
+  setDocs(d.id, amir, { description: 'Docs.', columns: [{ name: 'k', description: 'Key.' }] });
+  const req = requestPromotion(d.id, amir, { visibility: 'domain' });
+  return { id: d.id, req };
+}
+
+test('promote collision: a second dataset colliding on an already-claimed gold table is REJECTED (409), personal slug never mutated', async () => {
+  // A: name "Web Orders" → slug web_orders. Rename it so the NAME "Web Orders" frees up,
+  // but A KEEPS the frozen physical slug web_orders (the real rename→slug-clash mechanism).
+  const a = readyNamed('Web Orders');
+  renameDataset(a.id, amir, 'Alpha'); // A.slug is now pinned to web_orders
+  await publishApprovedPromotion(a.req, bea, fakeBuild(true).deps);
+  assert.equal(getDataset(a.id, amir).tier, 'asset');
+  assert.equal(assetTarget(getDataset(a.id, amir)), 'iceberg.sales.gold_web_orders');
+
+  // B: name "Web Orders" (free now) → name-slug web_orders → SAME domain gold table as A.
+  const b = readyNamed('Web Orders');
+  assert.equal(assetTarget(getDataset(b.id, amir)), 'iceberg.sales.gold_web_orders', 'pre-guard: B collides with A');
+
+  // The colliding promote is REJECTED with an actionable 409 — never silently overwriting A,
+  // and CRUCIALLY never pinning B's physical slug (which also names B's personal-lane table).
+  await assert.rejects(
+    () => publishApprovedPromotion(b.req, bea, fakeBuild(true).deps),
+    (e: DatasetError) => e.status === 409,
+  );
+  const bAfter = getDataset(b.id, amir);
+  assert.equal(bAfter.tier, 'dataset', 'B stays a private dataset — the promote did not flip');
+  assert.equal(bAfter.slug, undefined, "B's physical slug is NEVER mutated (personal lane byte-stable)");
+  // A still owns its table, untouched.
+  assert.equal(assetTarget(getDataset(a.id, amir)), 'iceberg.sales.gold_web_orders');
+});
+
+test('promote collision: a UNIQUE target promotes untouched (byte-stable, personal slug never pinned)', async () => {
+  const only = readyNamed('Lonely Dataset');
+  const before = getDataset(only.id, amir);
+  assert.equal(before.slug, undefined, 'no slug pinned before promotion');
+  const out = await publishApprovedPromotion(only.req, bea, fakeBuild(true).deps);
+  assert.equal(out.ok, true);
+  const after = getDataset(only.id, amir);
+  assert.equal(after.slug, undefined, 'a unique dataset is NEVER slug-pinned');
+  assert.equal(out.ok && out.fqn, 'iceberg.sales.gold_lonely_dataset');
 });

@@ -54,18 +54,21 @@ test('every enum id has a registry entry whose id matches its key (in lockstep)'
   }
 });
 
-test('the 11 view patterns + 5 interactive patterns are flagged implemented (3.5c)', () => {
+test('the 11 view patterns + 8 interactive patterns are flagged implemented (3.5c + 3.5d)', () => {
   const implemented = PATTERN_IDS.filter((id) => PATTERNS[id].implemented).sort();
   assert.deepEqual(implemented, [...IMPLEMENTED_PATTERNS].sort());
   assert.deepEqual(implemented, [
+    'action-detail',
     'approval-queue',
     'assignment',
     'calendar',
     'card-gallery',
     'chart-explorer',
     'detail',
+    'editable-grid',
     'form',
     'intake-wizard',
+    'kanban-workflow',
     'kpi-overview',
     'landing',
     'master-detail',
@@ -75,10 +78,10 @@ test('the 11 view patterns + 5 interactive patterns are flagged implemented (3.5
     'timeline',
   ]);
   for (const id of IMPLEMENTED_PATTERNS) assert.ok(isImplementedPattern(id));
-  // A still-deferred interactive id is NOT implemented yet.
-  assert.equal(isImplementedPattern('editable-grid' as PatternId), false);
-  assert.equal(isImplementedPattern('kanban-workflow' as PatternId), false);
-  assert.equal(isImplementedPattern('action-detail' as PatternId), false);
+  // All interactive ids are now implemented.
+  assert.equal(isImplementedPattern('editable-grid' as PatternId), true);
+  assert.equal(isImplementedPattern('kanban-workflow' as PatternId), true);
+  assert.equal(isImplementedPattern('action-detail' as PatternId), true);
 });
 
 test('the write patterns are interactive; the flagship viewers are views', () => {
@@ -92,10 +95,10 @@ test('the write patterns are interactive; the flagship viewers are views', () =>
   assert.equal(PATTERNS['status-board'].category, 'view');
 });
 
-test('the 3 STILL-deferred interactive ids are present, interactive, and not implemented', () => {
+test('the 3 in-place-edit interactive ids are present, interactive, and now implemented (3.5d)', () => {
   for (const id of ['editable-grid', 'kanban-workflow', 'action-detail'] as PatternId[]) {
     assert.equal(PATTERNS[id].category, 'interactive');
-    assert.equal(PATTERNS[id].implemented, false);
+    assert.equal(PATTERNS[id].implemented, true);
   }
 });
 
@@ -108,10 +111,12 @@ test('every category is a valid value and every entry has a label + description'
   }
 });
 
-test('summarize returns a non-empty plain-language line for a coming-soon (interactive) pattern', () => {
-  const s = summarizePattern('kanban-workflow', {} as PatternConfig);
+test('summarize returns a non-empty plain-language line for a kanban-workflow pattern', () => {
+  const cfg = { source: 'records', statusField: 'status', titleField: 'title', columns: [{ value: 'todo', label: 'To Do' }] } as PatternConfig;
+  const s = summarizePattern('kanban-workflow', cfg);
   assert.ok(s.length > 0);
-  assert.match(s, /coming soon/i);
+  assert.match(s, /status/);
+  assert.ok(!s.includes('coming soon'));
 });
 
 test('summarize for records-table names the dataset and columns', () => {
@@ -133,11 +138,15 @@ test('parsePatternConfig accepts a valid records-table config and refuses a non-
   assert.ok(bad.issues.length > 0);
 });
 
-test('parsePatternConfig for a coming-soon (deferred interactive) pattern accepts any object (opaque)', () => {
+test('parsePatternConfig for kanban-workflow validates a real config correctly', () => {
   const ctx: Ctx = { issues: [] };
-  const cfg = parsePatternConfig(ctx, 'kanban-workflow', { whatever: [1, 2, 3] }, 'c');
+  const cfg = parsePatternConfig(ctx, 'kanban-workflow', { source: 'records', statusField: 's', titleField: 't', columns: [{ value: 'a', label: 'A' }] }, 'c');
   assert.deepEqual(ctx.issues, []);
   assert.ok(cfg);
+  // An invalid config (missing statusField) should produce issues now.
+  const bad: Ctx = { issues: [] };
+  parsePatternConfig(bad, 'kanban-workflow', { source: 'records', titleField: 't', columns: [] }, 'c');
+  assert.ok(bad.issues.length > 0);
 });
 
 // ---------------------------------------------------------------- 3.5b VIEW patterns ----
@@ -265,4 +274,64 @@ test('task-checklist parses a "records" source AND a dataset source; refuses mis
   assert.match(summarizePattern('task-checklist', ds), /ds_tasks/);
   bad('task-checklist', { source: 'records' }); // missing titleField
   bad('task-checklist', { source: { foo: 'bar' }, titleField: 't' }); // dataset source without datasetId
+});
+
+// -------------------------------------------- 3.5d IN-PLACE-EDIT patterns ----
+
+test('editable-grid parses source/columns; refuses a non-"records" source and missing columns', () => {
+  const cfg = ok('editable-grid', {
+    source: 'records',
+    columns: [
+      { field: 'title', label: 'Title', type: 'text' },
+      { field: 'amount', type: 'number' },
+    ],
+  });
+  assert.match(summarizePattern('editable-grid', cfg), /2 column/);
+  assert.match(summarizePattern('editable-grid', cfg), /Title/);
+  bad('editable-grid', { source: 'dataset', columns: [{ field: 'x', type: 'text' }] }); // wrong source value
+  bad('editable-grid', { columns: [{ field: 'x', type: 'text' }] }); // missing source
+  bad('editable-grid', { source: 'records' }); // missing columns
+  bad('editable-grid', { source: 'records', columns: [{ field: 'x', type: 'nope' }] }); // bad type
+});
+
+test('kanban-workflow parses source/statusField/titleField/columns/subtitleFields; refuses missing required fields', () => {
+  const cfg = ok('kanban-workflow', {
+    source: 'records',
+    statusField: 'status',
+    titleField: 'title',
+    columns: [
+      { value: 'todo', label: 'To Do' },
+      { value: 'done', label: 'Done' },
+    ],
+    subtitleFields: ['owner'],
+  });
+  assert.match(summarizePattern('kanban-workflow', cfg), /status/);
+  assert.match(summarizePattern('kanban-workflow', cfg), /2 column/);
+  assert.match(summarizePattern('kanban-workflow', cfg), /To Do/);
+  bad('kanban-workflow', { source: 'records', titleField: 'title', columns: [] }); // missing statusField
+  bad('kanban-workflow', { source: 'records', statusField: 's', columns: [] }); // missing titleField
+  bad('kanban-workflow', { source: 'records', statusField: 's', titleField: 't' }); // missing columns
+  bad('kanban-workflow', { source: 'other', statusField: 's', titleField: 't', columns: [] }); // wrong source
+});
+
+test('action-detail parses source/titleField/fields/actions; refuses missing required fields', () => {
+  const cfg = ok('action-detail', {
+    source: 'records',
+    titleField: 'name',
+    fields: [
+      { field: 'name', label: 'Name' },
+      { field: 'status' },
+    ],
+    actions: [
+      { label: 'Approve', setField: 'status', setValue: 'approved' },
+      { label: 'Reject', setField: 'status', setValue: 'rejected' },
+    ],
+  });
+  assert.match(summarizePattern('action-detail', cfg), /name/);
+  assert.match(summarizePattern('action-detail', cfg), /2 action/);
+  assert.match(summarizePattern('action-detail', cfg), /Approve/);
+  bad('action-detail', { source: 'records', fields: [], actions: [] }); // missing titleField
+  bad('action-detail', { source: 'records', titleField: 'n', actions: [] }); // missing fields
+  bad('action-detail', { source: 'records', titleField: 'n', fields: [] }); // missing actions
+  bad('action-detail', { source: 'records', titleField: 'n', fields: [{ field: 'x' }], actions: [{ label: 'A', setField: 'f' }] }); // action missing setValue
 });

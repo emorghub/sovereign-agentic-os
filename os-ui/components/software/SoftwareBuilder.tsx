@@ -374,10 +374,25 @@ export default function SoftwareBuilder({
 
   // Open on the FIRST INCOMPLETE stage that is reachable — a fresh app lands on
   // Define (purpose not set), never Preview. Falls back to the first stage.
+  //
+  // COHORT P0 (symptom #2): an app AUTHORED in a prior session (named + epics/stories specced +
+  // context granted) opens directly on Build — but the earlier stages showed a NUMBER, not a ✓,
+  // because the session `done`-set starts empty. That reads as "Define/Design regressed" to a user
+  // who clearly finished them. We SEED `done` with every EARLIER stage that is ALREADY SATISFIED on
+  // open. This stays honest: each ✓ is still `isDone`-gated on its live condition (stageStatuses →
+  // isDone), so it clears the instant the user invalidates that stage's work. A truly fresh app
+  // seeds nothing (nothing is satisfied yet), preserving the "no pre-marked checks" behaviour.
   const [stage, setStage] = useState<StageState<SwStageId>>(() => {
     const base = initialStageState(SW_STAGES);
-    const firstIncomplete = SW_STAGES.find((s) => canEnter(SW_STAGES, s.id, ctx) && !isSatisfied(SW_STAGES, s.id, ctx));
-    return firstIncomplete ? { ...base, current: firstIncomplete.id } : base;
+    const firstIncompleteIdx = SW_STAGES.findIndex((s) => canEnter(SW_STAGES, s.id, ctx) && !isSatisfied(SW_STAGES, s.id, ctx));
+    const current = firstIncompleteIdx >= 0 ? SW_STAGES[firstIncompleteIdx].id : base.current;
+    // Every stage before the landing stage that is already satisfied is genuinely complete on open.
+    const cutoff = firstIncompleteIdx >= 0 ? firstIncompleteIdx : SW_STAGES.length;
+    const seeded = new Set<SwStageId>();
+    for (let i = 0; i < cutoff; i++) {
+      if (isSatisfied(SW_STAGES, SW_STAGES[i].id, ctx)) seeded.add(SW_STAGES[i].id);
+    }
+    return { current, done: seeded };
   });
 
   async function saveDesign(patch: { purpose?: string; epics?: Epic[]; grants?: ContextGrantsValue; agents?: AppAgentGrant[] }): Promise<void> {
@@ -604,7 +619,10 @@ export default function SoftwareBuilder({
           ) : null}
           <span className={dep.cls}>{dep.label}</span>
           <span className="badge muted">{version}</span>
-          {app.mode === 'offline' ? <span className="badge muted">git not ready</span> : null}
+          {/* "git not ready" is a CODED-app concept (its source lives in a Forgejo repo). A
+              declarative/spec app serves from its spec via the platform runtime and needs no
+              per-app repo, so the badge is misleading noise there — show it for coded apps only. */}
+          {!isSpecApp && app.mode === 'offline' ? <span className="badge muted">git not ready</span> : null}
         </div>
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
           {/* The top-level Simple⇄Developer toggle drives the RAW CODE-FILES view
@@ -1146,7 +1164,6 @@ function DesignStage({
     onSave(withStorySpec(epics, activeStory.epicId, activeStory.storyId, applySpecSuggestion(targetStory.spec, partial)));
   };
 
-  const hasStories = epics.some((e) => (e.stories?.length ?? 0) > 0);
   const stories = epics.flatMap((e) => e.stories ?? []);
   const specced = stories.filter((s) => specHasContent(s.spec)).length;
   const purpose = (app.purpose ?? '').trim();
@@ -1226,7 +1243,6 @@ function DesignStage({
               <span className={`badge ${stories.length > 0 ? 'ok' : 'muted'}`}>{stories.length} stor{stories.length === 1 ? 'y' : 'ies'}</span>
               <span className={`badge ${specced === stories.length && stories.length > 0 ? 'ok' : 'muted'}`}>{specced} / {stories.length} specified</span>
             </div>
-            {canEdit ? <ShipDesignPanel app={app} hasStories={hasStories} onReload={onReload} /> : null}
           </>
         }
       />
@@ -1288,153 +1304,6 @@ function DesignLadder({
         .dl-count { font-weight: 500; color: var(--text-faint); }
         .dl-hint { font-size: 11.5px; color: var(--text-muted); line-height: 1.45; }
       `}</style>
-    </div>
-  );
-}
-
-/**
- * Ship the design outward — the three governed Design actions:
- *   • Push to Jira — each EPIC → a Jira Epic issue, each story → a Story issue, via the
- *     user's OWN governed Atlassian connection (jira_create_issue, Write-approval).
- *   • Hand off to GitHub — file a governed code-handoff issue on a target repo via the
- *     user's OWN GitHub connection (create_issue, Write-approval).
- *   • Import Claude Design — paste a Claude-generated frontend (code or URL); it seeds
- *     the app's src/ through the governed commit path as the AI build's starting point.
- * Every message is HONEST: "connect X first", a queued approval, or a real key/URL —
- * never a fake success. Governance is enforced server-side; we only surface its state.
- */
-function ShipDesignPanel({ app, hasStories, onReload }: { app: SoftwareApp; hasStories: boolean; onReload: () => void }) {
-  const [jiraKey, setJiraKey] = useState('');
-  const [ghRepo, setGhRepo] = useState('');
-  const [design, setDesign] = useState('');
-  const [designUrl, setDesignUrl] = useState('');
-  const [busy, setBusy] = useState<'jira' | 'git' | 'import' | null>(null);
-  const [note, setNote] = useState<{ tone: 'ok' | 'warn' | 'err'; text: string } | null>(null);
-
-  async function post(kind: 'jira' | 'git' | 'import', path: string, body: Record<string, unknown>) {
-    setBusy(kind);
-    setNote(null);
-    try {
-      const res = await fetch(`/api/apps/${app.id}/${path}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok && res.status !== 202) {
-        const connectMsg = data.connectHref ? `${data.error} ` : data.error;
-        setNote({ tone: 'err', text: connectMsg || 'Request failed.' });
-        return;
-      }
-      if (kind === 'jira') {
-        const created = (data.created ?? []).length;
-        const queued = (data.queued ?? []).length;
-        const failed = (data.failed ?? []).length;
-        const parts = [
-          created ? `${created} created` : '',
-          queued ? `${queued} awaiting approval` : '',
-          failed ? `${failed} failed` : '',
-        ].filter(Boolean).join(' · ');
-        setNote({ tone: failed ? 'warn' : 'ok', text: `Jira push (${data.total}): ${parts || 'nothing to do'}.` });
-      } else if (kind === 'git') {
-        if (data.queued) setNote({ tone: 'warn', text: 'Code hand-off filed for approval — approve it in Policies & Approvals.' });
-        else setNote({ tone: 'ok', text: `Code hand-off issue opened on ${data.repo} (${data.filesListed} files listed).` });
-      } else {
-        setNote({ tone: 'ok', text: `Seeded frontend: ${(data.seeded ?? []).join(', ')} (${data.mode}).` });
-        setDesign('');
-        setDesignUrl('');
-        onReload();
-      }
-    } catch (e) {
-      setNote({ tone: 'err', text: (e as Error).message });
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <div className="grant-block" style={{ marginTop: 16 }}>
-      <div className="comp-label">Ship this design</div>
-      <p className="hint" style={{ marginTop: 4 }}>
-        Push the backlog to Jira, hand the code to GitHub, or seed the frontend from a Claude
-        design — all through your OWN governed connections. Writes respect approval; nothing is faked.
-      </p>
-
-      {/* Push to Jira */}
-      <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
-        <input
-          type="text"
-          value={jiraKey}
-          onChange={(e) => setJiraKey(e.target.value)}
-          placeholder="Jira project key (e.g. OPS)"
-          style={{ width: 220 }}
-        />
-        <button
-          className="btn"
-          disabled={busy !== null || !jiraKey.trim() || !hasStories}
-          onClick={() => post('jira', 'jira-push', { projectKey: jiraKey.trim() })}
-          title={hasStories ? 'Create Jira Epic + Story issues' : 'Add EPICs and stories first'}
-        >
-          {busy === 'jira' ? <span className="spin" /> : 'Push to Jira'}
-        </button>
-      </div>
-
-      {/* Hand off to GitHub */}
-      <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
-        <input
-          type="text"
-          value={ghRepo}
-          onChange={(e) => setGhRepo(e.target.value)}
-          placeholder="GitHub repo (owner/repo)"
-          style={{ width: 220 }}
-        />
-        <button
-          className="btn ghost"
-          disabled={busy !== null || !ghRepo.trim()}
-          onClick={() => post('git', 'git-push', { repo: ghRepo.trim() })}
-          title="File a governed code hand-off issue on the target repo"
-        >
-          {busy === 'git' ? <span className="spin" /> : 'Push code to Git'}
-        </button>
-      </div>
-
-      {/* Import Claude Design */}
-      <div style={{ marginTop: 14 }}>
-        <label className="comp-label" style={{ fontSize: 12 }}>Import a Claude design → seed the frontend</label>
-        <textarea
-          value={design}
-          onChange={(e) => setDesign(e.target.value)}
-          rows={4}
-          placeholder="Paste Claude-generated frontend code (HTML / React)…"
-          style={{ width: '100%', marginTop: 4, fontFamily: 'var(--mono, monospace)', fontSize: 12 }}
-        />
-        <div className="row" style={{ gap: 8, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' }}>
-          <span className="hint" style={{ margin: 0 }}>or a URL:</span>
-          <input
-            type="text"
-            value={designUrl}
-            onChange={(e) => setDesignUrl(e.target.value)}
-            placeholder="https://…"
-            style={{ width: 240 }}
-          />
-          <button
-            className="btn"
-            disabled={busy !== null || (!design.trim() && !designUrl.trim())}
-            onClick={() => post('import', 'import-design', design.trim() ? { code: design } : { url: designUrl.trim() })}
-          >
-            {busy === 'import' ? <span className="spin" /> : 'Seed frontend from this'}
-          </button>
-        </div>
-      </div>
-
-      {note ? (
-        <div className={note.tone === 'err' ? 'error' : 'answer'} style={{ marginTop: 12 }}>
-          {note.tone === 'warn' ? '⚠ ' : note.tone === 'ok' ? '✓ ' : '✗ '}{note.text}
-          {note.tone === 'err' && /connect/i.test(note.text) ? (
-            <> <Link className="sw-quiet-link" href="/connections">Open Connections →</Link></>
-          ) : null}
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -2488,14 +2357,23 @@ function PublishStage({
                 />
               </div>
 
-              {/* REPO MISSING → manual heal. `pipeline.forgejo === 'failing'` is the honest
-                  repo-404 signal (refreshActionsStage downgrades a vanished repo). Re-provisions
-                  the scaffold so a subsequent build commits + rebuilds from a clean base. */}
-              {app.pipeline.forgejo === 'failing' ? (
+              {/* REPO NOT READY → manual heal. Two honest states, one recovery:
+                  • `pipeline.forgejo === 'failing'` — the repo VANISHED (404); refreshActionsStage
+                    downgrades a repo that once existed.
+                  • `app.mode === 'offline'` (code apps only) — the repo was NEVER created because
+                    Forgejo was UNREACHABLE at create time. When Forgejo is up again the app can be
+                    stuck offline with no way to recover; `healAppRepo` re-probes and, on a genuine
+                    404, re-provisions the scaffold. A spec app has no repo, so it is excluded.
+                  Both re-run the SAME audited heal endpoint; a subsequent build commits + rebuilds. */}
+              {app.serveMode !== 'spec' && (app.pipeline.forgejo === 'failing' || app.mode === 'offline') ? (
                 <div className="hint" style={{ marginTop: 8, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <span>The app’s repository is missing (404) — CI cannot build until it is re-provisioned.</span>
-                  <button className="btn ghost sm" onClick={onHealRepo} disabled={busy} title="Re-provision the missing repo from the scaffold + any surviving snapshot">
-                    {busy ? <span className="spin" /> : 'Heal repository'}
+                  <span>
+                    {app.pipeline.forgejo === 'failing'
+                      ? 'The app’s repository is missing (404) — CI cannot build until it is re-provisioned.'
+                      : 'The app’s git repository was never created (Forgejo was unreachable at the time) — reconnect to build.'}
+                  </span>
+                  <button className="btn ghost sm" onClick={onHealRepo} disabled={busy} title="Re-probe Forgejo and provision the repo from the scaffold + any surviving snapshot">
+                    {busy ? <span className="spin" /> : app.pipeline.forgejo === 'failing' ? 'Heal repository' : 'Reconnect git'}
                   </button>
                 </div>
               ) : null}

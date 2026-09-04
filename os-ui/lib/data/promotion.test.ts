@@ -112,6 +112,54 @@ test('approval fails closed on a BRONZE-only dataset even if a request slips thr
   assert.equal(getDataset(d.id, amir).tier, 'dataset');
 });
 
+// ---- H1: grant injection at promotion approval ----------------------------------
+// The requester supplies `req.grants`; the APPROVER authorizes them. Every grant target
+// must be within the approver's authority, or a routine approve leaks the asset
+// cross-domain / to named individuals the approver can't authorize. Fail-closed.
+
+/** A promotion request with a forged/attacker-chosen grant list (the requester controls it). */
+function reqWithGrants(id: string, grants: unknown): Parameters<typeof applyApprovedPromotion>[0] {
+  const base = requestPromotion(id, amir, { visibility: 'domain' });
+  return { ...base, grants: grants as typeof base.grants };
+}
+
+const READ = { scope: { rows: [], columns: { mask: [], hide: [] } }, cardinality: 'low' as const, action: 'read' as const };
+
+test('H1: an approver CANNOT promote with a grant to a domain outside the dataset’s domain', () => {
+  const id = readyDataset(); // dataset in 'sales'; bea is a sales builder
+  const req = reqWithGrants(id, [{ grantee: { kind: 'domain', id: 'finance' }, ...READ }]);
+  assert.throws(() => applyApprovedPromotion(req, bea), (e: DatasetError) => e.status === 403);
+  // Fail-closed: the tier never flipped and no cross-domain grant was persisted.
+  assert.equal(getDataset(id, amir).tier, 'dataset');
+});
+
+test('H1: an approver CANNOT promote with a grant to a NAMED user (a Builder is not a people-admin)', () => {
+  const id = readyDataset();
+  const req = reqWithGrants(id, [{ grantee: { kind: 'user', id: 'kenji' }, ...READ }]);
+  assert.throws(() => applyApprovedPromotion(req, bea), (e: DatasetError) => e.status === 403);
+  assert.equal(getDataset(id, amir).tier, 'dataset');
+});
+
+test('H1: the default own-domain read grant passes untouched (backward-compat)', () => {
+  const id = readyDataset();
+  const req = requestPromotion(id, amir, { visibility: 'domain' }); // default: domain read grant
+  const asset = applyApprovedPromotion(req, bea);
+  assert.equal(asset.tier, 'asset');
+  assert.deepEqual(asset.grants.map((g) => g.grantee), [{ kind: 'domain', id: 'sales' }]);
+});
+
+test('H1: a domain_admin (people-admin) MAY direct a grant at a named user in their domain', () => {
+  const id = readyDataset();
+  const dana: Principal = { id: 'dana', domains: ['sales'], role: 'domain_admin' };
+  const req = reqWithGrants(id, [
+    { grantee: { kind: 'domain', id: 'sales' }, ...READ },
+    { grantee: { kind: 'user', id: 'amir' }, ...READ },
+  ]);
+  const asset = applyApprovedPromotion(req, dana);
+  assert.equal(asset.tier, 'asset');
+  assert.equal(asset.grants.length, 2);
+});
+
 test('double-apply is rejected once the dataset is already an asset', () => {
   const id = readyDataset();
   const req = requestPromotion(id, amir);

@@ -24,6 +24,65 @@ function str(v: unknown): string {
 }
 
 /**
+ * The two reserved keys the SDK's `os.records.update`/`remove` stamp onto a superseding append,
+ * so the store stays APPEND-ONLY (durable + auditable) while the app FEELS mutable:
+ *   `_key`      — the LOGICAL row this append supersedes (the original add's store id). Absent on a
+ *                 plain `add`, which is therefore its own singleton (keyed by its own `id`).
+ *   `_deleted`  — a tombstone: the row's latest append being `_deleted:true` hides it from the view
+ *                 (reversible — a later non-deleted append for the same key brings it back).
+ * These are the ONLY reserved keys; every other field is the app's own opaque payload.
+ */
+export const RECORD_KEY = '_key';
+export const RECORD_DELETED = '_deleted';
+
+/** The logical key an append collapses under: its `_key` (a supersede) else its own `id` (a fresh row). */
+export function recordKey(r: AppendedRecord): string {
+  const k = str(r[RECORD_KEY]);
+  return k !== '' ? k : str(r.id);
+}
+
+/**
+ * Collapse an append log to its CURRENT rows — the generalized reducer behind the in-place-edit
+ * patterns (editable-grid, kanban, action-detail). For each logical key ({@link recordKey}) the
+ * LATEST append wins (by `at` ISO; ties → later log position, matching an append log); a row whose
+ * winning append is a `_deleted` tombstone is omitted. Output is ordered by each row's EARLIEST
+ * append (creation order), so a row keeps its place across edits instead of jumping on every save.
+ * Reserved keys are STRIPPED from the returned rows — callers see only the app's own fields + `id`.
+ * Pure + unit-tested; renderers just present the result.
+ */
+export function reduceByKey(records: AppendedRecord[]): AppendedRecord[] {
+  const winner = new Map<string, AppendedRecord>();
+  const winnerAt = new Map<string, string>();
+  const firstAt = new Map<string, string>();
+  const order: string[] = [];
+  for (const r of records) {
+    const key = recordKey(r);
+    if (key === '') continue; // no id and no _key → not addressable, skip
+    const at = str(r.at);
+    if (!firstAt.has(key)) {
+      order.push(key);
+      firstAt.set(key, at);
+    } else if (at !== '' && at < (firstAt.get(key) as string)) {
+      firstAt.set(key, at); // an earlier append than any seen → that's the true creation time
+    }
+    const prevAt = winnerAt.get(key);
+    // Later-or-equal `at` wins → equal/blank `at` falls to log order (this record, seen later, wins).
+    if (prevAt !== undefined && at < prevAt) continue;
+    winner.set(key, r);
+    winnerAt.set(key, at);
+  }
+  const out: AppendedRecord[] = [];
+  for (const key of [...order].sort((a, b) => str(firstAt.get(a)).localeCompare(str(firstAt.get(b))))) {
+    const r = winner.get(key);
+    if (!r) continue;
+    if (r[RECORD_DELETED] === true || r[RECORD_DELETED] === 'true') continue; // tombstoned → hidden
+    const { [RECORD_KEY]: _k, [RECORD_DELETED]: _d, ...clean } = r; // strip reserved keys from the view
+    out.push({ ...clean, id: key }); // expose the LOGICAL key as `id` so edits target the right row
+  }
+  return out;
+}
+
+/**
  * Reduce the append log to the LATEST decision per `itemId`. A decision append looks like
  * `{ itemId, decision, reason?, by?, at? }`. Appends missing an `itemId` or a `decision` are
  * ignored (not a decision). Later `at` wins; equal/absent `at` falls back to log order (last wins).

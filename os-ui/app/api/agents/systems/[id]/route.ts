@@ -43,6 +43,9 @@ export const GET = withRoute<{ id: string }>(async ({ user, params }) => {
     lastBuild: view.lastBuild ?? null,
     activity: view.activity ?? null,
     lastRun: view.lastRun ?? null,
+    // True when the last run was recovered after a mid-run restart — the UI shows an
+    // "interrupted — re-run to continue" affordance rather than a stale live spinner.
+    interrupted: view.lastRun?.interrupted ?? false,
     system: view.system,
     ir,
     compileError,
@@ -55,7 +58,7 @@ export const GET = withRoute<{ id: string }>(async ({ user, params }) => {
     hermesEnabled: config.hermesEnabled,
     archived: view.archived ?? false,
   });
-}, { defaultStatus: 500 });
+}, { hydrate: ensureHydrated, defaultStatus: 500 });
 
 /**
  * POST → system lifecycle: `rename` (display name only), `archive` (reversible

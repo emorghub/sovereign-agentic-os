@@ -9,7 +9,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { latestDecisions, decisionFor, doneTaskIds, isTaskDone, recordsFromList } from './records-reduce.ts';
+import { latestDecisions, decisionFor, doneTaskIds, isTaskDone, recordsFromList, reduceByKey, recordKey } from './records-reduce.ts';
 
 test('latestDecisions keeps the latest decision per itemId (by `at`)', () => {
   const log = [
@@ -75,4 +75,55 @@ test('recordsFromList extracts items honestly; a shape without items → []', ()
   assert.deepEqual(recordsFromList({ source: 'demo-seed', note: 'not live' }), []);
   assert.deepEqual(recordsFromList(null), []);
   assert.deepEqual(recordsFromList({ items: 'nope' }), []);
+});
+
+test('recordKey uses _key (a supersede) else the row-own id (a fresh row)', () => {
+  assert.equal(recordKey({ id: 'orig', _key: 'orig', name: 'edit' }), 'orig');
+  assert.equal(recordKey({ id: 'r1', name: 'fresh' }), 'r1');
+  assert.equal(recordKey({ name: 'no-id' }), '');
+});
+
+test('reduceByKey collapses a supersede: an update keyed to the original wins', () => {
+  const log = [
+    { id: 'r1', name: 'Acme', tier: 'A', at: '2026-08-01T10:00:00Z' },        // fresh add
+    { id: 'r2', _key: 'r1', name: 'Acme Corp', tier: 'A', at: '2026-08-02T10:00:00Z' }, // edit of r1
+  ];
+  const rows = reduceByKey(log);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0], { id: 'r1', name: 'Acme Corp', tier: 'A', at: '2026-08-02T10:00:00Z' });
+  // reserved keys are stripped from the view
+  assert.equal((rows[0] as { _key?: unknown })._key, undefined);
+});
+
+test('reduceByKey hides a tombstoned row; a later un-delete brings it back', () => {
+  const del = reduceByKey([
+    { id: 'r1', name: 'A', at: 'T1' },
+    { id: 'r2', _key: 'r1', _deleted: true, at: 'T2' },
+  ]);
+  assert.equal(del.length, 0);
+  const undel = reduceByKey([
+    { id: 'r1', name: 'A', at: 'T1' },
+    { id: 'r2', _key: 'r1', _deleted: true, at: 'T2' },
+    { id: 'r3', _key: 'r1', name: 'A back', at: 'T3' }, // later non-deleted → visible again
+  ]);
+  assert.deepEqual(undel, [{ id: 'r1', name: 'A back', at: 'T3' }]);
+});
+
+test('reduceByKey keeps creation order across edits (a row does not jump when edited)', () => {
+  const rows = reduceByKey([
+    { id: 'a', name: 'first', at: '2026-08-01T00:00:00Z' },
+    { id: 'b', name: 'second', at: '2026-08-02T00:00:00Z' },
+    { id: 'e', _key: 'a', name: 'first-edited', at: '2026-08-03T00:00:00Z' }, // newest append, oldest row
+  ]);
+  assert.deepEqual(rows.map((r) => r.id), ['a', 'b']); // a stays first (its earliest append is oldest)
+  assert.equal(rows[0].name, 'first-edited');
+});
+
+test('reduceByKey tie-break by log order; skips rows with no id and no _key', () => {
+  const tie = reduceByKey([
+    { id: 'r1', v: 'one', at: 'T' },
+    { id: 'x', _key: 'r1', v: 'two', at: 'T' }, // same at → later append wins
+  ]);
+  assert.equal(tie[0].v, 'two');
+  assert.deepEqual(reduceByKey([{ name: 'orphan' }]), []); // not addressable
 });

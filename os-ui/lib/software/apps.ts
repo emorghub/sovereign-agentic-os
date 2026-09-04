@@ -51,7 +51,7 @@ import { dataPlaneToolsFromGrants, agentToolsFromGrants } from '@/lib/software/g
 import { parseAppManifest, renderAppYaml, defaultOpenApi, resolveSurface } from '@/lib/software/metadata';
 import { osMirror } from '@/lib/infra/os-mirror';
 import { getPublicUser, type PublicUser } from '@/lib/platform-admin/users';
-import { codedAppsEnabled } from '@/lib/platform-admin/settings';
+import { codedAppsEnabled, ensureHydrated as ensureSettingsHydrated } from '@/lib/platform-admin/settings';
 import { createFolder, type FolderScope, type Principal as FolderPrincipal } from '@/lib/folders';
 import { normaliseFolderPath } from '@/lib/core/folders';
 import { type ArtifactVersion, versionLog } from '@/lib/core/versioning';
@@ -984,11 +984,14 @@ export const APP_TEMPLATES: { key: AppTemplateKey; label: string; blurb: string 
 
 // ----------------------------------------------------------------- Registry ---
 
-type AppCacheState = { cache: Map<string, App> | null };
+// `hydrated` distinguishes "cache is the mirror's authoritative snapshot" from "cache exists
+// but the mirror was UNREACHABLE at load, so it may be missing persisted apps" — the latter must
+// re-hydrate on the next read once the mirror is back (so apps never disappear for the pod's life).
+type AppCacheState = { cache: Map<string, App> | null; hydrated: boolean };
 const APP_STATE_KEY = Symbol.for('soa.apps.cache');
 function appCacheState(): AppCacheState {
   const g = globalThis as unknown as Record<symbol, AppCacheState | undefined>;
-  if (!g[APP_STATE_KEY]) g[APP_STATE_KEY] = { cache: null };
+  if (!g[APP_STATE_KEY]) g[APP_STATE_KEY] = { cache: null, hydrated: false };
   return g[APP_STATE_KEY]!;
 }
 
@@ -1016,14 +1019,43 @@ function withStatus(err: Error, status: number): Error {
 
 // Shared durable-mirror core (probe → bootstrap-on-404 → hydrate/write-through):
 // lib/os-mirror.ts. A missing index is CREATED, never mistaken for a dead mirror.
-const mirror = osMirror({ index: config.appsIndex });
+// Fresh-index safety: a brand-new os-apps index is created with `dynamic:false` and a raised
+// field-count limit. An app doc carries arbitrary, wildly-varying spec JSON (cookbook-pattern
+// configs), which under OpenSearch's DEFAULT dynamic mapping either explodes the 1000-field
+// limit or type-conflicts across apps — the PUT is then rejected and a fully-built PUBLISHED app
+// silently fails to persist (it "disappears" on the next pod roll). `dynamic:false` stores every
+// field in `_source` (so retrieval is unaffected — we only GET-by-id and match_all) without
+// indexing arbitrary sub-fields. NOTE: this only applies when the index is first CREATED; an
+// existing index is fixed by the spec/draftSpec string-persist below, which needs no reindex.
+const mirror = osMirror({
+  index: config.appsIndex,
+  createBody: { settings: { 'index.mapping.total_fields.limit': 4000 }, mappings: { dynamic: false } },
+});
 
 // Durable, per-artifact version history. Snapshots the user-editable doc content
 // (designDecisions, dataDescriptions, docs) before each meaningful mutation.
 const versions = versionLog('app');
 
+/**
+ * The doc actually persisted to the mirror. The app's two BIG, ARBITRARY-SHAPE fields —
+ * `spec` and `draftSpec` (cookbook-pattern configs whose keys/types vary per app) — are
+ * serialized to JSON STRINGS (`specJson` / `draftSpecJson`) and the object fields dropped, so
+ * OpenSearch maps them as ONE text field each instead of dynamically mapping every nested key.
+ * That is what stops the field-limit blowout / type-conflict that made a fully-built PUBLISHED
+ * app fail to write and vanish. It also works on the EXISTING index (new field names never
+ * clash with the old `spec` OBJECT mapping). `hydrateAppDoc` reverses it (parses the strings
+ * back, with legacy-object fallback). Nothing else about the doc changes.
+ */
+function toPersistedDoc(a: App): Record<string, unknown> {
+  const { spec, draftSpec, ...rest } = a as App & { spec?: unknown; draftSpec?: unknown };
+  const doc: Record<string, unknown> = { ...rest };
+  if (spec !== undefined) doc.specJson = JSON.stringify(spec);
+  if (draftSpec !== undefined) doc.draftSpecJson = JSON.stringify(draftSpec);
+  return doc;
+}
+
 function writeThrough(a: App): void {
-  mirror.writeThrough(a.id, a);
+  mirror.writeThrough(a.id, toPersistedDoc(a));
 }
 
 /** The versioned slice of an app — the user-editable documentation fields. */
@@ -1067,6 +1099,20 @@ export function normalizeAppMembers(raw: unknown, owner: string): AppMember[] {
  *  persisted app doc needs on load. Shared by the bulk hydrate AND the by-id mirror
  *  fallback so both paths yield an identical, ready-to-use App. */
 function hydrateAppDoc(app: App): App {
+  // Reverse toPersistedDoc: the spec/draftSpec are stored as JSON STRINGS (specJson /
+  // draftSpecJson) so OpenSearch never dynamic-maps their arbitrary sub-fields. Parse them back
+  // into the object fields the app model uses. Legacy docs (persisted as the raw `spec`/`draftSpec`
+  // OBJECT, pre-0.6.164) have no *Json field and fall through unchanged. A corrupt string is
+  // ignored (leave the field undefined) rather than throwing away the whole app.
+  const raw = app as App & { specJson?: unknown; draftSpecJson?: unknown };
+  if (typeof raw.specJson === 'string') {
+    try { app.spec = JSON.parse(raw.specJson); } catch { /* leave spec as-is */ }
+    delete raw.specJson;
+  }
+  if (typeof raw.draftSpecJson === 'string') {
+    try { app.draftSpec = JSON.parse(raw.draftSpecJson); } catch { /* leave draftSpec as-is */ }
+    delete raw.draftSpecJson;
+  }
   // Back-compat: apps persisted before surface-detection get one inferred from
   // their scaffold (a persisted declaration still wins over the heuristic).
   if (!app.surface) {
@@ -1121,14 +1167,30 @@ async function getAppByIdWithMirror(appId: string): Promise<App | null> {
 
 async function getCache(): Promise<Map<string, App>> {
   const s = appCacheState();
-  if (s.cache) return s.cache;
+  // A fully-hydrated cache is authoritative — serve it. A cache that exists but is NOT yet
+  // hydrated (built during a mirror outage) falls through to RE-hydrate below.
+  if (s.cache && s.hydrated) return s.cache;
+  const docs = await mirror.hydrate(500); // null → mirror UNREACHABLE; [] → reachable-but-empty
+  if (docs === null) {
+    // Mirror unreachable: keep an in-process cache so THIS pod's creates are retained, but leave
+    // hydrated=FALSE so the next read re-hydrates from the mirror the moment it recovers — and
+    // apps persisted before this boot / by other pods reappear. Caching an empty map as if it
+    // were authoritative (the old `?? []`) poisoned the list empty for the whole pod lifetime:
+    // every app "disappeared" from the tiles until the next restart. A by-id read
+    // (getAppByIdWithMirror) still hits the mirror directly meanwhile.
+    if (!s.cache) s.cache = new Map();
+    return s.cache;
+  }
+  // Mirror reachable: the persisted docs are the truth for the ids they contain. Fold them in,
+  // preserving any in-process-only apps created during an outage (still queued for write-through).
   const map = new Map<string, App>();
-  const docs = (await mirror.hydrate(500)) ?? []; // null → mirror down → in-memory only
   for (const app of docs as App[]) {
     hydrateAppDoc(app);
     map.set(app.id, app);
   }
+  if (s.cache) for (const [appId, app] of s.cache) if (!map.has(appId)) map.set(appId, app);
   s.cache = map;
+  s.hydrated = true;
   return map;
 }
 
@@ -2667,7 +2729,9 @@ export async function createApp(
   // OFF (the default), a coded app (`kind:'code'` / the image pipeline) cannot be
   // created — from ANY front door (UI, API, MCP). Declarative (spec) creation is
   // always allowed. This is the server-side gate: the UI merely reflects it, it does
-  // NOT enforce it. Rejected BEFORE any repo/pipeline side effect runs.
+  // NOT enforce it. Rejected BEFORE any repo/pipeline side effect runs. Hydrate the
+  // persisted flag first so a redeployed pod honours the admin's saved decision.
+  if (!specKind) await ensureSettingsHydrated();
   if (!specKind && !codedAppsEnabled()) {
     throw withStatus(
       new Error('Coded apps are disabled by the platform administrator. Create a Declarative (no-code) app instead (kind: "spec").'),
@@ -3465,6 +3529,7 @@ export function newId(prefix: string): string {
 export function __resetAppsCache(): void {
   const s = appCacheState();
   s.cache = null;
+  s.hydrated = false;
   mirror.__reset();
   versions.__reset();
 }

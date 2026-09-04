@@ -13,6 +13,303 @@ This is **pre-beta** software: APIs, values, and surfaces may change between
 
 ## [Unreleased]
 
+### os-ui 0.6.166 — Editable records: in-place edit/delete for OS-built apps (3 new interactive patterns)
+
+OS-built apps can now **edit and delete** their own records in place — not just append. The three
+previously-deferred interactive patterns are now real, end-to-end:
+
+- **`editable-grid`** — an inline-editable table (add row, edit cells → Save, Delete).
+- **`kanban-workflow`** — cards grouped into status columns; move a card to write its new status.
+- **`action-detail`** — a record + governed action buttons that each set a field to a value.
+
+**The store stays append-only + auditable** — this is a supersede/tombstone model, not destructive
+mutation:
+
+- SDK gains `os.records.update(id, record)` (appends a record that supersedes a logical row,
+  carrying `_key`) and `os.records.remove(id)` (appends a reversible `_deleted` tombstone). BOTH go
+  through the *same governed `add` door* — no new route, no new OPA gate, no new store verb, same
+  auto-approved envelope. Delete is reversible; the full edit history is retained (free audit + undo).
+- New pure reducer `reduceByKey` (`records-reduce.ts`) collapses the append log to current rows:
+  latest append per `_key` wins, tombstones hidden, creation-order stable, reserved keys stripped;
+  each row's `id` is its logical key. The existing single-key reducers (decisions, done-flags) are
+  special cases of the same "reduce the log" philosophy, now generalized to keyed upsert.
+- Config parsers + the three renderers (all using the honest `isRealSave` save-labelling + surfacing
+  governed `Forbidden` verbatim), wired into the runtime switch, authorable-by-selection in the
+  Compose UI (bespoke editors), and offered to the generator/assistant catalogue.
+
+No change to the store's durability or scoping. Carries all of 0.6.165.
+
+### os-ui 0.6.165 — Fix: saving a record inside an OS-built app falsely said "Not saved for real (demo-seed)"
+
+An interactive OS-built app (a `form`, `intake-wizard`, `assignment`, `approval-queue`, or
+`task-checklist`) writes through the governed `os.records.add` door, whose durable home is the
+**OS-side app-records store** — the default static-SPA template has no backend of its own. That store
+labels its results `source:'os-records-store'`. But the renderers + the shared `classifyWriteResult`
+only treated `source:'live-app'` as a real save, so a record that **did** persist to the durable
+store was reported to the user as *"Not saved for real — the app runner is not live (demo-seed)."*
+
+- **`isRealSave(source)`** — one shared predicate (in `interactive-logic.ts`): a real save is
+  `'os-records-store'` OR `'live-app'`; only `'demo-seed'` is illustrative. Used by
+  `classifyWriteResult` and all five interactive renderers (Form, IntakeWizard, Assignment,
+  ApprovalQueue, TaskChecklist), so no site can regress to a `live-app`-only check.
+- **SDK type** — `RecordResult.source` now includes `'os-records-store'` (it always answered with it
+  at runtime; the type had omitted it), with docs stating both store and pod are real saves.
+- No change to what persists — the write was always durable; only the honesty label was wrong.
+  Reads were unaffected (`recordsFromList` keys off `items`).
+
+Carries all of 0.6.164.
+
+### os-ui 0.6.164 — Fix: a fully-built, published Software app vanishes after a pod restart
+
+**Root cause (persistence, not the publish path).** A published app was correctly kept in the
+in-process cache and correctly *sent* to the OpenSearch mirror — but the mirror write was being
+**silently rejected**, so the app never became durable and was gone on the next pod restart. The
+app doc carries two big, arbitrary-shape fields — `spec` and `draftSpec` (the declarative cookbook
+config, whose nested keys and types vary per app). The `os-apps` index used **default dynamic
+mappings**, so every app added its own sub-fields; across apps this hit the 1000-field limit and/or
+produced a cross-doc type conflict, and OpenSearch **rejected the PUT**. Publishing writes the
+largest spec of an app's life, which is why the loss showed up *specifically* once an app was fully
+built and published.
+
+- **Persist the variable fields as opaque JSON strings.** `spec`/`draftSpec` now serialize to
+  `specJson`/`draftSpecJson` (one text field each) on write and parse back on hydrate — OpenSearch
+  never dynamic-maps their internals, so no field-limit blowout and no type conflict. Legacy docs
+  (stored as the raw objects) still hydrate via a fallback; a corrupt string is skipped, not fatal.
+- **Heal the existing index.** On the first healthy probe, the mirror idempotently reconciles the
+  two live-updatable settings on the *already-created* `os-apps` index — raises
+  `index.mapping.total_fields.limit` to 4000 and sets mapping `dynamic:false` — so the fix takes
+  effect without a reindex. A freshly-created index gets the same via `createBody`.
+- No behaviour change for callers; `setAppSpec`/`publishApp` are unchanged.
+
+Carries all of 0.6.163.
+
+### os-ui 0.6.163 — Connectors marked "under construction" (honest preview) across UI, MCP + docs
+
+The external connectors are not yet end-to-end tested, so the OS now says so plainly everywhere they
+surface — no false "ready" signal:
+
+- **Connections gallery (UI):** every connector tile's corner badge changed from a teal **"ready"**
+  to an amber **"under construction"**, and a gallery-wide banner up top sets the expectation —
+  *"Connectors are under construction. Every connector is a preview that hasn't been end-to-end
+  tested yet — configure and explore, but don't rely on them in production until verified."*
+- **MCP:** `list_connection_templates` and `create_connection` now open with an explicit
+  UNDER CONSTRUCTION (PREVIEW) note instructing the agent to tell the user connectors are untested
+  and shouldn't be relied on in production.
+- **Docs:** the OS Guide's Connections section, the MCP-facing `connections.guide.md`, and the
+  Connections tutorial all carry the under-construction/preview caveat. OS Guide PDF regenerated.
+
+Creating/testing a connector is still allowed (so they *can* be exercised and verified) — this is an
+honesty label, not a hard gate.
+
+### os-ui 0.6.162 — Software apps no longer disappear after a mirror hiccup (cache null-poison fix)
+
+**Root cause of "apps disappear after being created":** the app registry's bulk-hydrate did
+`const docs = (await mirror.hydrate(500)) ?? []` — collapsing the mirror's two distinct return
+values, **`null` (OpenSearch UNREACHABLE)** and **`[]` (reachable-but-empty)**, into the same
+empty list, then **cached it as authoritative**. So a *transient* mirror blip at the first
+list-after-boot poisoned the app tiles empty for the **entire pod lifetime** — every app vanished
+from the list until the next restart (the same "marked mirror dead forever" hole `os-mirror.ts`
+warns about, re-introduced at the cache layer). Frequent redeploys made it routine.
+
+**Fix (`lib/software/apps.ts` `getCache`):** a `hydrated` flag now separates "cache is the
+mirror's authoritative snapshot" from "cache built during an outage". On `null` (unreachable) the
+cache is kept (so this pod's in-process creates are retained) but left **not-hydrated**, so the
+**next read re-hydrates from the mirror the moment it recovers** — apps persisted before this boot
+or by other pods reappear instead of staying hidden. On a healthy read the persisted docs are
+folded in, preserving any in-process-only apps still queued for write-through. `writeThrough` was
+already durable (it queues on an outage and replays on heal), so no write-side change was needed.
+
+NOTE: the same `hydrate(...) ?? []` shortcut exists in several other stores (metrics, big-bets,
+science, marketplace, tile-order, some admin registries). Those that cache the result have the
+same latent "disappear-after-a-blip" risk and warrant a follow-up hardening audit (agents, core
+artifacts, security, plugins already handle `null` correctly).
+
+### os-ui 0.6.161 — Workflows "My" isolation, Knowledge-tab simplification, tab rename, + two grounding fixes
+
+- **Business Workflows — "My" is owner-only.** The workflow list bucketed by visibility, and
+  `canView` lets any Builder+ see a same-domain colleague's *Personal* draft — so once every cohort
+  participant is a Builder, everyone saw everyone's personal processes under **My**. The list's My
+  bucket is now **owner-scoped**; a colleague's Personal draft is no longer surfaced there (a Builder
+  can still open one by direct link, and agent-retrieval/DLS stewardship is unchanged).
+- **Knowledge tab — "New knowledge" creates a note directly.** Removed the General-vs-Workflow type
+  chooser: the Knowledge tab is only knowledge now, so **New knowledge** opens a note straight in the
+  editor. (Workflows are authored on their own tab.)
+- **Tab rename:** **Business Processes → Business Workflows** (nav label, page header, back buttons,
+  agent context picker, MCP nav orientation, tutorials).
+- **Software Generate — column discipline + more repair turns.** The reasoning model was substituting
+  conventional columns (`status`/`priority`/`description`/`attachments`) for a dataset's real ones,
+  failing validation. The prompt now forbids assuming conventional columns (map to the closest real
+  one, or omit the field), and generation does up to **3 attempts (2 repair turns)** re-seeded with
+  the exact valid columns — so it converges on real schemas instead of dead-ending.
+- **Agents — granted-context grounding in the run preamble.** An agent granted an action tool auto-gets
+  discovery companions (`list_datasets` …) that run as the human owner and can surface *ungranted*
+  domain items — which the model then tried to use (OPA-denied). The run preamble now names the
+  system's **exact granted resource ids** with an explicit "these are the ONLY resources you may use;
+  a discovery tool may surface others — you are not authorized to use them" rule (the data-plane
+  counterpart to the grant-scoped tool brief).
+
+### os-ui 0.6.160 — Tutorials refreshed for 0.6.158 + a "Talk to the OS" front door on Home
+
+- **Tutorials:** the Software tutorial (step + walkthrough) now covers the 0.6.158 behaviour — Build
+  App lists the exact `{ path, reason, fix }` blockers inline when it can't auto-generate (never a
+  dead-end), and Choose Context reuses an existing dataset before proposing a new one. The Agents
+  Design step notes the proposed team is grounded in the stated goal + granted context, not a guess.
+- **Home "Talk to the OS":** a prominent front-door entry — *"What do you want to build or do
+  today?"* — sits at the top of Home. Typing an intent opens the ONE global OS Assistant already
+  answering (it dispatches an `os-assistant:open` event the shell-mounted assistant listens for, so
+  there is no duplicate assistant/state). Empty submit just opens it. The assistant remains the same
+  governed PLAN→ACT surface (acts as you, through the OS's own MCP, fully audited).
+
+### os-ui 0.6.159 — MCP + documentation alignment for the 0.6.158 fixes
+
+Docs-and-guidance only (no behaviour change). Brings the MCP tool descriptions, the MCP-facing
+Software guide and the end-user OS Guide into line with what 0.6.158 changed:
+
+- **`generate_app_spec` (MCP):** its failure `{ ok:false, issues[] }` is now documented as the SAME
+  machine-actionable `{ path, reason, fix }` the validator emits — "act on the issues and retry,
+  never dead-end; bind an EXISTING granted dataset before assuming a new one must be created."
+- **Software MCP guide (`software.guide.md`):** the Design + Choose Context step now says explicitly
+  "reuse before you create — `list_datasets` first and BIND an existing dataset that fits; only
+  create a new one when nothing suitable exists."
+- **OS Guide (MD + regenerated PDF):** Build App documents that an auto-generate that can't validate
+  lists the exact `{path,reason,fix}` blockers inline (never a note-less dead-end); Choose Context
+  documents that the assistant reuses an existing dataset before proposing a new one. Version stamp
+  bumped to os-ui 0.6.158.
+
+### os-ui 0.6.158 — Software "Generate my app" legibility + Agents grounded auto-propose
+
+Two live-blocker UX fixes.
+
+**Software Build — the "Generate my app" dead-end is gone.** When the generator could not
+produce a valid `AppSpec` after its repair turn, the composer showed
+*"…couldn't produce a valid app from your design. Review the notes…"* — but it **never rendered
+the notes**: the client dropped the server's typed `issues[]`, so the user faced a message that
+promised guidance it didn't show. The composer now surfaces those `issues` inline (e.g.
+*"dataset … is not granted to this app — grant it in Context"*, *"column … not in dataset — use
+one of: …"*), for both the manual **Generate** button and the auto-generate-on-open path. This
+turns a dead-end into the exact, actionable blocker. (The generator/validator logic is unchanged
+— it was already fail-soft on store blips; the bug was purely that the UI hid its output.)
+
+**Agents — the Design auto-proposer no longer fires ungrounded.** It previously proposed a team
+whenever a goal *or* an output existed, even with **no granted context** — which let the reasoning
+model free-associate (a "renewable-energy agent" unrelated to the domain's strategy/big-bets/data).
+It now waits for a real deliverable **AND** at least one granted context
+(data · knowledge · metrics · connections · files · plan). Since the stage order is
+Define → **Grant** → Design, by Design the user should already have granted context, so the
+proposal is grounded in it. A goal-only proposal can still be built by hand.
+
+**Agents — the Define assistant is ask-first.** It stays at the top of Define but only
+auto-suggests once a description exists; with an empty deliverable it shows its intro/starters
+inviting the user to say what they want, rather than proposing before intent is captured.
+
+**Software Design — reuse existing data instead of proposing a new dataset.** The Design
+assistant's data-resolution rule told it to *bind an existing dataset if one is visible*, but it
+was only fed the app's **already-granted** context — so it never saw the datasets that exist and
+are grantable but not yet bound, and always fell through to "propose a NEW dataset". It now also
+receives the caller's **grantable (but unbound) artifacts**, with an explicit "PREFER binding over
+creating" ordering, so it reuses the governed data that's already there.
+
+**Software — the "git not ready" badge no longer shows on declarative apps.** A declarative/spec
+app serves from its spec via the platform runtime and needs no per-app Forgejo repo, so "git not
+ready" was misleading noise there. It now shows only for coded apps (whose source really does live
+in a repo). "Draft" (deploy state) is unchanged.
+
+### os-ui 0.6.141 — Self-heal the "domain gold table not materialized" drift (probe-before-claim + reconcile sweep + zombie-asset prevention)
+
+The recurring #96 / #151 materialization-gap class, diagnosed live on `ds_ylney9n5q5`
+(`northpeak_service_cases`, domain `agentic-leader-q3-2026`): a promoted dataset's registry
+reports it **served** (tier=asset, queryable, cube-ready) at `iceberg.<domain>.gold_<slug>`, but
+the **physical Iceberg table has drifted out of the warehouse** and the dataset carries **no
+`domainTableStale` flag** — so the OS believes it is fine, offers no repair, and Dashboards/Cube
+dead-end with "not materialized". This wave **heals** existing zombies and **prevents** new ones.
+
+#### Fixed / Added
+- **Probe-before-claim (honesty).** The single-dataset detail read (`GET /api/data/datasets/[id]`)
+  now **physically probes** a promoted dataset's domain gold table (the same governed
+  `tableQueryable` probe the publish uses, via `domainTableMissing()` in
+  `lib/data/reconcile-server.ts`) before the detail view claims it queryable/cube-ready. A drifted
+  table is flagged `domainTableStale` at read time — so the honest "not materialized — re-materialize
+  to serve" state + the repair affordance appear even when the (previously unreliable) stored flag was
+  never set. Fail-soft (un-promoted / unreachable engine never cries wolf) and single-read only (never
+  per-row in a list).
+- **Governed reconcile sweep.** New `reconcileDomainTables(operator, deps, {domain?})`
+  (`lib/data/reconcile.ts`, pure + fully unit-tested) enumerates the promoted domain tables the
+  operator governs, probes each physical table, and re-materializes any **missing** or **stale** one by
+  re-running the **stored** publish CTAS via the existing `rematerializeDomainTable` (preserves grain +
+  measures — never reconstructs). Best-effort per dataset (one failure never aborts the sweep;
+  idempotent — a healthy table is skipped). Honest per-dataset report
+  `{datasetId, name, fqn, before: missing|stale|ok, after: refreshed|failed|skipped, error?}`.
+  Governance: Admin tenant-wide, or Builder+ within their own domain (the domain-schema write floor).
+  Exposed as **`POST /api/platform-admin/reconcile-domain-tables`** (admin-gated via `adminCtx`,
+  optional `{domain}`) and the **`reconcile_domain_tables`** MCP verb (data-write surface, Builder+).
+- **Actionable dead-ends.** The Data-tab dataset detail (`DataBuilder.tsx`) shows a prominent
+  **"Re-materialize domain table"** action (Builder+) whenever the domain table is missing/stale for a
+  promoted dataset — calling the existing `rematerializeOnly` repair route. The Dashboards
+  "not available in the governed model" warning now points the operator to that Data-tab action instead
+  of dead-ending.
+- **Zombie-asset PREVENTION (root cause).** A dataset **demote** (`unshare`, asset→dataset) now
+  **retires the governed domain gold table** (`retireDomainTables` in `lib/data/physical-delete.ts` —
+  drops only the domain copies, the owner's personal build is untouched) and **warns on dependents**
+  (`dependentsOf`), so a demoted dataset can never be read as a served domain asset (and a later
+  re-promote can't resurrect a served-but-empty table). Confirmed the **promote/re-promote path is
+  already fail-closed** — `requireDomainTableMaterialized` re-probes the exact domain FQN before any
+  tier flip — and added a **round-trip regression test** (promote → served & in the governed set →
+  demote → not served, no zombie → re-promote → fail-closed again).
+
+### os-ui 0.6.142–0.6.145 — 2026-08-19→22 — Materialization self-heal, honest probes, and the promote/demote round-trip
+
+- **0.6.142 — reconcile probe false-skip.** The self-heal probe gated table existence on a Cube `/meta` ping and *failed open* ("present") on timeout — during a CTAS-heavy sweep Cube is busy, so a genuinely-missing table was declared OK and skipped. Now gated on `queryToolReachable()` (the Trino path the table actually lives in), checked once per sweep, **fail-closed** (probe throw ⇒ missing ⇒ repair). Cube health ≠ Trino table existence.
+- **0.6.143/0.6.144 — build/promote gated on Trino, not Cube.** `buildStage('promote')` (and the silver/gold builds) were Cube-reachability-gated and would fabricate a "refreshed" offline-mock result when Cube was busy. Gated on `queryToolReachable()` so a real deploy never fakes a materialization.
+- **0.6.145 — promote/demote round-trip (no slug poisoning).** Pinning a unique promote slug mutated `physicalSlug`, which also names the owner's **personal-lane** table — breaking the owner's own dataset and the demote round-trip. Replaced with `assertPromoteTargetFree` (block-on-collision, 409 with a rename prompt) so a demoted dataset lands back as the creator's My-dataset and works again; the physical slug is never mutated.
+
+### os-ui 0.6.146–0.6.151 — 2026-08-19→22 — Talk-to-Data reasoning tier, context-picker + app-write + durable-agent + dataset-id polish, and promote-as-view (flagged)
+
+- **0.6.146 — Talk-to-Data.** Always runs on the reasoning tier + prompt hardening, so it supports real SQL questions and stops inventing counts (e.g. "25 service centers" over a 5-row table).
+- **0.6.147 — folder-name truncation.** The context/folder pickers cut names to half; the row now wraps (`flexWrap`) so the full folder path is legible in every tab.
+- **0.6.148 — apps write back.** The Software builder's context assistant now proposes **write** access (not only read) when an epic needs to persist, and proposes a **new record table** when the information has nowhere to live — via `os.records.*`, never a dataset.
+- **0.6.149 — durable agent runs.** Agent build/run state is checkpointed so a run survives a tab-switch / pod restart (resumable, no lost progress).
+- **0.6.150 — clean rebuild.** Durable-agent + promote-as-view code landed together from a clean HEAD (the view flag ships OFF).
+- **0.6.151 — dataset id in title.** The dataset id shows as small grey monospace after the name — trivial copy for support/queries.
+- **PROMOTE-AS-VIEW (behind `promoteAsView`, default OFF).** Promotion can publish a governed Trino **VIEW** `iceberg.<domain>.gold_<slug>` over the owner's personal-lane gold instead of a physical CTAS copy; demote = `DROP VIEW`; reconcile/re-materialize become no-ops (a view can't drift) — deleting the entire zombie/collision/re-materialize class. Requires the **query-tool 0.6.2** image (CREATE-OR-REPLACE-VIEW / DROP-VIEW allowlist in `execute_guard.py`); OPA needs no change (the view shares the domain FQN governance is keyed on). Verified live: `table_type=VIEW`, member reads the view, base personal-lane read denied.
+
+### os-ui 0.6.152 — 2026-08-22 — Agent-build reach-END fix + autonomous-agents platform gate
+
+- **Agent-system Build "test invocation did not reach END" (cohort blocker).** The offline graph verifier only counted END via a supervisor node or a handoff-less leaf — but `handoff` edges compile to *conditional* Commands, so a cyclic/handoff team (coordinator↔specialist) had no leaf and failed verification even though the real runtime terminates fine. `runGraph` now treats any ReAct node as able to finish to END; cyclic-handoff regression test added.
+- **Autonomous agents OFF by default.** New platform flag `autonomousAgentsEnabled` (default OFF, nil-safe). Unattended triggers (cron schedule + event/API) are refused **fail-closed** at the single run entrypoint (`runScheduledSystem`) with an honest policy message until a platform admin enables it in Admin → Platform Settings; running a system by hand is unaffected.
+
+### os-ui 0.6.153 — 2026-08-22 — Agent context-scoping, Data DQ-cards + auto-advance, Software heal + assistant fallback
+
+- **Agent run only sees granted context (security/UX).** The run system prompt was injecting each granted tab's full `CONTEXT.md` — which enumerates the whole tool catalog + golden paths — so an agent granted only `query_data` was *told* to call `build_gold_join`/`run_quality_checks`/`create_software`/`index_knowledge` (execution refused them, but the discovery layer leaked). Replaced with a **grant-scoped tool brief**; the build spec is injected only when `create_software` is granted. Execution-time governance untouched (defense-in-depth).
+- **Data — "Suggest quality rules" produces rule cards.** The validate stage returned prose; it now returns the structured `{checks}` contract (recovered via the tolerant parser even when a reasoning model wraps JSON in preamble) and files them as editable rule cards.
+- **Data — auto-advance on upload.** After a Bronze commit, Silver → Gold → docs → DQ rules build automatically (best-effort, Bronze stays raw, each stage independent, all override-able).
+- **Software — "Reconnect git" + assistant fallback.** Offline apps (created while Forgejo was briefly unreachable) now show a **Reconnect git** action that re-probes + re-scaffolds; the app assistant falls back to the saved spec when the on-screen draft is mid-edit-invalid.
+- **query-tool 0.6.2 pinned in the chart** so `helm upgrade` no longer reverts the promote-as-view allowlist.
+
+### os-ui 0.6.154 — 2026-08-22 — Agents-tab builder redesign (Define · Grant · Design · Build&Run · Evaluate)
+
+- Five-stage flow: **Define** (the outcome), **Grant** ("what your team can use" — rebuilt on a shared `ChooseContextShell` primitive so it matches the Software tab's Choose-Context UX; Software was refactored onto the *same* primitive with zero behavior change), **Design** (a team is **auto-proposed on entry** from the deliverable + grants, grounded only in granted context, confirmed via the one governed commit path), **Build & Run**, **Evaluate**.
+- A **per-stage AI assistant** with apply-suggestion cards. Backend gains chat + propose modes; the legacy `{instruction}` scaffold path is unchanged. Saved systems load with no yaml migration.
+
+### os-ui 0.6.155 — 2026-08-22 — Agents builder iteration + View/Edit mode
+
+- **Six stages:** Define · Grant · Design · **Build** · **Run** · Evaluate (Build & Run split apart again).
+- The **trigger** (Manual / On schedule / Called from system) moved to **Define** — how the team runs is defined up front.
+- The per-stage assistant moved to the **top** of each stage and **auto-suggests on stage entry** (proactive, ref-guarded, dismissible).
+- **View vs Edit:** a ready+tested system (built and run at least once) opens in a read-only **View** (trigger/run · live monitor · results + diagnostics, reusing the Run + Evaluate panels); the six-stage builder is **Edit** (✎). Matches the OS-wide Context-tab View/Edit convention.
+
+### os-ui 0.6.156 — 2026-08-22 — Software Design cleanup: remove the vestigial code-app hand-off
+
+- The Software **Design/Epics** view still showed **Push to Jira · Push code to Git · Import Claude design** — code-app-era integration actions that no longer fit the **declarative** apps model (an AppSpec composed + published, no code hand-off). Removed the whole "Ship this design" panel + its now-orphaned local. Backend routes left dormant (no UI surface).
+
+### os-ui 0.6.157 — 2026-08-23 — Overnight hardening wave (Software Build P0 · durable settings · security H0/H1)
+
+Fanned out from the full code + design review (`docs/REVIEW-2026.md`); every item tsc-clean with the full 5493-test suite green.
+
+- **Software Build P0 (cohort blocker).** The declarative Build stage could reach a **dead-end**: an app with stories + granted data + a stale default `draftSpec` fell through all three affordances (auto-generate bailed on any draftSpec; the empty-state only rendered when material was *missing*; the reset was developer-only while Build defaults to Simple) → nothing rendered, no button. New `lib/software/appspec/build-affordance.ts` always resolves the Build stage to ONE honest, actionable outcome and renders a primary **"Build from my design"** button in both Simple and Developer modes. The app assistant's spec fallback is now `client draft → app.draftSpec → app.spec` (it refines work-in-progress declarative apps instead of refusing), and the builder seeds already-satisfied Define/Design stages **green on open** (each still live-gated).
+- **Durable platform settings (MAIN-F1).** `settings` / `security` (egress allowlist) / `tenant` / `plugins` were bare in-memory `let`s that silently reverted on every redeploy **while their routes wrote an audit row claiming it persisted**. They now write through the `os-mirror` + hydrate on boot (the same durable pattern every other store uses), so `promoteAsView` / `autonomousAgentsEnabled` / `codedAppsEnabled` / model-roles / branding survive a pod roll — and the audit trail is honest. Admin routes await hydration before any read.
+- **Security H0 — SQL injection in the metrics builder.** A metric's `column` / `filter.column` reached executed Trino SQL only `.trim()`'d; `guard_read` blocks only `;`/comments, so an injected expression/subquery slipped through. Now IDENT-validated (`assertColumn`, mirroring `transform.ts` `qcol()`) — fail-closed at both sinks.
+- **Security H1 — grant injection at promotion approval.** A promotion persisted the requester's grants verbatim, so a routine approve could leak the asset cross-domain or to named individuals the approver can't authorize. Approval now checks every grant TARGET against the approver's authority (`assertGrantsWithinAuthority`, 403 fail-closed) — in **both** the Data and Files promotion paths.
+
 ## [os-ui 0.6.140] — 2026-08-14 — Remove the in-app tool overlay entirely (embedded tools open in their own tab)
 
 ### Fixed

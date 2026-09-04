@@ -28,6 +28,9 @@ import { FormRenderer } from './FormRenderer.tsx';
 import { AssignmentRenderer } from './AssignmentRenderer.tsx';
 import { ApprovalQueueRenderer } from './ApprovalQueueRenderer.tsx';
 import { TaskChecklistRenderer } from './TaskChecklistRenderer.tsx';
+import { EditableGridRenderer } from './EditableGridRenderer.tsx';
+import { KanbanWorkflowRenderer } from './KanbanWorkflowRenderer.tsx';
+import { ActionDetailRenderer } from './ActionDetailRenderer.tsx';
 import type {
   ApprovalQueueConfig,
   AssignmentConfig,
@@ -44,6 +47,9 @@ import type {
   StatusBoardConfig,
   TaskChecklistConfig,
   TimelineConfig,
+  EditableGridConfig,
+  KanbanWorkflowConfig,
+  ActionDetailConfig,
 } from '@/lib/software/appspec/patterns.ts';
 
 /**
@@ -104,6 +110,12 @@ function BodyRenderer({ body, os, functions }: { body: TabBody; os: OsClient; fu
       return <ApprovalQueueRenderer view={body.config as ApprovalQueueConfig} os={os} />;
     case 'task-checklist':
       return <TaskChecklistRenderer view={body.config as TaskChecklistConfig} os={os} />;
+    case 'editable-grid':
+      return <EditableGridRenderer view={body.config as EditableGridConfig} os={os} />;
+    case 'kanban-workflow':
+      return <KanbanWorkflowRenderer view={body.config as KanbanWorkflowConfig} os={os} />;
+    case 'action-detail':
+      return <ActionDetailRenderer view={body.config as ActionDetailConfig} os={os} />;
     default:
       return <PatternComingSoon pattern={body.pattern} label={def?.label ?? body.pattern} />;
   }

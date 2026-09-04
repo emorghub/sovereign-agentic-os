@@ -2,7 +2,7 @@
 title: "Sovereign Agentic OS"
 subtitle: "The governed, EU-sovereign operating system for data, knowledge, agents and software — where AI gets real, safe hands on your work."
 author: "Orchestrated by Data Masterclass · datamasterclass.com · www.sovereign-agentic.com"
-date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.31) · generated {{DATE}} from commit {{GIT_COMMIT}}"
+date: "Chart 0.2.11 (app 0.2.0-alpha.11 · os-ui 0.6.166) · generated {{DATE}} from commit {{GIT_COMMIT}}"
 titlepage: true
 titlepage-rule-color: "c8a24a"
 toc: true
@@ -225,10 +225,12 @@ there.
 
 ## Entry
 
-- **Home — the golden-path launcher.** The warm front door after you pick a domain. An
-  illustrated launcher of the golden paths (Data, Knowledge, Agents, Software, Science,
-  Metrics, Dashboards, Big Bets, Marketplace, Connections), each card with a role-aware
-  action. It *only* orients and routes — the live view lives one click away in Cockpit.
+- **Home — the golden-path launcher.** The warm front door after you pick a domain. It opens
+  with **Talk to the OS** — *"What do you want to build or do today?"* — type an intent and the
+  one governed **Ask the OS** assistant opens already working on it. Below sits an illustrated
+  launcher of the golden paths (Data, Knowledge, Agents, Software, Science, Metrics, Dashboards,
+  Big Bets, Marketplace, Connections), each card with a role-aware action. It *only* orients and
+  routes — the live view lives one click away in Cockpit.
 - **Cockpit — what's moving, what needs you.** A persona-ordered live overview: a pulse strip
   (*Needs you · In progress · Your items · Spend* vs. cap), your work-in-progress, and a
   scannable "top items, by type" board. Cockpit *reads and routes* — it never recomputes
@@ -253,11 +255,12 @@ there.
   Model*, each a fixed set of sections — **General · Strategy · Business · Organization ·
   Architecture · Data · Glossary** — governed per scope (My = owner, Domain = domain_admin+,
   Company = admin). It's the durable, structured backbone agents can be granted as context.
-- **Workflows — the process spine.** A **workflow** per business process (ordered steps ·
+- **Business Workflows — the process spine.** A **workflow** per business process (ordered steps ·
   business rules · expert knowledge, each step owned by a Human / Software / Agent / external
   actor), retrievable and grantable to agents — with a **Data & Metrics** tab that links the
   governed datasets and KPIs the process runs on, each a scope-badged chip deep-linking to the
-  real artifact.
+  real artifact. Your **My** list shows only your own drafts (a colleague's personal draft never
+  clutters it); promote to Domain to share.
 - **MCP** *(Builder+)* — the setup surface for connecting external AI clients over MCP.
 - **Tutorials.** An illustrated, hands-on tutorial for every tab — fourteen today, each kept
   in step with its tab's current journey — reached from Home or a tab header, that can
@@ -267,8 +270,10 @@ there.
 
 - **Knowledge — the domain's captured know-how.** Human-authored reference knowledge, made
   retrievable by a knowledge agent behind document-level security. Mark a decision rule **hard**
-  and it compiles into an OPA guardrail. (The structured backbone — Operating Model, Strategy,
-  Big Bets, Workflows — lives in the Plan section; Knowledge is the reference library.)
+  and it compiles into an OPA guardrail. **New knowledge** creates a note directly (the Knowledge
+  tab is notes only; business processes live in Business Workflows). (The structured backbone —
+  Operating Model, Strategy, Big Bets, Business Workflows — lives in the Plan section; Knowledge is
+  the reference library.)
 - **Files — a calm governed drive.** Any unstructured file — documents, images, audio, video —
   added via **＋ New** (**Upload a file** or **New note (markdown)** written in place) and
   auto-indexed (parse → embed → hybrid OpenSearch) so agents can search and cite it. Opening a
@@ -298,9 +303,11 @@ there.
   assets/products — any dataset built to Silver/Gold that you can read is a valid join partner, so
   you can build a curated view entirely from your own private data (its personal lane is read as
   you). The
-  business (Gold) layer that metrics read is **materialized automatically**: a clean single-table
-  ingested dataset **passes through** to a queryable business table with no manual "build Gold"
-  step, and a curated dataset materializes the composition you saved. Measures are defined in the
+  business (Gold) layer that metrics read is **materialized automatically**: after a Bronze commit,
+  **Silver → Gold → documentation → DQ rules build in sequence without manual steps** (best-effort,
+  each stage independent, all overridable); a curated dataset materializes the composition you saved.
+  The **"✨ Suggest quality rules"** action returns structured, editable rule cards (not prose) so you
+  apply the suggestions directly. Measures are defined in the
   Metrics tab, not in the composition, so the business layer stays a pure projection/join and a
   rebuild never wipes them. The **Composition** join picker offers only datasets visible in your
   *active* domain (My / Domain / Company of the operating domain, with the Marketplace as the only
@@ -338,7 +345,10 @@ there.
 - **Connections — governed bridges to outside systems.** A Connection is `credentials +
   endpoint + a set of governed tools`, never a raw pipe — used to bring data in and to expose
   external APIs/MCPs as tools. You grant **use**, never the token; **reads are automatic, writes
-  are approval-gated** (destructive ops blocked), and secrets are write-only. The Supported
+  are approval-gated** (destructive ops blocked), and secrets are write-only. **⚠️ The connectors
+  are currently *under construction*: every one is a preview that has not been end-to-end tested
+  yet — each gallery tile carries an "under construction" badge and the gallery a banner. Configure
+  and explore them, but don't rely on a connector in production until it's verified.** The Supported
   Connectors gallery is **grouped by vendor stack** (Microsoft · Google · AWS · Databricks ·
   Snowflake · Salesforce · Kajabi · Atlassian · Open source · Other) and searchable. When nothing in the
   gallery fits, a **Custom Connector** lets you add your own **REST/GraphQL API** or **MCP
@@ -424,28 +434,32 @@ honestly rather than inventing an answer when retrieval comes back empty.
 ## Build
 
 - **Agents — compose, govern, run.** A domain's **agent systems** (instructions + tools +
-  memory) move through **five phases — Define · Design · Build · Run · Evaluate**. In
-  **Define**, **"What your team can use"** is the interactive grants surface, and a grant here is
-  a **default-on capability**: **every agent in the system inherits the full set of the system's
-  Define grants by default** — you *narrow* an agent to give it less, never scramble to add. Per
-  item you choose **read-only · read + propose · read + write** (a clear labelled selector),
-  capped by the system's overall access setting; a **read + write** grant provisions that agent's
-  matching **write tools** (e.g. `upload_file`, `create_dataset`), and a hard invariant guarantees
-  an agent can never exceed the team's grants. Grants split into two groups — **Plan Items**
-  (Strategy · Big Bets · Operating Model · Workflows) and **Context** (Knowledge · Files · Data ·
-  Connections · Metrics) — and **all four Plan Items are grantable**: granting a pillar or bet
-  provisions its governed read tools (`get_pillar` / `get_big_bet`), DLS-scoped to what the caller
-  may view. Context items grant via a **folder-tree with tri-state checkboxes** — tick a folder to
-  grant everything in it (and future contents, resolved at run time, budget-capped, every resolved
-  item still per-item DLS/OPA-checked so a folder grant is provably a *subset*), or tick individual
-  items. Each **data grant** can target the **medallion layer** the team reads — Bronze, Silver,
-  or Gold — and the picker only offers layers that are actually built, defaulting to the highest
-  (Gold, the curated default). **Design** composes the agents three equivalent ways — a React-Flow
-  graph builder, Monaco YAML editing, or a chat assistant. **Build** (*Build = execute + verify*)
-  provisions and checks the team behind a live progress stepper; **Run** executes it as you and
-  offers a **"Download PDF Results Report"**; **Evaluate** attributes context per agent and offers
-  a **"Download PDF Evaluation Report"** — both fully brand-styled (gold-lotus cover, embedded
-  datamasterclass fonts). Every call routes through **LiteLLM → OPA → Langfuse**.
+  memory) move through **six stages — Define · Grant · Design · Build · Run · Evaluate**. In
+  **Define** you name the system, state its deliverable, and pick the trigger (Manual / On schedule /
+  Called from another system). **Grant** ("What your team can use") is the interactive grants surface,
+  built on the shared `ChooseContextShell` primitive — a **default-on capability** where every agent
+  inherits the full set of the system's grants: you *narrow* an agent to give it less, never scramble
+  to add. Per item you choose **read-only · read + propose · read + write** (a clear labelled selector);
+  a **read + write** grant provisions matching write tools, and a hard invariant guarantees an agent
+  can never exceed the team's grants. Grants split into two groups — **Plan Items** (Strategy · Big Bets ·
+  Operating Model · Workflows) and **Context** (Knowledge · Files · Data · Connections · Metrics) — and
+  **all four Plan Items are grantable**: granting a pillar or bet provisions its governed read tools
+  (`get_pillar` / `get_big_bet`), DLS-scoped to what the caller may view. Context items grant via a
+  **folder-tree with tri-state checkboxes** — tick a folder to grant everything in it (resolved at run
+  time, budget-capped, every resolved item still per-item DLS/OPA-checked). Each **data grant** can
+  target the **medallion layer** the team reads — Bronze, Silver, or Gold — defaulting to the highest
+  built (Gold). **Design** composes the team three equivalent ways — a React-Flow graph builder, Monaco
+  YAML editing, or a **chat assistant that auto-proposes a grounded team on entry** (referencing only
+  granted context, confirmed via the one governed commit path); the stage assistant sits at the top of
+  each stage and **auto-suggests on entry** (proactive, dismissible). **Build** (*execute + verify*)
+  provisions and checks the team behind a live progress stepper; **Run** executes it as you and offers
+  a **"Download PDF Results Report"**; **Evaluate** attributes context per agent and offers a **"Download
+  PDF Evaluation Report"** — both fully brand-styled. A ready+tested system opens in read-only **View**
+  (trigger/run · live monitor · results + diagnostics); the six-stage builder is **Edit** (✎ button),
+  matching the OS-wide View/Edit convention. Unattended triggers (schedule + event/API) are governed by
+  the **Autonomous Agents** platform flag (Admin → Platform Settings) — **OFF by default**; fail-closed
+  if unset; running a system by hand is always available. Every call routes through **LiteLLM → OPA →
+  Langfuse**.
 - **Software — compose a governed app, don't code one.** An app here isn't a coding project you
   build, ship and host — it's a **governed declarative specification** (an *AppSpec*) that the
   trusted OS renders **same-origin**, under the viewer's own session. There's **no per-app repo,
@@ -471,11 +485,18 @@ honestly rather than inventing an answer when retrieval comes back empty.
     Metrics · Files · Knowledge · Agents · Connections** — by reference, never by copying and never
     with raw credentials. Per type you can **use existing** (pick governed artifacts you're
     entitled to and grant them) or **create new** — a fresh, possibly-empty dataset / file /
-    knowledge is created for you in an **"App «Name»"** folder, granted, and ready to fill. A tab
-    can only read a dataset the app was granted; anything else is a blocking validation issue.
+    knowledge is created for you in an **"App «Name»"** folder, granted, and ready to fill. The
+    assistant **reuses before it creates**: it sees the governed data you already have and offers to
+    **bind an existing dataset** whenever one fits, rather than spinning up a duplicate — a new one
+    is proposed only when nothing suitable exists. A tab can only read a dataset the app was granted;
+    anything else is a blocking validation issue.
   - **Build App — it builds itself, then you refine by chat.** Open **Build App** and the OS
     **auto-generates the whole app** from your epics, user stories and granted data — a validated
-    spec of pattern tabs wired to real columns. From there you **refine with the built-in chat
+    spec of pattern tabs wired to real columns. If it *can't* produce a valid app, it never
+    dead-ends: it lists the **exact blockers to fix** inline — the same machine-actionable
+    `{ path, reason, fix }` issues the validator emits (e.g. *"dataset … is not granted — grant it
+    in Choose Context"* or *"column … not in the dataset — use one of …"*) — so you know precisely
+    what to grant or adjust, then Generate again. From there you **refine with the built-in chat
     assistant**: it explains what's built, and you say *"make Orders a kanban by status"* or
     *"add a KPI tab for total revenue"* — it applies the change *directly*, schema- and
     governance-validated, and the live preview updates (an instruction it can't satisfy changes
@@ -750,36 +771,43 @@ Northpeak's campaign playbook lives in people's heads. Let's make it retrievable
 Now the payoff. Mara builds an agent team that reads the campaign data, respects the playbook,
 and recommends a budget next-best-action.
 
-1. **Compose.** In **Agents**, Mara drags an *analysis* agent and a *recommendation* agent onto
-   the React-Flow canvas (or edits `system.yaml` directly — same versioned file). Each agent's
-   `AGENT.md` grounds it in the published campaign knowledge.
-2. **Grant resources + tools.** In "What your team can use" she grants the system the
-   Domain-scope campaign datasets, the knowledge workflow, and the `query_data` /
-   `search_knowledge` tools, each at read-only. A validation gate must
-   pass; a sub-agent's grants are always a strict subset of the system's.
-3. **Pick models.** The single **Auto / Reasoning / Execution** toggle shows the real gateway
-   model names (`sovereign-reasoning`, `sovereign-default`) with an internal/external badge.
-4. **Build = execute + verify.** *Build* runs the compiled system and checks it — every call
-   routed **LiteLLM → OPA → Langfuse**.
+1. **Define.** In **Agents**, Mara opens **+ New**, names the system, states its deliverable
+   ("recommend a next-best budget action for each active campaign"), and picks the trigger — Manual
+   for now. Each agent's `AGENT.md` will ground it in the published campaign knowledge.
+2. **Grant resources + tools.** In the **Grant** stage ("What your team can use") she grants the
+   system the Domain-scope campaign datasets, the knowledge workflow, and the `query_data` /
+   `search_knowledge` tools, each at read-only. A hard invariant guarantees a sub-agent's grants
+   are always a strict subset of the system's.
+3. **Design.** The **Design** stage auto-proposes a grounded team on entry — an *analysis* agent
+   and a *recommendation* agent referencing only the granted context — which she confirms via a
+   single Apply card. She can also drag the React-Flow graph or edit `system.yaml` directly. The
+   per-stage AI assistant sits at the top and proactively suggests refinements. The single
+   **Auto / Reasoning / Execution** toggle shows the real gateway model names.
+4. **Build = execute + verify.** *Build* provisions and checks the compiled system behind a live
+   progress stepper — every call routed **LiteLLM → OPA → Langfuse**.
 5. **Run — governed all the way down.** *Run* executes the team **as Mara**. Every tool call
-   the team makes dispatches through the same governed door as her own MCP calls: grant-scoped,
-   OPA-pre-gated, role-floored. The team returns *INCREASE / CUT / HOLD budget for X days +
-   reasoning*. A write pauses for approval and enqueues in **Governance** — the agent is
-   *propose-don't-commit* by default.
+   dispatches through the same governed door as her own MCP calls: grant-scoped, OPA-pre-gated,
+   role-floored. The team returns *INCREASE / CUT / HOLD budget for X days + reasoning*. A write
+   pauses for approval and enqueues in **Governance** — the agent is *propose-don't-commit* by
+   default.
 6. **Evaluate — see what each agent actually used.** The **Evaluate** view attributes context
-   *per agent*: exactly which datasets, docs, files, metrics and connections each agent read,
-   how (tool + read/retrieved/written + a short args hint), each a **clickable deep link** that
-   opens the real artifact (switching scope so it's visible). A granted-vs-used strip flags dead
-   grants. So Mara can prove the team grounded on the campaign knowledge, not on thin air.
+   *per agent*: exactly which datasets, docs, files, metrics and connections each agent read, how
+   (tool + read/retrieved/written + a short args hint), each a **clickable deep link** that opens
+   the real artifact. A granted-vs-used strip flags dead grants.
 7. **Promote.** Once it's good, Mara files a promotion; a Builder shares it (to Domain) so the
-   whole domain can *run* it (but not edit it).
+   whole domain can *run* it (but not edit it). Once the system has been built and run at least
+   once, opening it goes to a read-only **View** — trigger/run controls, live monitor, results and
+   diagnostics — with the **✎ Edit** button to re-enter the six-stage builder.
 
 **Two runtimes, one governed plane.** A system picks **LangGraph** (the default — structured,
 replayable, human-in-the-loop) or the autonomous **Hermes** runtime for long-running work that
 compounds (persistent memory + self-improving skills). Both share one governed plane: Hermes
 reaches models **only** through LiteLLM and tools **only** through the same Platform MCP, so OPA
 still gates every call, Langfuse traces it, and code runs in a kernel-isolated sandbox (Kata
-microVM or gVisor — never host-local). Hermes ships **off by default**.
+microVM or gVisor — never host-local). Hermes ships **off by default**. Unattended triggers
+(cron schedule and event/API callbacks) are additionally governed by the **Autonomous Agents**
+platform flag in **Admin → Platform Settings** — **OFF by default**, enforced fail-closed at the
+single run entrypoint; triggering a system manually is always available regardless of the flag.
 
 ## Golden path 4 — Big Bets & Strategy: tying it to value
 

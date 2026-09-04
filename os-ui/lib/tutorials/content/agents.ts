@@ -31,7 +31,7 @@ const agents: TutorialDef = {
     {
       illustration: 'connect',
       title: 'Design — review the team and its grants',
-      body: 'Each card is one agent; the START agent goes first and hands work to the others. Under "What your team can use" you grant the resources every agent shares — Read-only, Read + propose, or Read + write per item. The matching tools are granted automatically; nothing outside the grants is callable.',
+      body: 'Each card is one agent; the START agent goes first and hands work to the others. The OS proposes a team grounded in your stated goal and the context you granted — never a generic guess — once you\'ve described what it should do and granted some context. Under "What your team can use" you grant the resources every agent shares — Read-only, Read + propose, or Read + write per item. The matching tools are granted automatically; nothing outside the grants is callable.',
     },
     {
       illustration: 'build',

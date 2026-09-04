@@ -23,7 +23,15 @@ import { domainSchema, personalSchema, physicalSlug } from './store-fqn.ts';
  * testable without a cluster; the route injects the real `executeRun`.
  */
 
-export type PhysicalDrop = { fqn: string; schema: string; layer: Layer };
+export type PhysicalDrop = {
+  fqn: string;
+  schema: string;
+  layer: Layer;
+  /** The Iceberg object at `fqn`: a physical `'table'` (the classic CTAS copy) or a governed
+   *  `'view'` (promote-as-view). Decides `DROP TABLE` vs `DROP VIEW`. Defaults to `'table'`
+   *  (byte-stable — every existing drop is a table drop). */
+  object?: 'view' | 'table';
+};
 
 const LAYERS: Layer[] = ['bronze', 'silver', 'gold'];
 
@@ -42,8 +50,53 @@ export function dropPlan(d: Dataset): PhysicalDrop[] {
     out.push({ fqn: `iceberg.${personal}.${layer}_${s}`, schema: personal, layer });
     if (d.tier !== 'dataset') {
       const dom = domainSchema(d.domain);
-      out.push({ fqn: `iceberg.${dom}.${layer}_${s}`, schema: dom, layer });
+      // The domain copy is a VIEW under promote-as-view, else the classic physical table.
+      const object: 'view' | 'table' = d.domainArtifact === 'view' ? 'view' : 'table';
+      out.push({ fqn: `iceberg.${dom}.${layer}_${s}`, schema: dom, layer, object });
     }
+  }
+  return out;
+}
+
+/**
+ * The DOMAIN-schema copies of a dataset's built layers — the governed published tables
+ * (`iceberg.<domain>.<layer>_<slug>`) a promotion materialized. NEVER the owner's personal
+ * lane (the owner keeps their own build). This is the RETIRE plan for a DEMOTE (unshare):
+ * when a dataset leaves the domain tier it must stop being readable as a served domain
+ * asset, so its orphaned domain copies are dropped. Pass the PRE-demote dataset (its slug +
+ * built layers are read here); the tier is irrelevant (the caller already decided to retire).
+ */
+export function domainDropPlan(d: Dataset): PhysicalDrop[] {
+  const s = physicalSlug(d);
+  const dom = domainSchema(d.domain);
+  // A view-promoted dataset's domain artifact is a VIEW — demote must DROP VIEW (dropping the
+  // owner's personal table is never attempted here; the personal lane is untouched either way).
+  const object: 'view' | 'table' = d.domainArtifact === 'view' ? 'view' : 'table';
+  const out: PhysicalDrop[] = [];
+  for (const layer of LAYERS) {
+    if (!d.versions[layer].built) continue;
+    out.push({ fqn: `iceberg.${dom}.${layer}_${s}`, schema: dom, layer, object });
+  }
+  return out;
+}
+
+/**
+ * The set of physical FQNs some OTHER live dataset ALSO occupies (a name/slug collision).
+ * Because the physical table is keyed on `physicalSlug` (name-slug), not the id, two datasets
+ * with the same slug in one domain resolve to the SAME `iceberg.<domain>.<layer>_<slug>`
+ * table. Dropping `target`'s tables would then ORPHAN a still-live sibling. This returns the
+ * union of `dropPlan(o)` FQNs for every non-archived `o !== target`, so the drop can SKIP
+ * (protect) any table a sibling still needs. Archived datasets are excluded — they hold no
+ * live claim (their footprint is reclaimable).
+ */
+export function sharedFootprintFqns(
+  target: Dataset,
+  others: (Dataset & { archived?: boolean })[],
+): Set<string> {
+  const out = new Set<string>();
+  for (const o of others) {
+    if (o.id === target.id || o.archived) continue;
+    for (const drop of dropPlan(o)) out.add(drop.fqn);
   }
   return out;
 }
@@ -61,9 +114,47 @@ export type ExecFn = (sql: string, identity: ExecuteIdentity) => Promise<unknown
  * guard 403 for a non-owner caller on the personal lane) never blocks the others,
  * and every miss is reported as an orphan with its real reason.
  */
-export async function dropPhysicalTables(d: Dataset, user: Principal, exec: ExecFn): Promise<PhysicalDeleteReport> {
+export async function dropPhysicalTables(
+  d: Dataset,
+  user: Principal,
+  exec: ExecFn,
+  protectedFqns: Set<string> = new Set(),
+): Promise<PhysicalDeleteReport> {
+  return dropTables(dropPlan(d), user, exec, protectedFqns);
+}
+
+/**
+ * RETIRE a dataset's DOMAIN-schema copies on a DEMOTE (unshare): drop the governed
+ * published tables so a demoted dataset can NEVER be read as a served domain asset again
+ * (the zombie-asset fix). Best-effort + honestly reported, exactly like the delete drop.
+ * The personal lane is untouched — the owner keeps their own build to re-promote later.
+ */
+export async function retireDomainTables(
+  d: Dataset,
+  user: Principal,
+  exec: ExecFn,
+  protectedFqns: Set<string> = new Set(),
+): Promise<PhysicalDeleteReport> {
+  return dropTables(domainDropPlan(d), user, exec, protectedFqns);
+}
+
+/** Drop a planned set of tables, best-effort per table (shared by delete + demote-retire).
+ *  A table in `protectedFqns` is SKIPPED (never dropped): some OTHER live dataset shares it
+ *  via a name/slug collision, so dropping it would orphan the still-served sibling. */
+async function dropTables(
+  plan: PhysicalDrop[],
+  user: Principal,
+  exec: ExecFn,
+  protectedFqns: Set<string> = new Set(),
+): Promise<PhysicalDeleteReport> {
   const report: PhysicalDeleteReport = { dropped: [], orphaned: [] };
-  for (const t of dropPlan(d)) {
+  for (const t of plan) {
+    // Never drop a table another live dataset still occupies (name/slug collision) — the
+    // drop would leave that sibling's metadata "served" with its physical table gone.
+    if (protectedFqns.has(t.fqn)) {
+      report.orphaned.push({ fqn: t.fqn, reason: 'kept: physical table still shared by another dataset (name/slug collision)' });
+      continue;
+    }
     // Personal-lane tables are owner-only in Trino→OPA: the drop must run under the
     // uid; governed schemas run under the domain principal (same rule as the builds).
     const identity: ExecuteIdentity = {
@@ -73,7 +164,10 @@ export async function dropPhysicalTables(d: Dataset, user: Principal, exec: Exec
       role: user.role,
     };
     try {
-      await exec(`drop table if exists ${t.fqn}`, identity);
+      // A governed VIEW (promote-as-view) must be dropped with DROP VIEW, not DROP TABLE —
+      // Trino rejects a DROP TABLE on a view (and vice versa). Both are on the /execute allowlist.
+      const drop = t.object === 'view' ? `drop view if exists ${t.fqn}` : `drop table if exists ${t.fqn}`;
+      await exec(drop, identity);
       report.dropped.push(t.fqn);
     } catch (e) {
       report.orphaned.push({ fqn: t.fqn, reason: (e as Error).message || 'drop failed' });

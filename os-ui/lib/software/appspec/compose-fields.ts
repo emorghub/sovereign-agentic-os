@@ -41,6 +41,9 @@ import type {
   IntakeWizardConfig,
   ApprovalQueueConfig,
   TaskChecklistConfig,
+  EditableGridConfig,
+  KanbanWorkflowConfig,
+  ActionDetailConfig,
 } from './patterns.ts';
 
 /** A config slot the generic form renders. Each names the config KEY it writes + how to edit it. */
@@ -77,6 +80,9 @@ export const COMPOSE_BESPOKE: ReadonlySet<PatternId> = new Set<PatternId>([
   'landing', // an ordered block list (markdown | kpi | table) — the block editor
   'intake-wizard', // add/remove steps, each a field builder — the wizard editor
   'assignment', // two datasets (item + assignee) + extra fields — the assignment editor
+  'editable-grid', // column-definition list — the editable-grid editor
+  'kanban-workflow', // status field + column list — the kanban editor
+  'action-detail', // fields list + action list — the action-detail editor
 ]);
 
 /** Whether the composer offers a rich, selection-only editor for this pattern (generic OR bespoke). */
@@ -166,6 +172,11 @@ export function slotsFor(pattern: PatternId): ComposeSlot[] {
         { kind: 'text', key: 'submitLabel', label: 'Submit button', placeholder: 'Save', help: 'The button caption.' },
         // form fields are authored by the dedicated FormFields control (see the composer), not a slot.
       ];
+    // 3.5d: bespoke editors — no generic slots (handled by dedicated composer sub-forms)
+    case 'editable-grid':
+    case 'kanban-workflow':
+    case 'action-detail':
+      return [];
     default:
       return [];
   }
@@ -255,6 +266,12 @@ export function defaultConfigFor(pattern: PatternId, opts: { datasetId?: string 
       return { source: 'records', titleField: '' } satisfies ApprovalQueueConfig;
     case 'task-checklist':
       return { source: 'records', titleField: '' } satisfies TaskChecklistConfig;
+    case 'editable-grid':
+      return { source: 'records', columns: [] } satisfies EditableGridConfig;
+    case 'kanban-workflow':
+      return { source: 'records', statusField: '', titleField: '', columns: [] } satisfies KanbanWorkflowConfig;
+    case 'action-detail':
+      return { source: 'records', titleField: '', fields: [], actions: [] } satisfies ActionDetailConfig;
     default:
       return { source } as unknown as PatternConfig;
   }

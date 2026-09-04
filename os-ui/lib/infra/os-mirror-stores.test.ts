@@ -575,6 +575,70 @@ test('egress requests (os-egress-requests): fresh-boot bootstrap + round-trip hy
   }
 });
 
+// ------------------------------------------------------ platform-admin settings --
+
+test('platform settings (os-settings): promoteAsView + autonomousAgentsEnabled survive a pod roll', async () => {
+  const os = fakeCluster();
+  const settings = await import('../platform-admin/settings.ts');
+  try {
+    settings._reset();
+    await settings.ensureHydrated(); // fresh boot → bootstrap the index, defaults OFF
+    assert.equal(settings.promoteAsView(), false, 'default OFF before any save');
+    assert.equal(settings.autonomousAgentsEnabled(), false, 'default OFF before any save');
+
+    // An admin flips two platform flags (partial PATCH — the others must be untouched).
+    settings.updateSettings({ promoteAsView: true, autonomousAgentsEnabled: true });
+    await settle();
+    assertBootstrapSequence(os.log, 'os-settings');
+    const mirrored = os.docsOf('os-settings').get('__settings__') as { settings: { promoteAsView: boolean } };
+    assert.equal(mirrored.settings.promoteAsView, true, 'flag written through to the mirror');
+
+    // Pod roll: in-process state gone, cluster kept → the saved flags hydrate back ON
+    // (the durability bug: they used to revert to the false defaults).
+    settings._reset();
+    await settings.ensureHydrated();
+    assert.equal(settings.promoteAsView(), true, 'promoteAsView survives the roll');
+    assert.equal(settings.autonomousAgentsEnabled(), true, 'autonomousAgentsEnabled survives the roll');
+    // Untouched fields keep their defaults (nil-safe merge on hydrate).
+    assert.equal(settings.getSettings().currency, 'EUR', 'unset field kept its default');
+    assert.equal(settings.getSettings().standardFirstEscalation, true, 'unset flag kept its default (ON)');
+  } finally {
+    os.restore();
+    settings._reset();
+  }
+});
+
+// --------------------------------------------------- platform egress allowlist --
+
+test('egress allowlist (os-egress-allow): an added host survives a pod roll, a removed default stays removed', async () => {
+  const os = fakeCluster();
+  const security = await import('../platform-admin/security.ts');
+  try {
+    security._reset();
+    await security.ensureHydrated(); // fresh boot → persists the seed defaults once
+    await settle();
+    assertBootstrapSequence(os.log, 'os-egress-allow');
+    assert.ok(security.listAllowlist().includes('github.com'), 'seed default present');
+
+    // Admin curates: add a new host, remove a seed default.
+    security.addAllowlist('api.stripe.com');
+    security.removeAllowlist('github.com');
+    await settle();
+
+    // Pod roll: the curated allowlist must hydrate back (the added host present, the
+    // removed default NOT resurrected from the seed).
+    security._reset();
+    await security.ensureHydrated();
+    const list = security.listAllowlist();
+    assert.ok(list.includes('api.stripe.com'), 'added host survives the roll');
+    assert.ok(!list.includes('github.com'), 'a removed default is not resurrected by the seed');
+    assert.ok(list.includes('salesforce.com'), 'an untouched default is preserved');
+  } finally {
+    os.restore();
+    security._reset();
+  }
+});
+
 // ----------------------------------------- mirrors with hydration (Task B stores) --
 // These stores already wrote through; round-trip hydration was added in this branch.
 

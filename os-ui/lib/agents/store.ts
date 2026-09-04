@@ -54,11 +54,49 @@ export type LastBuildRow = {
 export type LastBuild = { ok: boolean; at: number; rows: LastBuildRow[] };
 
 /**
+ * A per-PROCESS nonce, generated once when this module first loads. It stamps
+ * every in-progress activity marker with the instance that started it, so a
+ * later process can tell a run its OWN process is executing (same instance id)
+ * apart from one a NOW-DEAD process left dangling (a different/absent instance
+ * id). This is the "the process is gone" signal that {@link recoverInterrupted}
+ * keys off — a pod restart mints a fresh nonce, so every marker from the prior
+ * pod is provably stale. Kept module-local (never persisted as a global) so a
+ * restart cannot accidentally reuse it.
+ */
+const PROCESS_INSTANCE = `proc_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+
+/**
  * Lightweight in-progress marker written at the START of a build or run and
  * cleared in the route's `finally` block. A returning user sees "building since
- * …" / "running since …" rather than a stale blank slate.
+ * …" / "running since …" rather than a stale blank slate. `instanceId` records
+ * WHICH process started it, so a fresh process can recover a run the prior
+ * (crashed) process abandoned.
  */
-export type ActivityMarker = { kind: 'building' | 'running'; startedAt: number };
+export type ActivityMarker = { kind: 'building' | 'running'; startedAt: number; instanceId?: string };
+
+/**
+ * A durable, per-step checkpoint of an IN-FLIGHT run. Written at the run's start
+ * and updated as each node begins/finishes, so a process restart mid-run leaves a
+ * LEGIBLE record (which nodes completed, with their outputs) instead of a silently
+ * lost run. Recovery ({@link recoverInterrupted}) reads this to seed an
+ * `interrupted` {@link LastRun} with the last completed step preserved and a resume
+ * affordance. Additive + back-compatible: absent on records written before it
+ * shipped, and never touched by any non-run path.
+ */
+export type RunCheckpoint = {
+  /** The process that owns this in-flight run — matches its {@link ActivityMarker}. */
+  instanceId: string;
+  startedAt: number;
+  updatedAt: number;
+  /** The run task (prompt) so a resume can re-enter with the same intent. */
+  prompt?: string;
+  /** The full node walk order (path), so recovery knows what had NOT yet run. */
+  plannedNodes?: string[];
+  /** Each node that has FINISHED, in order, with its status + a bounded final text. */
+  completedNodes: { node: string; status: string; finalText?: string }[];
+  /** The node currently executing (started, not yet finished), if any. */
+  currentNode?: string;
+};
 
 /** The last interactive run report — persisted so navigating away and back does not wipe it. */
 export type LastRun = {
@@ -117,6 +155,16 @@ export type LastRun = {
   mode?: 'live' | 'offline-mock';
   traceStoreAvailable?: boolean;
   traceUrl?: string;
+  /**
+   * Set when this record was RECOVERED after a process restart interrupted a run
+   * mid-flight (see {@link recoverInterrupted}). The run is legible, not lost: the
+   * nodes that completed before the crash are preserved as `steps`/`nodes`, and the
+   * UI shows an "interrupted — resume" affordance instead of a stale live spinner.
+   */
+  interrupted?: boolean;
+  /** For an interrupted run: the node index the walk reached, so a resume can
+   *  re-enter from the next node (when full-resume ships). Best-effort. */
+  resumeFromIndex?: number;
 };
 
 export type SystemRecord = {
@@ -141,6 +189,10 @@ export type SystemRecord = {
   lastBuild?: LastBuild;
   /** In-progress marker: set at start of build/run, cleared in finally. */
   activity?: ActivityMarker;
+  /** Durable per-step checkpoint of the CURRENT in-flight run (set at run start,
+   *  updated per node, cleared on completion). Present only while a run is live;
+   *  a stale one from a dead process is what {@link recoverInterrupted} salvages. */
+  runCheckpoint?: RunCheckpoint;
   /** Last interactive run report. Absent until the first run completes. */
   lastRun?: LastRun;
   /** Soft-archived: hidden from the working lists, reversible, retained. */
@@ -221,6 +273,7 @@ const mirror = osMirror({
         disabledAgents: { type: 'keyword' },
         lastBuild: { type: 'object', enabled: false },
         activity: { type: 'object', enabled: false },
+        runCheckpoint: { type: 'object', enabled: false },
         lastRun: { type: 'object', enabled: false },
         archived: { type: 'boolean' },
       },
@@ -272,7 +325,64 @@ async function hydrate(): Promise<void> {
     if (rec && rec.id && !s.store.has(rec.id)) s.store.set(rec.id, rec);
   }
   await versions.ensureHydrated();
+  // Crash recovery: any record whose in-flight run was owned by a NOW-DEAD process
+  // (a different/absent instanceId) is salvaged to `interrupted` — the run becomes
+  // legible (last completed step preserved, resume affordance) instead of a stale
+  // "running" spinner that never resolves. Runs owned by THIS process are untouched.
+  for (const rec of s.store.values()) recoverInterrupted(rec);
   s.seeded = true;
+}
+
+/**
+ * Recover a single record whose in-flight run was abandoned by a dead process.
+ * A run is "abandoned" when its `activity` marker says `running` but the marker's
+ * `instanceId` is NOT this process's (a pod restart mints a fresh nonce, so every
+ * prior-process marker is provably stale). We turn the durable {@link RunCheckpoint}
+ * into an `interrupted` {@link LastRun}: the nodes that finished before the crash are
+ * preserved, `held`/`ok` reflect a run that did not complete, and `resumeFromIndex`
+ * points at where a resume would re-enter. Idempotent + fail-soft: a record with no
+ * running marker, or one this process owns, is left exactly as-is.
+ *
+ * Returns true iff it changed (and wrote through) the record — used by tests + the
+ * boot sweep. Never throws.
+ */
+export function recoverInterrupted(rec: SystemRecord): boolean {
+  const marker = rec.activity;
+  if (!marker || marker.kind !== 'running') return false;
+  // Owned by THIS live process → a genuinely in-flight run; do not disturb it.
+  if (marker.instanceId && marker.instanceId === PROCESS_INSTANCE) return false;
+  const cp = rec.runCheckpoint;
+  const completed = cp?.completedNodes ?? [];
+  const planned = cp?.plannedNodes ?? [];
+  const steps = completed.map((n) => ({ node: n.node, tool: '(node)', effect: n.status, ran: n.status === 'ok' }));
+  const nodes = completed.map((n) => ({ node: n.node, status: n.status, finalText: n.finalText, steps: [] }));
+  const reachedIdx = completed.length; // next node to run = count of finished ones
+  const outputLines = [
+    `Run interrupted by a restart after ${completed.length}${planned.length ? ` of ${planned.length}` : ''} step(s).`,
+    cp?.currentNode ? `Was executing '${cp.currentNode}' when the process stopped.` : '',
+    'The steps below completed before the interruption. Re-run to continue.',
+  ].filter(Boolean);
+  const lastRun: LastRun = {
+    at: cp?.updatedAt ?? marker.startedAt,
+    running: false,
+    ok: false,
+    path: completed.map((n) => n.node),
+    traces: 0,
+    held: 0,
+    steps,
+    nodes: nodes.length ? nodes : undefined,
+    output: outputLines.join(' '),
+    mode: 'live',
+    interrupted: true,
+    resumeFromIndex: reachedIdx,
+  };
+  rec.lastRun = lastRun;
+  delete rec.activity; // clear the stale live spinner
+  delete rec.runCheckpoint; // the checkpoint has been consumed into lastRun
+  rec.running = false;
+  rec.updatedAt = now();
+  writeThrough(rec);
+  return true;
 }
 
 // --------------------------------------------------------------------- utils --
@@ -341,6 +451,12 @@ function ensureSeeded(): void {
   const s = state();
   if (s.seeded) return;
   s.seeded = true;
+}
+
+/** Test hook: the LIVE stored record by id (not a copy), so a test can drive the
+ *  crash-recovery sweep over the exact object the boot path iterates. */
+export function __recordFor(systemId: string): SystemRecord | undefined {
+  return state().store.get(systemId);
 }
 
 /** Test hook: wipe the in-process store + reseed. */
@@ -912,15 +1028,76 @@ export function setLastBuild(systemId: string, user: Principal, build: LastBuild
 export function setActivity(systemId: string, marker: ActivityMarker): void {
   const rec = state().store.get(systemId);
   if (!rec) return;
-  rec.activity = marker;
+  // Stamp the marker with THIS process's nonce (unless the caller already set one),
+  // so a later process can recognise a run this process abandoned on a crash.
+  rec.activity = { ...marker, instanceId: marker.instanceId ?? PROCESS_INSTANCE };
   writeThrough(rec);
 }
 
-/** Clear the in-progress marker once a build or run completes (or errors). */
+/** Clear the in-progress marker once a build or run completes (or errors). Also
+ *  clears any run checkpoint — a completed run has no in-flight state to recover. */
 export function clearActivity(systemId: string): void {
   const rec = state().store.get(systemId);
   if (!rec) return;
   delete rec.activity;
+  delete rec.runCheckpoint;
+  writeThrough(rec);
+}
+
+/**
+ * Open a durable run checkpoint at the START of a run. Stamps the current process's
+ * instance id (matching the activity marker) and records the run's intent + planned
+ * node walk. Called from the run route alongside {@link setActivity}. No-op for an
+ * unknown system. The checkpoint is updated per node via {@link checkpointNode} and
+ * cleared by {@link clearActivity} on completion.
+ */
+export function startRunCheckpoint(
+  systemId: string,
+  input: { prompt?: string; plannedNodes?: string[] },
+): void {
+  const rec = state().store.get(systemId);
+  if (!rec) return;
+  const at = Date.now();
+  rec.runCheckpoint = {
+    instanceId: PROCESS_INSTANCE,
+    startedAt: at,
+    updatedAt: at,
+    prompt: input.prompt,
+    plannedNodes: input.plannedNodes,
+    completedNodes: [],
+  };
+  writeThrough(rec);
+}
+
+/** Upper bound on a checkpointed node's finalText (chars) — the checkpoint stays lean. */
+const CHECKPOINT_TEXT_MAX = 2_000;
+
+/**
+ * Record run progress at a node boundary into the durable checkpoint. `phase:'start'`
+ * marks a node as the one now executing; `phase:'complete'` appends it to the finished
+ * list (with a bounded final text + status) and clears `currentNode`. Every call writes
+ * through to the mirror, so a crash after ANY node leaves that node's completion durable.
+ * Fail-soft: a no-checkpoint or unknown record is ignored (never throws).
+ */
+export function checkpointNode(
+  systemId: string,
+  ev: { phase: 'start' | 'complete'; node: string; status?: string; finalText?: string },
+): void {
+  const rec = state().store.get(systemId);
+  const cp = rec?.runCheckpoint;
+  if (!rec || !cp) return;
+  cp.updatedAt = Date.now();
+  if (ev.phase === 'start') {
+    cp.currentNode = ev.node;
+  } else {
+    const finalText = ev.finalText
+      ? ev.finalText.length > CHECKPOINT_TEXT_MAX
+        ? `${ev.finalText.slice(0, CHECKPOINT_TEXT_MAX)}…`
+        : ev.finalText
+      : undefined;
+    cp.completedNodes.push({ node: ev.node, status: ev.status ?? 'ok', finalText });
+    if (cp.currentNode === ev.node) delete cp.currentNode;
+  }
   writeThrough(rec);
 }
 

@@ -306,10 +306,12 @@ test('globalThis pin: create survives a fresh pluginsStore() call', () => {
     { id: 'pin-plugin', name: 'Pin Plugin', kind: 'mcp', publisher: 'test', signed: true, scanned: true, status: 'available', allowedDomains: [], summary: 'pin test' },
   ]);
 
-  // Confirm entry is visible via the globalThis symbol directly.
-  const pinned = (globalThis as any)[Symbol.for('soa.platform.plugins')] as Map<string, unknown>;
-  assert.ok(pinned instanceof Map, 'globalThis pin is a Map');
-  assert.ok(pinned.has('pin-plugin'), 'plugin id visible via globalThis pin');
+  // Confirm entry is visible via the globalThis symbol directly. The pin now wraps
+  // the plugins Map in a state object (plugins + registration + hydration) for the
+  // durable-mirror write-through; the Map itself is `.plugins`.
+  const pinned = (globalThis as any)[Symbol.for('soa.platform.plugins')] as { plugins: Map<string, unknown> };
+  assert.ok(pinned.plugins instanceof Map, 'globalThis pin exposes the plugins Map');
+  assert.ok(pinned.plugins.has('pin-plugin'), 'plugin id visible via globalThis pin');
 
   // listPlugins() calls pluginsStore() afresh — must still return the entry.
   assert.equal(listPlugins().length, 1);

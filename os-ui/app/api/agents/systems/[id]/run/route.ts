@@ -3,7 +3,7 @@
  */
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
-import { getSystemForRun, setRunning, recordActivity, setActivity, clearActivity, setLastRun } from '@/lib/agents/store';
+import { getSystemForRun, setRunning, recordActivity, setActivity, clearActivity, setLastRun, startRunCheckpoint, checkpointNode } from '@/lib/agents/store';
 import type { LastRun } from '@/lib/agents/store';
 import { runSystem } from '@/lib/agents/build/server';
 import { runOsTeam } from '@/lib/agents/build/agentic-graph-server';
@@ -227,6 +227,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
     // Mark in-progress so a returning user sees "running since…" not a blank slate.
     setActivity(id, { kind: 'running', startedAt: Date.now() });
+    // Open a durable, per-step run checkpoint (stamped with this process's instance
+    // id) so a pod restart mid-run leaves a legible, recoverable record — see
+    // recoverInterrupted() in the store. Cleared by clearActivity() on completion.
+    startRunCheckpoint(id, { prompt, plannedNodes: view.system.agents.map((a) => a.id) });
 
     // Re-assert the builder-gate against the OWNER's CURRENT role (S1): a stale
     // direct-write grant (set while the owner was a builder, or by an admin) is
@@ -262,6 +266,16 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
         return out;
       };
 
+      // Durable per-node checkpointing (both paths): each node boundary is written
+      // through to the mirror, so a restart after any node leaves that node's
+      // completion recoverable. Best-effort — a checkpoint hiccup never fails a run.
+      const checkpointHooks = {
+        onNodeStart: (ev: { node: string }) => { try { checkpointNode(id, { phase: 'start', node: ev.node }); } catch { /* best-effort */ } },
+        onNodeComplete: (ev: { node: string; status: string; finalText: string }) => {
+          try { checkpointNode(id, { phase: 'complete', node: ev.node, status: ev.status, finalText: ev.finalText }); } catch { /* best-effort */ }
+        },
+      };
+
       // STREAMING path: the client asked for live progress (Accept: text/event-stream
       // or {stream:true}). Emit ordered node/step events as the walk happens, then a
       // terminal `done` carrying the SAME full result the non-stream path returns. On
@@ -280,7 +294,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
                 systemId: id,
                 messages,
                 disabledAgents: view.disabledAgents,
-                onNodeStart: (ev) => send('node-started', ev),
+                onNodeStart: (ev) => { checkpointHooks.onNodeStart(ev); send('node-started', ev); },
                 onStep: (ev) =>
                   send('tool-step', {
                     node: ev.node,
@@ -294,8 +308,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
                         : 'error',
                     index: ev.index,
                   }),
-                onNodeComplete: (ev) =>
-                  send('node-completed', { node: ev.node, status: ev.status, finalTextPreview: summarizeResult(ev.finalText) }),
+                onNodeComplete: (ev) => {
+                  checkpointHooks.onNodeComplete(ev);
+                  send('node-completed', { node: ev.node, status: ev.status, finalTextPreview: summarizeResult(ev.finalText) });
+                },
               });
               send('done', complete(team));
             } catch (e) {
@@ -316,7 +332,16 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       }
 
       // NON-STREAMING fallback: run to completion and return the final JSON as before.
-      const team = await runOsTeam({ user, yaml, systemId: id, messages, disabledAgents: view.disabledAgents });
+      // Still checkpoints per node (via the shared hooks) so a restart is recoverable.
+      const team = await runOsTeam({
+        user,
+        yaml,
+        systemId: id,
+        messages,
+        disabledAgents: view.disabledAgents,
+        onNodeStart: checkpointHooks.onNodeStart,
+        onNodeComplete: checkpointHooks.onNodeComplete,
+      });
       return NextResponse.json(complete(team));
     }
 

@@ -78,18 +78,27 @@ function promptFor(stage: Stage, body: Record<string, unknown>): { system: strin
         user: `Dataset: ${name || '(unnamed)'}\nColumns: ${columns.join(', ') || '(none)'}\nTransform error (optional): "${reason}"\nAdvise how to clean/join it${reason ? ', and explain the error' : ''}.`,
       };
     case 'validate':
+      // Two modes. WITH deterministic profile→rule suggestions the client already renders
+      // the rule cards, so the model's job is only to EXPLAIN each in one plain sentence
+      // (prose rationale layer) — it never invents rules. WITHOUT suggestions (nothing
+      // profiled yet) "Suggest quality rules" must produce ACTIONABLE structured rules the
+      // client files as editable cards — NOT a prose wall the user can't accept. So this
+      // branch returns the SAME strict `{checks}` JSON contract the Define stage uses; the
+      // shared runStageAssistant parses it tolerantly (a reasoning model that wraps the JSON
+      // in preamble is recovered by parseJsonReply), so the rules never get lost as prose.
+      if (suggestions.length) {
+        return {
+          json: false,
+          system:
+            'You help a business user understand data-quality checks suggested from their dataset\'s profile. For EACH suggested check given, write ONE short plain-language sentence explaining what it guards against and why the profile evidence justifies it. Do not invent checks beyond the ones provided. Return a short bulleted list, one bullet per suggested check, no preamble.',
+          user: `Dataset: ${name || '(unnamed)'}\nSuggested checks (from the profile):\n${suggestions.map((x) => `- ${x}`).join('\n')}\nExplain each in one plain sentence.`,
+        };
+      }
       return {
-        json: false,
-        // When the client passes the deterministic profile→rule suggestions, the model's
-        // job is to EXPLAIN each in one plain sentence (the "rationale" layer over the
-        // rules-first suggestions) — it never invents new rules from thin air. With no
-        // suggestions it falls back to advising which rules to author from the columns.
-        system: suggestions.length
-          ? 'You help a business user understand data-quality checks suggested from their dataset\'s profile. For EACH suggested check given, write ONE short plain-language sentence explaining what it guards against and why the profile evidence justifies it. Do not invent checks beyond the ones provided. Return a short bulleted list, one bullet per suggested check, no preamble.'
-          : 'You advise a user on which data-quality rules to author for their dataset before promoting it. Given the column names, suggest 3-5 useful rules (not_null on identifiers, unique on a primary key, range on numeric bounds, accepted_values on categoricals). Keep it to a short paragraph plus a bullet list. Use only the provided columns.',
-        user: suggestions.length
-          ? `Dataset: ${name || '(unnamed)'}\nSuggested checks (from the profile):\n${suggestions.map((x) => `- ${x}`).join('\n')}\nExplain each in one plain sentence.`
-          : `Dataset: ${name || '(unnamed)'}\nColumns: ${columns.join(', ') || '(none)'}\nSuggest quality rules to author.`,
+        json: true,
+        system:
+          'You propose data-quality rules a business user can accept for their dataset before promoting it. Given the column names, return ONLY a JSON object (no prose, no code fences): {"checks": [{"rule": one of "not_null"|"not_blank"|"unique"|"accepted_values"|"range", "column": string, "values"?: string[], "min"?: number, "max"?: number}]}. Use ONLY the provided column names. Prefer not_null on identifiers, unique on a primary key, range on obvious numeric bounds, accepted_values on categoricals. 3-6 checks.',
+        user: `Dataset: ${name || '(unnamed)'}\nColumns: ${columns.join(', ') || '(none)'}\nReturn the JSON rule proposal.`,
       };
     case 'publish':
       return {

@@ -107,8 +107,10 @@ test('AGENT_SAFETY_PRESETS: covers all four presets with labels + consequences',
 
 test('both agent builders use the ONE shared AGENT_SAFETY_PRESETS const (no divergent copies)', () => {
   const runtimeSel = readFileSync(new URL('../../components/agents/RuntimeSelector.tsx', import.meta.url), 'utf8');
-  const simpleBuilder = readFileSync(new URL('../../components/agents/SimpleBuilder.tsx', import.meta.url), 'utf8');
-  for (const [name, src] of [['RuntimeSelector', runtimeSel], ['SimpleBuilder', simpleBuilder]] as const) {
+  // The Simple builder's safety-preset grid moved to the dedicated Grant stage
+  // (components/agents/GrantStage.tsx) in the 5-stage rebuild; it stays the single source.
+  const grantStage = readFileSync(new URL('../../components/agents/GrantStage.tsx', import.meta.url), 'utf8');
+  for (const [name, src] of [['RuntimeSelector', runtimeSel], ['GrantStage', grantStage]] as const) {
     assert.match(src, /AGENT_SAFETY_PRESETS/, `${name} references the shared preset const`);
     // The old inline, hand-written consequence strings must be gone.
     assert.doesNotMatch(src, /My scope run directly/, `${name} no longer carries the contradictory copy`);

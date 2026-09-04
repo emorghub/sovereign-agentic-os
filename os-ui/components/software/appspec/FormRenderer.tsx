@@ -8,7 +8,7 @@ import { Alert, Button, Input, Select } from '@/lib/app-ui/index.ts';
 import { Forbidden, type OsClient, type RecordResult } from '@/lib/app-sdk/index.ts';
 import type { FormField } from '@/lib/software/appspec/schema.ts';
 import type { FormConfig } from '@/lib/software/appspec/patterns.ts';
-import { coerceField } from '@/lib/software/appspec/interactive-logic.ts';
+import { coerceField, isRealSave } from '@/lib/software/appspec/interactive-logic.ts';
 
 /**
  * Render the `form` pattern: a single-screen create. Collect `fields`, then write ONE record via
@@ -66,7 +66,7 @@ export function FormRenderer({ view, os }: { view: FormConfig; os: OsClient }) {
   }
 
   if (status === 'done' && result) {
-    const live = result.source === 'live-app';
+    const live = isRealSave(result.source);
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 520 }}>
         <Alert variant={live ? 'success' : 'info'}>

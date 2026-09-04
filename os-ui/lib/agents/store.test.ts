@@ -22,6 +22,10 @@ import {
   setLastBuild,
   setActivity,
   clearActivity,
+  startRunCheckpoint,
+  checkpointNode,
+  recoverInterrupted,
+  __recordFor,
   setLastRun,
   setRunning,
   toggleAgent,
@@ -657,6 +661,95 @@ test('activity marker: setActivity on an unknown system is a no-op (no throw)', 
   __resetStore();
   assert.doesNotThrow(() => setActivity('does-not-exist', { kind: 'building', startedAt: 1 }));
   assert.doesNotThrow(() => clearActivity('does-not-exist'));
+});
+
+// ------------------------------------------- durable run checkpoint + recovery --
+
+test('run checkpoint: startRunCheckpoint + checkpointNode record per-node progress durably', () => {
+  __resetStore();
+  const sys = createSystem(sara, { name: 'Checkpointed', domain: 'sales' });
+
+  // No checkpoint before a run opens one.
+  assert.equal((getSystem(sys.id, sara) as { runCheckpoint?: unknown }).runCheckpoint, undefined);
+
+  startRunCheckpoint(sys.id, { prompt: 'do the job', plannedNodes: ['a', 'b', 'c'] });
+  checkpointNode(sys.id, { phase: 'start', node: 'a' });
+  checkpointNode(sys.id, { phase: 'complete', node: 'a', status: 'ok', finalText: 'a done' });
+  checkpointNode(sys.id, { phase: 'start', node: 'b' });
+
+  const cp = (getSystem(sys.id, sara) as { runCheckpoint?: {
+    prompt?: string; plannedNodes?: string[]; currentNode?: string;
+    completedNodes: { node: string; status: string; finalText?: string }[];
+  } }).runCheckpoint!;
+  assert.ok(cp, 'checkpoint present mid-run');
+  assert.equal(cp.prompt, 'do the job');
+  assert.deepEqual(cp.plannedNodes, ['a', 'b', 'c']);
+  assert.equal(cp.completedNodes.length, 1, 'one node completed and durably recorded');
+  assert.equal(cp.completedNodes[0].node, 'a');
+  assert.equal(cp.completedNodes[0].finalText, 'a done');
+  assert.equal(cp.currentNode, 'b', 'node b is now the executing node');
+
+  // clearActivity (completion path) drops the checkpoint too.
+  clearActivity(sys.id);
+  assert.equal((getSystem(sys.id, sara) as { runCheckpoint?: unknown }).runCheckpoint, undefined);
+});
+
+test('recovery: a `running` run left by a DEAD process is recovered to `interrupted`, not lost', () => {
+  __resetStore();
+  const sys = createSystem(sara, { name: 'Crashed', domain: 'sales' });
+
+  // Simulate a PRIOR process that started a run and completed one node, then died:
+  // its activity marker + checkpoint carry a FOREIGN instanceId (not this process's).
+  setActivity(sys.id, { kind: 'running', startedAt: 1_000, instanceId: 'proc_deadbeef' });
+  // The prior process's checkpoint (as if written by it) — set via the live functions
+  // then re-stamp the instanceId to the foreign process to mimic the crash.
+  startRunCheckpoint(sys.id, { prompt: 'nightly report', plannedNodes: ['gather', 'analyze', 'report'] });
+  checkpointNode(sys.id, { phase: 'complete', node: 'gather', status: 'ok', finalText: 'gathered rows' });
+  checkpointNode(sys.id, { phase: 'start', node: 'analyze' });
+  const rec = __recordFor(sys.id)!;
+  rec.activity!.instanceId = 'proc_deadbeef';
+  rec.runCheckpoint!.instanceId = 'proc_deadbeef';
+
+  const changed = recoverInterrupted(rec);
+  assert.equal(changed, true, 'recovery salvaged the abandoned run');
+
+  const view = getSystem(sys.id, sara);
+  assert.equal(view.activity, undefined, 'stale live spinner cleared');
+  assert.equal((view as { runCheckpoint?: unknown }).runCheckpoint, undefined, 'checkpoint consumed');
+  assert.equal(view.running, false, 'no longer marked running');
+  assert.ok(view.lastRun, 'an interrupted lastRun was seeded');
+  assert.equal(view.lastRun!.interrupted, true, 'flagged interrupted');
+  assert.equal(view.lastRun!.ok, false, 'an interrupted run is not ok');
+  assert.deepEqual(view.lastRun!.path, ['gather'], 'the completed node is preserved');
+  assert.equal(view.lastRun!.resumeFromIndex, 1, 'resume would re-enter at the next node (index 1)');
+  assert.match(view.lastRun!.output ?? '', /interrupted/i, 'output explains the interruption');
+});
+
+test('recovery: a run owned by THIS live process is left untouched (only dead processes recover)', () => {
+  __resetStore();
+  const sys = createSystem(sara, { name: 'Live', domain: 'sales' });
+
+  // A genuinely in-flight run in THIS process: setActivity stamps the current
+  // process instance id, so recovery must NOT disturb it.
+  setActivity(sys.id, { kind: 'running', startedAt: Date.now() });
+  startRunCheckpoint(sys.id, { prompt: 'live task', plannedNodes: ['x'] });
+
+  const rec = __recordFor(sys.id)!;
+  const changed = recoverInterrupted(rec);
+  assert.equal(changed, false, 'a live-process run is not recovered');
+  assert.ok(getSystem(sys.id, sara).activity, 'the live spinner is preserved');
+  assert.equal(getSystem(sys.id, sara).lastRun, undefined, 'no interrupted report fabricated');
+});
+
+test('recovery: a system with no running marker is left exactly as-is (idempotent, fail-soft)', () => {
+  __resetStore();
+  const sys = createSystem(sara, { name: 'Idle', domain: 'sales' });
+  const rec = __recordFor(sys.id)!;
+  assert.equal(recoverInterrupted(rec), false);
+  // A building marker (not running) is also ignored.
+  setActivity(sys.id, { kind: 'building', startedAt: 1, instanceId: 'proc_dead' });
+  const rec2 = __recordFor(sys.id)!;
+  assert.equal(recoverInterrupted(rec2), false, 'a building marker is not a run to recover');
 });
 
 test('lastRun round-trips: persisted run result loads on getSystem; absent before first run', () => {

@@ -206,7 +206,8 @@ export function missingMembersWarning(missing: string[]): string {
   return (
     `${missing.length === 1 ? 'Member' : 'Members'} ${dims} ${missing.length === 1 ? 'is' : 'are'} not available ` +
     'in the governed model — the metric may be undefined, out of your entitlement, or the ' +
-    'dataset’s domain table may be missing/stale and need re-promotion. ' +
+    'dataset’s domain table may be missing/stale. ' +
+    'Open the dataset in the Data tab and use “Re-materialize domain table” (Builder+) to serve it. ' +
     'The chart is NOT silently un-grouped; fix the model to render it as designed.'
   );
 }

@@ -103,6 +103,62 @@ test('a fully valid v2 spec parses to the typed AppSpec (pattern + custom + them
   }
 });
 
+test('BACKWARD-COMPAT: a legacy 3.5a-era v2 spec (no theme/functions/stories/icon/roleGate) still parses', () => {
+  // This is the SHAPE a live-cohort app saved before Phases 3.5b–3.5d existed. `setAppSpec` stores
+  // the re-parsed output, so a spec saved then MUST keep parsing now — otherwise the Build-chat
+  // assistant refuses ("I could not read the current app"). The parser only ever got LOOSER
+  // (description became optional in 0.6.130), so every historical v2 spec must round-trip.
+  const legacy = {
+    version: 2,
+    name: 'Orders',
+    description: 'Track orders',
+    tabs: [
+      {
+        id: 't1',
+        label: 'Orders',
+        body: {
+          kind: 'pattern',
+          pattern: 'records-table',
+          config: {
+            source: { datasetId: 'ds_orders' },
+            columns: [{ field: 'id' }, { field: 'total', format: 'currency-eur' }],
+          },
+        },
+      },
+    ],
+  };
+  const r = parseAppSpec(legacy);
+  assert.equal(r.ok, true, r.ok ? '' : JSON.stringify((r as { issues: SpecIssue[] }).issues));
+  if (r.ok) {
+    assert.equal(r.spec.tabs.length, 1);
+    assert.equal(r.spec.theme, undefined);
+    assert.equal(r.spec.functions, undefined);
+    assert.equal(r.spec.tabs[0].stories, undefined);
+  }
+});
+
+test('BACKWARD-COMPAT: a legacy spec with a KPI card (metric source only) survives the 3.5d function-source addition', () => {
+  // 3.5d added a THIRD kpi-card source (`function`). A card authored in 3.5b with only `metric`
+  // must still satisfy the "exactly one source" rule — the addition must not have broken it.
+  const legacyKpi = {
+    version: 2,
+    name: 'KPIs',
+    description: 'Numbers',
+    tabs: [
+      {
+        id: 'k',
+        label: 'KPIs',
+        body: {
+          kind: 'pattern',
+          pattern: 'kpi-overview',
+          config: { cards: [{ label: 'Revenue', metric: { metricId: 'm_rev' } }] },
+        },
+      },
+    ],
+  };
+  assert.equal(parseAppSpec(legacyKpi).ok, true);
+});
+
 test('version must be the literal 2', () => {
   const bad = { ...(validSpec() as object), version: 1 };
   const i = hasIssue(issuesOf(parseAppSpec(bad)), 'version');

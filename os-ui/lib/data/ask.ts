@@ -132,6 +132,9 @@ export type AskMessage = { role: 'system' | 'user'; content: string };
 export function sqlGenMessages(question: string, datasets: AskDataset[]): AskMessage[] {
   const system = [
     "You translate a user's question into ONE Trino SQL SELECT over a governed lakehouse.",
+    'The system EXECUTES your SELECT and shows the user the resulting rows — you are NOT chatting.',
+    'You CAN run SQL through the system. NEVER refuse, apologize, explain, or tell the user to run',
+    'the query themselves. Your entire reply is the SQL that will be executed.',
     '',
     "These are ALL the datasets the caller may access — for you, nothing else exists:",
     schemaContext(datasets),
@@ -143,6 +146,10 @@ export function sqlGenMessages(question: string, datasets: AskDataset[]): AskMes
     "- NEVER build a table name from a dataset's display name or domain label: those are",
     '  context only and are NOT valid identifiers (they may contain spaces/hyphens/capitals).',
     '  The FQNs are already lowercase, underscore-separated, and hyphen-free — do not alter them.',
+    '- Prefer a SINGLE table when it already has the needed columns; only JOIN when the columns',
+    '  genuinely live in different tables, and join on the documented key column.',
+    '- To COUNT entities use COUNT(DISTINCT <key>), never COUNT(*) across a JOIN — a join',
+    '  multiplies rows and inflates the count (e.g. 5 centers × 5 rows → a wrong 25).',
     '- Lowercase identifiers; standard Trino SQL functions only.',
     '- End non-aggregating queries with "limit 100".',
     `- If NONE of the listed datasets can answer the question, reply with exactly ${NO_DATASET_TOKEN}.`,

@@ -82,7 +82,14 @@ export async function runGraph(ir: IR, opts: RunOptions): Promise<RunResult> {
       reachedEnd = true; // the router always includes END
     }
     for (const to of handoffs) if (!visited.has(to)) queue.push(to);
-    if (!node.supervisor && handoffs.length === 0) reachedEnd = true; // a leaf reaches END
+    // A ReAct node terminates to END whenever it does NOT hand off. `handoff` edges
+    // compile to CONDITIONAL Commands (goto guarded by `when`), so even a node WITH
+    // outgoing handoffs can finish to END — a cyclic handoff team (a→b→a, or a
+    // coordinator↔specialist loop expressed as handoffs rather than supervise/members)
+    // still reaches END in the real runtime. Requiring a handoff-less leaf here was a
+    // false negative that failed the Build ("test invocation did not reach END") for any
+    // graph without a terminal agent. Supervisors are handled above (members ∪ END).
+    if (!node.supervisor) reachedEnd = true;
   }
 
   const ran = steps.filter((s) => s.ran).length;

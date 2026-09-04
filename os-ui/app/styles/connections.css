@@ -306,8 +306,9 @@
   border-top: 1px solid var(--border);
 }
 
-/* A tiny "ready" dot in the tile corner — calm, honest availability signal. */
-.conn-tile-ready {
+/* A tiny "under construction" flag in the tile corner — honest: the connector is a preview,
+   not yet end-to-end tested. Amber, not the calm teal "ready" it replaced. */
+.conn-tile-wip {
   position: absolute;
   top: 14px;
   right: 14px;
@@ -317,9 +318,26 @@
   font-size: 10px;
   letter-spacing: 0.4px;
   text-transform: uppercase;
-  color: var(--teal);
+  color: var(--gold-text, #b8860b);
 }
-.conn-tile-ready .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 7px var(--teal); }
+.conn-tile-wip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold, #c8a24a); box-shadow: 0 0 7px var(--gold, #c8a24a); }
+
+/* Gallery-wide "connectors are under construction" banner. */
+.conn-wip-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  border: 1px solid var(--gold-line);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(420px 110px at 0% 0%, var(--gold-soft), transparent 72%),
+    var(--panel);
+}
+.conn-wip-banner-ico { font-size: 18px; line-height: 1.4; flex: none; }
+.conn-wip-banner-text { font-size: 13px; color: var(--text-muted); line-height: 1.55; }
+.conn-wip-banner-text strong { color: var(--text); }
 
 @media (prefers-reduced-motion: reduce) {
   .conn-door, .conn-tile, .conn-door-cta .arr, .conn-stack-caret { transition: none; }

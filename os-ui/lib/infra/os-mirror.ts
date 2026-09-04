@@ -106,6 +106,25 @@ export function osMirror(opts: {
   const { index } = opts;
   const reprobeMs = opts.reprobeMs ?? DEFAULT_REPROBE_MS;
   const st = () => mirrorState(index);
+  let reconciled = false; // once-per-process: heal an EXISTING index's updatable settings/mappings.
+
+  // For an index that ALREADY exists, `createBody` (used only at CREATE time) never applied. The
+  // two settings we care about — `index.mapping.total_fields.limit` and mapping `dynamic` — ARE
+  // live-updatable (unlike a field's TYPE), so reconcile them once, best-effort. This heals an
+  // index that was auto-created with the default 1000-field limit + dynamic mappings and has since
+  // been blowing up on docs with large/variable JSON (the "published app disappears" class).
+  async function reconcileExisting(): Promise<void> {
+    if (reconciled || !opts.createBody) return;
+    reconciled = true;
+    const body = opts.createBody as { settings?: unknown; mappings?: unknown };
+    if (body.settings) {
+      await osFetch(`/${index}/_settings`, { method: 'PUT', body: JSON.stringify(body.settings) });
+    }
+    if (body.mappings && typeof body.mappings === 'object' && 'dynamic' in (body.mappings as object)) {
+      const dyn = (body.mappings as { dynamic?: unknown }).dynamic;
+      await osFetch(`/${index}/_mapping`, { method: 'PUT', body: JSON.stringify({ dynamic: dyn }) });
+    }
+  }
 
   async function doProbe(): Promise<boolean> {
     const s = st();
@@ -113,6 +132,7 @@ export function osMirror(opts: {
     const ping = await osFetch(`/${index}/_count`);
     if (ping && ping.ok) {
       s.healthy = true;
+      void reconcileExisting(); // best-effort, never blocks the probe
     } else if (ping && ping.status === 404) {
       // Cluster reachable, index missing → create it (the bootstrap fix).
       const created = await osFetch(`/${index}`, {

@@ -8,7 +8,7 @@ import { Alert, Button, Input, Select, Spinner } from '@/lib/app-ui/index.ts';
 import { Forbidden, type OsClient, type QueryResult, type RecordResult } from '@/lib/app-sdk/index.ts';
 import type { AssignmentConfig } from '@/lib/software/appspec/patterns.ts';
 import { pickOptions } from '@/lib/software/appspec/interactive-logic-select.ts';
-import { coerceField } from '@/lib/software/appspec/interactive-logic.ts';
+import { coerceField, isRealSave } from '@/lib/software/appspec/interactive-logic.ts';
 
 /**
  * Render the `assignment` pattern: pick an ITEM (from the granted `source` dataset) and an ASSIGNEE
@@ -103,7 +103,7 @@ export function AssignmentRenderer({ view, os }: { view: AssignmentConfig; os: O
   if (assigneeOptions.error) return <Alert variant="error">{assigneeOptions.error}</Alert>;
 
   if (result) {
-    const live = result.source === 'live-app';
+    const live = isRealSave(result.source);
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 520 }}>
         <Alert variant={live ? 'success' : 'info'}>

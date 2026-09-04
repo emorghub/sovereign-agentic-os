@@ -53,17 +53,28 @@ export const POST = withRoute<{ id: string }>(async ({ user, params, req }) => {
     return NextResponse.json({ ok: false, reply: 'Tell me what to change — for example, "add a KPI tab for total revenue".' });
   }
 
-  // The current spec: prefer the client's live working draft (the composer sends what's on screen);
-  // fall back to the saved spec. Structurally gate it so we never feed the model garbage.
-  const rawSpec = body.currentSpec ?? app.spec;
-  const currentParse = parseAppSpec(rawSpec);
-  if (!currentParse.ok) {
+  // The current spec: prefer the client's live working draft (the composer sends what's on screen),
+  // then fall back to the SAVED DRAFT, then the LIVE spec. Structurally gate each so we never feed
+  // the model garbage.
+  //
+  // BACKWARD-COMPAT (live cohort): a `??` on the raw values only falls through on null/undefined,
+  // so a present-but-mid-edit-invalid draft would refuse EVEN WHEN the app has a perfectly good
+  // saved spec. Parse each candidate in order and use the FIRST that parses, so the assistant keeps
+  // working for any legacy/saved app whose on-screen draft is momentarily incomplete.
+  //
+  // COHORT P0: a DECLARATIVE app being built from epics has NO live `spec` yet — only an autosaved
+  // `draftSpec`. Omitting it here is why "I could not read the current app — Save or Reset it first"
+  // fired mid-build even though a perfectly good server draft existed. Including `app.draftSpec`
+  // lets the assistant refine work-in-progress. The draft door stores a parseAppSpec-normalised spec
+  // on a clean parse; `firstParsedSpec` re-parses regardless, so no unvalidated shape is smuggled in.
+  const currentSpec =
+    firstParsedSpec(body.currentSpec) ?? firstParsedSpec(app.draftSpec) ?? firstParsedSpec(app.spec);
+  if (!currentSpec) {
     return NextResponse.json({
       ok: false,
       reply: 'I could not read the current app — Save or Reset it first, then ask me again.',
     });
   }
-  const currentSpec = currentParse.spec;
 
   const material = gatherMaterial(app);
   const prompt = buildAssistPrompt(material, currentSpec, instruction);
@@ -167,6 +178,14 @@ function gatherMaterial(app: App): GenerateMaterial {
   }));
 
   return { appName: app.name, appDescription: app.description, grantedDatasets, grantedMetrics, grantedAgents, epics };
+}
+
+/** Parse a candidate spec and return it only if it is a structurally-valid AppSpec, else undefined
+ *  (so callers can chain candidates with `??` and use the first that parses). */
+function firstParsedSpec(raw: unknown): AppSpec | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const parsed = parseAppSpec(raw);
+  return parsed.ok ? parsed.spec : undefined;
 }
 
 function safe<T>(fn: () => T): T | undefined {

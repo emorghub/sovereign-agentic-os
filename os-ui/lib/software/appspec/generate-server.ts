@@ -69,8 +69,14 @@ export async function generateAppSpecForApp(user: CurrentUser, appId: string): P
 
   const { validateAppSpec } = await import('./validate.ts');
 
+  // Up to THREE attempts (two repair turns). Reasoning models routinely substitute a
+  // CONVENTIONAL column (status/priority/description) for a real one on the first pass;
+  // each repair turn re-seeds the EXACT valid columns, and a second repair converges the
+  // stubborn cases a single turn missed. Each failed non-final attempt appends the model's
+  // reply + a fresh repair grounded in the latest issues.
+  const ATTEMPTS = 3;
   let lastIssues: SpecIssue[] = [];
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
     let content: string;
     try {
       const res = await assistantComplete(messages, { model, user: { id: user.id, domains: user.domains } });
@@ -88,7 +94,7 @@ export async function generateAppSpecForApp(user: CurrentUser, appId: string): P
       lastIssues = issues;
     }
 
-    if (attempt === 0) {
+    if (attempt < ATTEMPTS - 1) {
       messages.push({ role: 'assistant', content });
       messages.push({ role: 'user', content: repairInstruction(lastIssues) });
     }

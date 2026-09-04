@@ -133,6 +133,111 @@ class RejectTests(unittest.TestCase):
         self._reject400("   ")
 
 
+class PromoteAsViewTests(unittest.TestCase):
+    """The governed promote-as-view shapes: CREATE OR REPLACE VIEW over an iceberg table,
+    and DROP VIEW IF EXISTS. Same target-schema/role gate as a CTAS — the view's OWN
+    schema (the domain) is the authorization subject; a domain view points its body at
+    the owner's personal lane."""
+
+    def _reject(self, sql, status, ident=BUILDER):
+        self.assertEqual(status_of(lambda: guard(sql, **ident)), status, sql)
+
+    def test_domain_view_over_personal_as_builder_ok(self):
+        p = guard(
+            "CREATE OR REPLACE VIEW iceberg.sales.gold_orders AS "
+            "SELECT * FROM iceberg.personal_lena.gold_orders",
+            **BUILDER,
+        )
+        self.assertEqual(p.kind, "create_view")
+        self.assertEqual(p.schema, "sales")
+        self.assertEqual(p.table, "gold_orders")
+
+    def test_view_multiline_ok(self):
+        sql = (
+            "CREATE OR REPLACE VIEW iceberg.sales.gold_orders AS\n"
+            "SELECT *\nFROM iceberg.personal_lena.gold_orders"
+        )
+        self.assertEqual(guard(sql, **BUILDER).kind, "create_view")
+
+    def test_view_personal_target_ok(self):
+        # A view whose TARGET is the caller's own personal schema is allowed too.
+        p = guard(
+            "CREATE OR REPLACE VIEW iceberg.personal_lena.gold_x AS "
+            "SELECT * FROM iceberg.personal_lena.gold_orders",
+            **CREATOR,
+        )
+        self.assertEqual(p.kind, "create_view")
+
+    def test_drop_view_ok(self):
+        p = guard("DROP VIEW IF EXISTS iceberg.sales.gold_orders", **BUILDER)
+        self.assertEqual(p.kind, "drop_view")
+        self.assertEqual(p.schema, "sales")
+        self.assertEqual(p.table, "gold_orders")
+
+    def test_view_target_requires_builder(self):
+        # A creator may NOT create a view in the domain schema (role floor = builder).
+        self._reject(
+            "CREATE OR REPLACE VIEW iceberg.sales.gold_orders AS "
+            "SELECT * FROM iceberg.personal_lena.gold_orders",
+            403, CREATOR,
+        )
+
+    def test_view_cross_domain_target_rejected(self):
+        self._reject(
+            "CREATE OR REPLACE VIEW iceberg.marketing.gold_orders AS "
+            "SELECT * FROM iceberg.personal_lena.gold_orders",
+            403,
+        )
+
+    def test_drop_view_target_requires_builder(self):
+        self._reject("DROP VIEW IF EXISTS iceberg.sales.gold_orders", 403, CREATOR)
+
+    def test_create_view_without_or_replace_rejected(self):
+        # Plain CREATE VIEW is NOT on the allowlist (only CREATE OR REPLACE VIEW).
+        self._reject(
+            "CREATE VIEW iceberg.sales.gold_orders AS "
+            "SELECT * FROM iceberg.personal_lena.gold_orders",
+            400,
+        )
+
+    def test_view_non_iceberg_source_rejected(self):
+        # The AS body must SELECT FROM an iceberg table — not an arbitrary catalog.
+        self._reject(
+            "CREATE OR REPLACE VIEW iceberg.sales.gold_orders AS "
+            "SELECT * FROM system.runtime.queries",
+            400,
+        )
+
+    def test_view_non_iceberg_target_rejected(self):
+        self._reject(
+            "CREATE OR REPLACE VIEW system.sales.gold_orders AS "
+            "SELECT * FROM iceberg.personal_lena.gold_orders",
+            400,
+        )
+
+    def test_view_comment_smuggle_rejected(self):
+        self._reject(
+            "CREATE OR REPLACE VIEW iceberg.sales.gold_orders AS "
+            "SELECT * FROM iceberg.personal_lena.gold_orders -- ; DROP TABLE x",
+            400,
+        )
+
+    def test_view_second_statement_rejected(self):
+        self._reject(
+            "CREATE OR REPLACE VIEW iceberg.sales.gold_orders AS "
+            "SELECT * FROM iceberg.personal_lena.gold_orders; DROP TABLE iceberg.sales.other",
+            400,
+        )
+
+    def test_view_body_must_be_select_not_ddl(self):
+        # The AS body is restricted to a plain SELECT — no arbitrary DDL smuggled in.
+        self._reject(
+            "CREATE OR REPLACE VIEW iceberg.sales.gold_orders AS "
+            "CREATE TABLE iceberg.sales.x AS SELECT 1",
+            400,
+        )
+
+
 class SyncWriteTests(unittest.TestCase):
     """The scheduled-incremental-sync shapes: INSERT..SELECT, MERGE, expire_snapshots.
     Same target-schema/role gate as a CTAS; plain literal writes stay rejected."""

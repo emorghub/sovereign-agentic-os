@@ -7,7 +7,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { coerceField, classifyWriteResult, actorStamp } from './interactive-logic.ts';
+import { coerceField, classifyWriteResult, actorStamp, isRealSave } from './interactive-logic.ts';
 import type { RecordResult } from '@/lib/app-sdk/index.ts';
 
 test('coerceField coerces per type; empty → undefined (omitted)', () => {
@@ -21,11 +21,22 @@ test('coerceField coerces per type; empty → undefined (omitted)', () => {
   assert.equal(coerceField('number', ''), undefined);
 });
 
-test('classifyWriteResult: only a live-app result is a real save', () => {
+test('isRealSave: durable OS store AND live app pod are real; demo-seed is not', () => {
+  // Regression: the default static-SPA template persists to the durable OS app-records store,
+  // which labels `os-records-store` — NOT `live-app`. It must count as a real save, else an
+  // in-app "add record" that DID persist wrongly reports "Not saved for real (demo-seed)".
+  assert.equal(isRealSave('os-records-store'), true);
+  assert.equal(isRealSave('live-app'), true);
+  assert.equal(isRealSave('demo-seed'), false);
+  assert.equal(isRealSave(undefined), false);
+});
+
+test('classifyWriteResult: durable OS-store and live-app are real saves; demo-seed is not', () => {
+  const store: RecordResult = { source: 'os-records-store', added: { id: '1' } };
   const live: RecordResult = { source: 'live-app', added: { id: '1' } };
   const seed: RecordResult = { source: 'demo-seed', note: 'runner not live' };
-  const a = classifyWriteResult(live, 'Saved.');
-  assert.deepEqual(a, { saved: true, tone: 'success', message: 'Saved.' });
+  assert.deepEqual(classifyWriteResult(store, 'Saved.'), { saved: true, tone: 'success', message: 'Saved.' });
+  assert.deepEqual(classifyWriteResult(live, 'Saved.'), { saved: true, tone: 'success', message: 'Saved.' });
   const b = classifyWriteResult(seed, 'Saved.');
   assert.equal(b.saved, false);
   assert.equal(b.tone, 'info');

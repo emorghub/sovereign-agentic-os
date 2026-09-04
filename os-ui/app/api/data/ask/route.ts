@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { roleModel, standardFirstEscalationEnabled } from '@/lib/models/roles';
+import { roleModel } from '@/lib/models/roles';
 import { requirePrincipal, errorResponse } from '@/lib/data/server';
 import { listAskable } from '@/lib/data/store';
 import { readPrincipalFor } from '@/lib/data/store-fqn';
@@ -78,14 +78,11 @@ export async function POST(req: Request) {
       datasets,
       llm: async (messages: AskMessage[], model: string) =>
         (await call({ model, messages, temperature: 0 })).content,
-      // COST ROUTING (standard-first): the generated SQL is strictly validated
-      // (validateReadOnlySelect) before it ever runs, so generation attempts the
-      // STANDARD tier first and escalates to reasoning ONLY when that guard rejects the
-      // cheap SQL. Admin toggle OFF ⇒ generate on reasoning directly (no escalate tier).
-      // The grounded summary stays on standard (light work) regardless.
-      models: standardFirstEscalationEnabled()
-        ? { generate: roleModel('standard'), generateEscalate: roleModel('reasoning'), summarize: roleModel('standard') }
-        : { generate: roleModel('reasoning'), summarize: roleModel('standard') },
+      // SQL generation ALWAYS runs on the REASONING tier. The cheaper standard tier was
+      // returning chat prose ("I can't run SQL, here's a query for you…") and fan-out joins
+      // instead of one executable SELECT — NL→SQL is the hard step and must be reliable.
+      // Grounding the answer in the returned rows stays on the standard tier (light work).
+      models: { generate: roleModel('reasoning'), summarize: roleModel('standard') },
       // Owner-aware principal, resolved per generated SQL: a read of the caller's OWN
       // `personal_<uid>` lane runs AS the owner (that schema is owner-only under OPA
       // `is_owned_personal`, so the domain principal is denied); a governed asset/product

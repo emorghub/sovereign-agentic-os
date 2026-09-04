@@ -17,6 +17,9 @@ type Settings = {
   /** os-ui 0.6.133 — allow coded (custom) apps. OFF by default: only Declarative
    *  (no-code) apps can be created. The coded path is experimental. */
   codedAppsEnabled: boolean;
+  /** os-ui 0.6.152 — allow autonomous (unattended) agent execution. OFF by default:
+   *  agents run only when a human clicks Run; cron/event triggers are refused. */
+  autonomousAgentsEnabled: boolean;
 };
 
 type CatalogModel = { model_name: string; display: string; provenance: 'internal' | 'external' };
@@ -297,6 +300,28 @@ export default function SettingsPage() {
           </div>
           <div className="hint" style={{ marginTop: 8 }}>
             Off = only Declarative no-code apps can be created. The coded path is experimental.
+          </div>
+        </div>
+
+        <div className="section-title">Agents</div>
+        <div className="card" style={{ marginBottom: 18 }}>
+          <div className="row" style={{ gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+            <label className="hint" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              Allow autonomous agent execution
+              <Switch
+                on={s.autonomousAgentsEnabled}
+                disabled={busy === 'autonomousAgentsEnabled'}
+                onClick={() => {
+                  const next = !s.autonomousAgentsEnabled;
+                  set('autonomousAgentsEnabled', next);
+                  void save('autonomousAgentsEnabled', { autonomousAgentsEnabled: next });
+                }}
+              />
+            </label>
+          </div>
+          <div className="hint" style={{ marginTop: 8 }}>
+            Off (default) = agents run only when a person clicks Run. Scheduled (cron) and
+            event/API triggers are refused until this is on — nothing runs unattended.
           </div>
         </div>
 
