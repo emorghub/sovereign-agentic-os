@@ -54,21 +54,21 @@ deleted or disabled without touching base's build/type-check/render/run.
 A module moves from `extensions/` back into `base/` only when **all** of the
 following hold:
 
-1. **Load-bearing for the base promise** — the OS cannot demonstrate a
-   governed agent / governed model / governed data path / tracing without it.
-   "Nice to have" or "most deployments enable it" is not sufficient.
-2. **No new external dependency surface** — it doesn't pull in another
-   subchart, another secret class, or another network egress rule that base
-   doesn't already need.
-3. **Covered by the base e2e smokes** (see epic #15, task #29) — its absence
-   would make one of the five base-feature smokes (in-process agent path, pod
-   agent path, generic HTTP MCP, Langfuse, LiteLLM) fail, not just degrade.
-4. **`helm template` + `tsc`/`build` stay green with everything else in
-   extensions/ removed** — moving it to base must not silently drag in an
-   extension as a transitive dependency.
-5. Sign-off from whoever owns the Phase 3 base-solidity invariant (currently:
-   the epic #13 / #15 assignee(s) plus a maintainer review) — this is a
-   deliberate, reviewed promotion, not a drive-by `git mv`.
+1. **Load-bearing** — the OS cannot demonstrate a governed agent / governed
+   model / governed data path / tracing without it.
+2. **Universal** — every deployment needs it, no matter which extensions
+   are enabled.
+3. **Needed by a base-feature smoke** — one of the five base smokes
+   (in-process agent path, pod agent path, generic HTTP MCP, Langfuse,
+   LiteLLM) would fail without it, not just work worse.
+4. **Still passes with all other extensions removed** — after the move,
+   `helm template`, `tsc`, and `build` must still work. The move must not
+   secretly depend on another extension.
+5. **Needs sign-off** — moving something into base affects everyone's
+   deployment size and complexity, so a maintainer must approve it first.
 
-Moving the other way — base to extensions — only needs (2) and (4) to stop
-holding; anything can be demoted the moment it's no longer load-bearing.
+If it fails any of the five, it stays in `extensions/`. Before
+moving something from `extensions/` into `base/`: confirm it meets all three
+above, confirm it doesn't drag in another extension as a dependency, re-run
+`helm template` to confirm output still matches expectations, and get a
+maintainer to review the move before merging.
