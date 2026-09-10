@@ -14,12 +14,12 @@ mock-model:0.1.1
 agent-runtime:0.1.2
 egress-proxy:0.1.0
 web-fetch:0.1.0
-query-tool:0.6.2
 "
 
 EXT_IMAGES="
 sample-agent:0.1.0
 haystack-retriever:0.1.0
+query-tool:0.6.2
 dbt:0.2.0
 superset:6.1.0
 mlflow:2.19.0
