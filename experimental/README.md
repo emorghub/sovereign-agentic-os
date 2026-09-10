@@ -25,10 +25,10 @@ optional, and where to look, in five minutes — without reading every file.
 Base is the smallest set of components the OS needs to boot and demonstrate
 its core promise: a governed agent, talking to a governed model, over a
 governed data path, with tracing. Concretely: `agent-runtime`, `os-ui`,
-`query-tool`, `mock-model`, `web-fetch`, `egress-proxy` (images), and their
+`mock-model`, `web-fetch`, `egress-proxy` (images), and their
 matching chart templates (`agent-runtime`, `litellm`, `langfuse`, `mock-model`,
 `opa`, `os-ui`, `postgres`, `clickhouse`, `valkey`, `object-storage`,
-`network`, the `lakehouse/query-tool.yaml` piece of the lakehouse, plus the
+`network`, plus the
 chart-wide `_helpers.tpl`, `priority-classes.yaml`, `ingress.yaml`,
 `NOTES.txt`).
 
@@ -38,7 +38,7 @@ invariant is what Phase 3 (epic #15) verifies end-to-end.
 ## What "extensions" means
 
 Everything else: the analytics/BI stack (dbt, superset, cube, openmetadata,
-metrics, dashboards-adjacent lakehouse jobs), the Science/ML layer (mlflow,
+metrics, trino, query-tool, dashboards-adjacent lakehouse jobs), the Science/ML layer (mlflow,
 ml-agent, ml-trainer, science templates — Layer 4, off by default), developer
 tooling (terminal-broker, workbench-broker, sandbox-shell, ci-builder,
 code-server-workbench, software/forgejo CI), connectivity extras (docling,
