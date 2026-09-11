@@ -132,7 +132,7 @@ export default async function CockpitPage() {
         </div>
 
         <div className="ci-sec-head">
-          <h2 className="ci-sec-title">What's moving</h2>
+          <h2 className="ci-sec-title">What&apos;s moving</h2>
           <p className="ci-sec-sub">
             Scoped to you, ordered for a {feed.personaLabel.toLowerCase()}. Each card links into its
             owning tab — the cockpit reads, it never recomputes.
@@ -145,7 +145,7 @@ export default async function CockpitPage() {
           <h2 className="ci-sec-title">Top items, by type</h2>
           <p className="ci-sec-sub">
             The most-notable thing you can see in each part of the registry. Governed and scoped —
-            never another domain's, never someone else's drafts.
+            never another domain&apos;s, never someone else&apos;s drafts.
           </p>
         </div>
 

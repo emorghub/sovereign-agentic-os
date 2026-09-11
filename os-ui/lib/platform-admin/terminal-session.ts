@@ -110,15 +110,13 @@ class TerminalSession {
 
     try {
       // 1) Short-lived single-use token (server re-checks auth + role).
-      let token: string;
-      let wsUrl: string;
       const res = await fetch('/api/terminal/token', { method: 'POST', cache: 'no-store' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         this.set('error', body.error || `token request failed (${res.status})`);
         return;
       }
-      ({ token, wsUrl } = await res.json());
+      const { token, wsUrl }: { token: string; wsUrl: string } = await res.json();
 
       // 2) xterm (browser-only chunks) — created once, reused across reconnects
       // so scrollback survives a broker-side session expiry + fresh shell.
@@ -229,7 +227,7 @@ class TerminalSession {
 // Singleton on globalThis so Next.js HMR/module re-evaluation in dev never
 // duplicates live sessions. In production this is a plain module singleton.
 declare global {
-  // eslint-disable-next-line no-var
+   
   var __soaTerminalSession: TerminalSession | undefined;
 }
 

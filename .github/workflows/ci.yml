@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
 #
-# CI — runs on pull requests targeting `main`. The job ids below (build,
-# helm-lint, secret-scan) are STABLE and are wired as required status checks in
-# the branch ruleset. Actions are pinned to commit SHAs.
+# CI — runs on pull requests targeting `main` and on pushes to `main`. The job ids
+# `build` / `helm-lint` / `secret-scan` are STABLE and wired as required status checks
+# in the branch ruleset; `test` / `typecheck` / `lint` join them (issue #31).
+# Actions are pinned to commit SHAs — every SHA below has been verified to resolve.
 name: ci
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -18,8 +21,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-ui:
-    name: test-ui
+  # os-ui unit tests. Node 22.18+ is required: the suite is .ts run directly under
+  # `node --test`, which needs native type-stripping (22.6+, unflagged 22.18+) and
+  # glob support for --test (21+). Node 20 fails both.
+  test:
+    name: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -27,23 +33,53 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: 20
+          node-version: 22
       - name: Install (os-ui)
         run: npm --prefix os-ui ci
       - name: Test (os-ui)
         run: npm --prefix os-ui test
 
-  build:
-    name: build
+  typecheck:
+    name: typecheck
     runs-on: ubuntu-latest
-    needs: test-ui
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: 20
+          node-version: 22
+      - name: Install (os-ui)
+        run: npm --prefix os-ui ci
+      - name: Typecheck (os-ui)
+        run: npx --prefix os-ui tsc --noEmit -p os-ui/tsconfig.json
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Setup Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+      - name: Install (os-ui)
+        run: npm --prefix os-ui ci
+      - name: Lint (os-ui)
+        run: npm --prefix os-ui run lint
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Setup Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
       - name: Install (os-ui)
         run: npm --prefix os-ui ci
       - name: Build (os-ui)
@@ -51,46 +87,44 @@ jobs:
       - name: License gate (os-ui)
         run: npm --prefix os-ui run check:licenses
 
-  test-python:
-    name: test-python
+  # Python images. Paths are the pre-#39 layout; #39 moves them under images/base/
+  # and images/extensions/ — whichever merges second rebases these three lines.
+  py:
+    name: py
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2f # v5.3.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: '3.11'
       - name: Install pytest
         run: pip install "pytest>=8.0,<9"
-      # data-runner: existing + new failure-mode tests
       - name: pytest (data-runner)
         run: python3 -m pytest -q images/data-runner/test_app.py
-      # web-fetch: new tests (zero tests previously)
       - name: pytest (web-fetch)
         run: python3 -m pytest -q images/web-fetch/test_app.py
-      # agent-runtime: existing interpreter tests (no new tests added here)
       - name: pytest (agent-runtime)
         run: python3 -m pytest -q images/agent-runtime/tests/
+      - name: unittest (query-tool execute guard)
+        run: python3 images/query-tool/test_execute_guard.py
 
-  # OPA policy tests — skipped in CI if the opa binary is unavailable; a comment
-  # explains how to run locally. Adding the full setup-opa action adds ~30s and
-  # OPA is not currently on the required-checks list; add it when policies grow.
-  #
-  # To run locally:
-  #   opa test tests/policies/ --v1-compatible
-  #
-  # Uncomment the block below and add 'test-opa' to required status checks when ready:
-  #
-  # test-opa:
-  #   name: test-opa
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-  #     - uses: open-policy-agent/setup-opa@34a30e8a924d1b03ce2cf70eca3d7d0888cee374 # v2.2.0
-  #       with:
-  #         version: latest
-  #     - run: opa test tests/policies/ --v1-compatible
+  # OPA policy unit tests. Wrapped in a script because one of the four policies
+  # (package agentic.authz) is inline in the OPA ConfigMap template, not a .rego file
+  # — a bare `opa test policies/ tests/policies/` cannot see it.
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Setup OPA
+        uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
+        with:
+          version: latest
+      - name: Policy tests
+        run: bash scripts/policy-test.sh
 
   helm-lint:
     name: helm-lint

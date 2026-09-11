@@ -666,7 +666,7 @@ function DatasetTilesInner({ onOpen }: { onOpen: (id: string) => void }) {
       {empty ? (
         <div className="stub-page" style={{ marginTop: 20 }}>
           {scope === 'mine' || scope === 'all'
-            ? <>No datasets yet. <strong>+ New dataset</strong> starts one — bring a file in, and you're at Bronze.</>
+            ? <>No datasets yet. <strong>+ New dataset</strong> starts one — bring a file in, and you&apos;re at Bronze.</>
             : scope === 'shared'
               ? 'Nothing in Domain yet — promote a dataset to share it with your domain.'
               : 'Nothing in Company yet — an Admin certifies assets into data products.'}

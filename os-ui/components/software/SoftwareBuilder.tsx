@@ -1018,7 +1018,7 @@ function ContextStage({
       <p className="ctx-choice-guide">
         <strong>Give this app its context — six types.</strong> For each of{' '}
         <strong>Data · Metrics · Files · Knowledge · Agents · Connections</strong>, either{' '}
-        <strong>＋ Add existing</strong> governed context you're entitled to, or <strong>＋ Create new</strong> —
+        <strong>＋ Add existing</strong> governed context you&apos;re entitled to, or <strong>＋ Create new</strong> —
         the app reads it <em>in place</em>, OPA-scoped, run AS you, never raw secrets, never a copy.
       </p>
 

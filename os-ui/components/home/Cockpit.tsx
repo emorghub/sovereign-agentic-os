@@ -38,7 +38,7 @@ export default function Cockpit({ feed }: { feed: HomeFeed }) {
       <section className="cm" key="needs">
         <ModuleHead title="What needs me" href="/governance" link="Governance" />
         {feed.needs.length === 0 ? (
-          <Empty>You're all clear — nothing is waiting on you.</Empty>
+          <Empty>You&apos;re all clear — nothing is waiting on you.</Empty>
         ) : (
           <ul className="cm-list">
             {feed.needs.slice(0, 6).map((n) => (
