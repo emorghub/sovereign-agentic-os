@@ -1109,6 +1109,27 @@ sampleAgent:
         assembled only from permissively licensed open source.
 
 # -----------------------------------------------------------------------------
+# MCP test agent — proves the OS's own real, governed MCP registry (/api/mcp)
+# works end to end, the same way sampleAgent proves OpenSearch+RAG works end to
+# end. Runs as a designated demo user (not OpenSearch-dependent, so it can live
+# in base). `mcpToken` is that user's minted MCP bearer — leave unset here and
+# supply it via the mcp-test-agent-token Secret instead (see the chart comment
+# in templates/base/mcp-test-agent/mcp-test-agent.yaml); never commit a real
+# token to this file.
+# -----------------------------------------------------------------------------
+mcpTestAgent:
+  enabled: true
+  image:
+    repository: sovereign-os/mcp-test-agent   # built locally, loaded into kind
+    tag: "0.1.0"
+  mcpUrl: "http://os-ui:3000/api/mcp"
+  mcpToken: ""   # set via values.private.yaml or the Secret directly — never here
+  chatModel: sovereign-mock
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 250m, memory: 256Mi }
+
+# -----------------------------------------------------------------------------
 # Agent runtime — the live-execution backend for the Agents tab (Phase 4). It
 # holds ONLY its scoped LiteLLM virtual key (least privilege): no OPA, no
 # Langfuse, no Forgejo, no platform creds. Its egress is default-deny except the

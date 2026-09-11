@@ -14,6 +14,7 @@ mock-model:0.1.1
 agent-runtime:0.1.2
 egress-proxy:0.1.0
 web-fetch:0.1.0
+mcp-test-agent:0.1.0
 "
 
 EXT_IMAGES="
