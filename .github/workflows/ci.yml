@@ -27,7 +27,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: 20
+          node-version: 22
       - name: Install (os-ui)
         run: npm --prefix os-ui ci
       - name: Test (os-ui)
@@ -58,20 +58,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2f # v5.3.0
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: '3.11'
       - name: Install pytest
         run: pip install "pytest>=8.0,<9"
       # data-runner: existing + new failure-mode tests
+      - name: Install data-runner deps
+        run: pip install -r images/extensions/data-runner/requirements.txt
       - name: pytest (data-runner)
-        run: python3 -m pytest -q images/data-runner/test_app.py
+        run: python3 -m pytest -q images/extensions/data-runner/test_app.py
       # web-fetch: new tests (zero tests previously)
       - name: pytest (web-fetch)
-        run: python3 -m pytest -q images/web-fetch/test_app.py
+        run: python3 -m pytest -q images/base/web-fetch/test_app.py
       # agent-runtime: existing interpreter tests (no new tests added here)
+      - name: Install agent-runtime deps
+        run: pip install -r images/base/agent-runtime/requirements.txt
       - name: pytest (agent-runtime)
-        run: python3 -m pytest -q images/agent-runtime/tests/
+        run: python3 -m pytest -q images/base/agent-runtime/tests/
 
   # OPA policy tests — skipped in CI if the opa binary is unavailable; a comment
   # explains how to run locally. Adding the full setup-opa action adds ~30s and
