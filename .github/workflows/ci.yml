@@ -101,8 +101,12 @@ jobs:
           python-version: '3.11'
       - name: Install pytest
         run: pip install "pytest>=8.0,<9"
+      # data-runner's test imports app.py, which imports pyarrow/pyiceberg/boto3 — install
+      # the image's own requirements first. The other three suites are stdlib-only.
       - name: pytest (data-runner)
-        run: python3 -m pytest -q images/data-runner/test_app.py
+        run: |
+          pip install -r images/data-runner/requirements.txt
+          python3 -m pytest -q images/data-runner/test_app.py
       - name: pytest (web-fetch)
         run: python3 -m pytest -q images/web-fetch/test_app.py
       - name: pytest (agent-runtime)
