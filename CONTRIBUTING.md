@@ -41,7 +41,7 @@ while keeping the core open under Apache-2.0.
   `scripts/license-check.sh` before pushing.
 - New source files must carry the SPDX header:
   `SPDX-License-Identifier: Apache-2.0` / `Copyright 2026 Borek Data Ventures UG`.
-- Be respectful — see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+- Be respectful — see [`CODE_OF_CONDUCT.md`](.github/CODE_OF_CONDUCT.md).
 
 ## Reporting security issues
 
