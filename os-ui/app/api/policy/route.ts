@@ -36,7 +36,7 @@ export async function GET() {
     return errorResponse(e);
   }
 
-  let grants: Record<string, string[]> = {};
+  const grants: Record<string, string[]> = {};
   try {
     const res = await fetch(`${config.opaUrl}/v1/data/grants`, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

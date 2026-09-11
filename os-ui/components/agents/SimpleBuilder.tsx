@@ -110,20 +110,6 @@ export default function SimpleBuilder({
   view?: boolean;
   onEdit?: () => void;
 }) {
-  // Read-only VIEW — the calm surface for a finished team: run it now (or see its schedule),
-  // watch it run, read the last result + diagnostics. Reuses the Run + Evaluate panels.
-  if (view) {
-    return (
-      <ReadOnlyView
-        systemId={systemId}
-        system={system}
-        canEdit={canEdit}
-        buildRun={buildRun}
-        onReload={onReload}
-        onEdit={onEdit}
-      />
-    );
-  }
   // Always OPEN on Define — creating a new system OR opening an existing one lands
   // here, never jumping ahead. Phase checkmarks reflect what the user has actually
   // completed THIS session (`stage.done`), so a freshly opened system shows NO green
@@ -190,6 +176,21 @@ export default function SimpleBuilder({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, buildRun.lastBuild?.ok, hasRun, buildRun.lastRun]);
+
+  // Read-only VIEW — the calm surface for a finished team: run it now (or see its schedule),
+  // watch it run, read the last result + diagnostics. Reuses the Run + Evaluate panels.
+  if (view) {
+    return (
+      <ReadOnlyView
+        systemId={systemId}
+        system={system}
+        canEdit={canEdit}
+        buildRun={buildRun}
+        onReload={onReload}
+        onEdit={onEdit}
+      />
+    );
+  }
 
   // The per-stage assistant, mounted at the TOP of every stage body. One helper, one
   // endpoint; it auto-suggests on entering each stage (edit-mode only — read-only VIEW

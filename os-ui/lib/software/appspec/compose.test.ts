@@ -572,7 +572,7 @@ test('ROUND TRIP: a composed landing (markdown + kpi + table) parses + validates
 // ------------------------------------------------------- 4c: intake-wizard steps ----
 
 test('wizard step + field reducers build a multi-step form', () => {
-  let steps = wizardSteps.add([], newWizardStep('Contact'));
+  const steps = wizardSteps.add([], newWizardStep('Contact'));
   steps[0] = setStepTitle(steps[0], 'Your details');
   let field = newFormField();
   field = setFieldAttr(field, 'name', 'full_name');

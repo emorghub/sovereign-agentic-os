@@ -84,7 +84,7 @@ export default function OnboardingWizard({ user, onDone }: OnboardingWizardProps
               <div className="wiz-eyebrow">30-second tour</div>
               <h2 className="wiz-title">Where to start</h2>
               <p className="wiz-text">
-                On Home you'll find the golden-path launcher — your fastest way in:
+                On Home you&apos;ll find the golden-path launcher — your fastest way in:
               </p>
               <div className="wiz-chips">
                 {GOLDEN_PATHS.map((p) => (
@@ -102,9 +102,9 @@ export default function OnboardingWizard({ user, onDone }: OnboardingWizardProps
           {step === 3 && (
             <>
               <div className="wiz-eyebrow">Ready</div>
-              <h2 className="wiz-title">You're all set</h2>
+              <h2 className="wiz-title">You&apos;re all set</h2>
               <p className="wiz-text">
-                Your workspace is ready. Pick a golden path on Home whenever you'd like to begin.
+                Your workspace is ready. Pick a golden path on Home whenever you&apos;d like to begin.
               </p>
             </>
           )}

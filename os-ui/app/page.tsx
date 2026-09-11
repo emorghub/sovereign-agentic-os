@@ -58,7 +58,7 @@ export default async function HomePage() {
           </h1>
           <p className="home-sub">
             Your governed space on the Sovereign Agentic OS. Pick a golden path to create something —
-            or open your <Link href="/cockpit" className="home-sub-link">Cockpit</Link> to see what's
+            or open your <Link href="/cockpit" className="home-sub-link">Cockpit</Link> to see what&apos;s
             moving and what needs you.
           </p>
         </div>
@@ -88,7 +88,7 @@ export default async function HomePage() {
           <h2 className="home-sec-title">Golden paths</h2>
           <p className="home-sec-sub">
             Ten ways to build. Each card explains itself, launches its flow, and links a hands-on
-            tutorial. Paths your role can't act on yet are dimmed — still yours to explore.
+            tutorial. Paths your role can&apos;t act on yet are dimmed — still yours to explore.
           </p>
         </div>
 
@@ -98,7 +98,7 @@ export default async function HomePage() {
           <span className="home-cockpit-cta-text">
             <span className="home-cockpit-cta-kicker">Your cockpit</span>
             <span className="home-cockpit-cta-line">
-              What's moving and what needs you — scoped to you, ordered for a{' '}
+              What&apos;s moving and what needs you — scoped to you, ordered for a{' '}
               {feed.personaLabel.toLowerCase()}.
             </span>
           </span>

@@ -1740,7 +1740,7 @@ function EditableGridEditor({ config, onConfig }: { config: EditableGridConfig; 
     <div className="sc-config" style={{ marginTop: 6 }}>
       <div className="sc-slot">
         <div className="sc-slot-label">Columns</div>
-        <div className="hint sc-slot-help">Define the fields users can see and edit inline. Data comes from this app's own governed record log.</div>
+        <div className="hint sc-slot-help">Define the fields users can see and edit inline. Data comes from this app&apos;s own governed record log.</div>
         {cols.length === 0 ? <p className="hint">No columns yet — add one below.</p> : null}
         {cols.map((col, i) => (
           <div key={i} className="row sc-formfield" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
@@ -1771,7 +1771,7 @@ function KanbanWorkflowEditor({ config, onConfig }: { config: KanbanWorkflowConf
       </div>
       <div className="sc-slot">
         <div className="sc-slot-label">Title field</div>
-        <div className="hint sc-slot-help">The field shown as each card's title.</div>
+        <div className="hint sc-slot-help">The field shown as each card&apos;s title.</div>
         <input className="sb-input" placeholder="e.g. title" value={config.titleField} onChange={(e) => onConfig({ ...config, titleField: e.target.value })} />
       </div>
       <div className="sc-slot">

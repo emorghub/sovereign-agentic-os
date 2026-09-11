@@ -882,7 +882,7 @@ function ConnectionDetail({
           </div>
           {dataUsage && c.dataUsageMode === 'offline-mock' ? (
             <p className="hint" style={{ marginTop: 8, marginBottom: 0, fontSize: 11.5 }}>
-              ⚠︎ Registered as an <strong>offline mock</strong> — the row/item count is a deterministic stand-in, not a real ingest. The live dlt/Drive sync isn't wired on this deployment yet.
+              ⚠︎ Registered as an <strong>offline mock</strong> — the row/item count is a deterministic stand-in, not a real ingest. The live dlt/Drive sync isn&apos;t wired on this deployment yet.
             </p>
           ) : null}
         </div>

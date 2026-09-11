@@ -58,7 +58,7 @@ function openSearchStub() {
 // whole module so the route gets a canned admin user without needing real auth,
 // Ory, OPA, or the tenant registry.
 type MockAdminCtx = { id: string; role: string; domains: string[] };
-let ACTING_ADMIN: MockAdminCtx = { id: 'ada', role: 'admin', domains: ['platform'] };
+const ACTING_ADMIN: MockAdminCtx = { id: 'ada', role: 'admin', domains: ['platform'] };
 
 mock.module('@/app/api/platform-admin/_ctx', {
   namedExports: {
