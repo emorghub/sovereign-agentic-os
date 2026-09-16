@@ -141,6 +141,11 @@ spec:
             # surface reads their status + scales them 0<->1 here via the k8s API.
             - name: NAMESPACE
               value: {{ .Release.Namespace | quote }}
+            {{- /* Tab gating. Empty = base-8 default. */}}
+            {{- if .Values.osUI.enabledTabs }}
+            - name: OS_ENABLED_TABS
+              value: {{ .Values.osUI.enabledTabs | quote }}
+            {{- end }}
             # Session-signing secret (HMAC-SHA256 for the auth cookie). Sourced
             # from the generated `os-ui-session` Secret — NEVER the in-code
             # dev fallback, which would let anyone forge an admin session.
