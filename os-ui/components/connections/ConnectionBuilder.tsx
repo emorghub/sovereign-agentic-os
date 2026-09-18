@@ -33,7 +33,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { CAPABILITY_MODES, type CapabilityMode, type ConnectionTemplateKey } from '@/lib/connections/schema';
 import { isOperationalTemplate, operationalPlatformFor, templateHasActionTools } from '@/lib/connections/operational-platform';
 import { type Role, roleAtLeast } from '@/lib/core/session';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { canManageArtifact } from '@/lib/governance/edit-scope';
+// Deep-path by design: this is a 'use client' component and must not pull the
+// server-only surfaces the @/lib/oauth barrel re-exports.
 import { providerForTemplate, providerConfig, type OAuthProvider } from '@/lib/oauth/providers';
 import { driveConnectionStatus, driveAuthorizePath } from '@/lib/oauth/drive-status';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';

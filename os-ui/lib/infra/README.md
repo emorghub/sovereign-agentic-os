@@ -26,30 +26,119 @@ additional graph-node context attached to each trace span.
 
 ## Public API
 
-- **`governed.ts`** — the DATA tool spine (`server-only`): `authorize()`,
-  `trace()`, `cubeLoad()`, `cubeScalar()`, `queryRun()`, `executeRun()`. The
-  single import every data store uses instead of calling backends directly.
-- **`agent-governed.ts`** — the AGENT tool spine for multi-node agent graphs.
-  Same contract as `governed.ts` but carries graph-execution context.
-- **`os-mirror.ts`** — dual in-process + OpenSearch durable-mirror pattern.
-  Every tab store calls this to keep the global artifact index consistent.
-- **`app-registry.ts`** — software app registry; maps app slugs to metadata and
-  deployment manifests.
-- **`capability-compiler.ts`** — compiles a connection's capability profile into
-  an OPA bundle. Called by the connections store on every capability update.
-- **`secrets.ts`** — Kubernetes Secret read/write client. The only code allowed
-  to hold a raw credential value (transiently, never logged).
-- **`k8s.ts`** — Kubernetes API client scoped to the platform namespace; used for
-  job dispatch and pod status queries.
-- **`identity-server.ts`** — server-side helpers for resolving users and domain
-  memberships from the identity store.
-- **`mailer.ts`** — pluggable transactional mailer: prefers Microsoft Graph,
-  falls back to SMTP, no-ops when neither is configured.
-- **`tool-proxy.ts`** — reverse proxy for embedded console tools (Superset,
-  OpenSearch Dashboards). Injects session cookies and rewrites URLs.
-- **`tool-sso-langfuse.ts`** — injects a short-lived Langfuse SSO session so the
-  Langfuse UI opens authenticated without exposing credentials.
-- **`context/`** — per-request context helpers (request-id, user, domain).
+Import via `@/lib/infra` (the barrel) for everything EXCEPT the collision and
+identity-server surfaces below, which stay deep-path.
+
+**`governed.ts`** — the DATA tool spine (`server-only`)
+- Deep-path only (collision with `agent-governed.ts`): `authorize`, `trace`,
+  `SALES`, `type ToolName`, `type Authz`
+- Via the barrel: `scrubSecurityContext`, `__setCubeMetaForTest`, `cubeMeta`,
+  `cubeLoad`, `cubeScalar`, `queryRun`, `executeRun`, `type CubeQuery`,
+  `type CubeResult`, `type CubeMetaView`, `type QueryResult`,
+  `type ExecuteIdentity`, `type ExecuteResult`
+
+**`agent-governed.ts`** — the AGENT tool spine (`server-only`)
+- Deep-path only (same collision): `authorize`, `trace`, `SALES`,
+  `type ToolName`, `type Authz`
+- Via the barrel: `authorizeAppTool`, `registerConnectionProfile`,
+  `unregisterConnectionProfile`, `connectionBundle`, `exposedConnectionTools`,
+  `restrictConnectionForAgent`, `authorizeConnectionCall`, `recentTraces`,
+  `metricsTool`, `retrieveTool`, `type Effect`, `type Policy`, `type ConnMode`,
+  `type ConnToolPolicy`, `type ConnAuthz`, `type TraceEvent`,
+  `type TraceRecord`, `type MetricsResult`, `type Passage`,
+  `type DlsPrincipal`
+- `capability-compiler.ts` is internal to this spine and has no external
+  consumer — not re-exported anywhere.
+
+**Via the barrel (no collision)**
+- `secrets.ts` (`server-only`) — the only code allowed to hold a raw
+  credential value (transiently, never logged): `putSecret`, `hasSecret`,
+  `secretFingerprint`, `getSecretServerSide`, `deleteSecret`, `egressHost`,
+  `isHardDeniedTarget`, `isInternalTarget`, `isExternal`, `isEgressAllowed`,
+  `type SecretRef`
+- `os-mirror.ts` (pure) — dual in-process + OpenSearch durable-mirror pattern;
+  every tab store calls this to keep the global artifact index consistent:
+  `osMirror`, `type OsMirror`
+- `app-registry.ts` (`server-only`) — app slug → connection registry:
+  `registerConnection`, `registerDurableGrantResolver`, `grantsFor`,
+  `grantsForDurable`, `getConnectionByApp`, `setConnectionVisibility`,
+  `removeConnection`, `type AppTool`, `type AppConnection`,
+  `type DurableGrantResolver`
+- `k8s.ts` (pure) — Kubernetes API client scoped to the platform namespace:
+  `k8s`, `k8sText`, `type K8sResult`, `type K8sTextResult`
+- `service-bearer.ts` (`server-only`) — inter-service bearer header:
+  `serviceBearerHeader`
+- `tool-proxy.ts` (`server-only`) — reverse proxy for embedded console tools
+  (Superset, OpenSearch Dashboards): `TOOLS`, `resolveTool`, `roleAllowed`,
+  `rewriteCsp`, `rewriteLocation`, `rewriteSetCookie`,
+  `transformResponseHeaders`, `buildUpstreamHeaders`, `proxy`, + its types
+- `tool-sso-langfuse.ts` (`server-only`) — short-lived Langfuse SSO session:
+  `hasLangfuseSession`, `cookiePair`, `loginLangfuse`,
+  `_resetLangfuseSessionCache`, `getLangfuseSessionCookies`,
+  `type LangfuseLoginOpts`
+- `mailer.ts` (`server-only`) — pluggable transactional mailer: prefers
+  Microsoft Graph, falls back to SMTP, no-ops when neither is configured:
+  `__setMailTransportForTests`, `__resetGraphTokenCacheForTests`,
+  `graphConfig`, `smtpConfig`, `selectMailer`, `mailerConfigured`,
+  `emailVerificationEnabled`, `senderAddress`, `sendVerificationEmail`,
+  `sendNotificationEmail`, + its types
+- `forgejo.ts` (pure, type-only) — `type ForgejoCommit`,
+  `type ForgejoCommitFiles`, `type ForgejoClient`
+- `context/context-assembler.ts` (pure) — candidate scoring + context
+  assembly: `estimateTokens` (itself a re-export from
+  `@/lib/knowledge/context-pack`), `deterministicScore`, `compactToolResult`,
+  `assembleContext`, `truncateToTokens`, + its types
+- `context/librarian.ts` (pure) — the governed curation layer on top of the
+  assembler: `curateContext`, `curateThenAssemble`, + its types
+- `context/librarian-live.ts` (`server-only`) — the live embedding-backed
+  curator: `liveEmbedder`, `guardedEmbedder`, `type LiveEmbedder`
+
+**Deep-path only (not re-exported at all)**
+- `identity-server.ts` (`server-only`) — `delegatedToken`. Its only value
+  export imports `requireUser` from `@/lib/core/auth`, which imports
+  `next/headers` (a live Next.js request API). Re-exporting it here would make
+  importing ANY other barrel surface transitively load `next/headers`,
+  breaking every plain-Node test that doesn't already mock `@/lib/core/auth`.
+  Its 6 consumers stay on `@/lib/infra/identity-server`.
+
+### Documented exceptions (deep-path, intentional)
+
+- `lib/infra/governed.ts:6` and `lib/infra/agent-governed.ts:6-13`
+  self-import `./service-bearer.ts` / `./app-registry.ts` +
+  `./capability-compiler.ts` by relative path, not the barrel, to avoid a
+  circular import.
+- `lib/assistant/agentic.ts` and `lib/assistant/budget-messages.test.ts` —
+  `agentic.ts`'s own README states "no imports from `lib/infra`" as an
+  explicit purity contract (it is unit-tested standalone, IO-injected, no
+  `server-only`); its test keeps the same deep path to `context-assembler.ts`
+  to avoid pulling `governed.ts`/`secrets.ts`/`mailer.ts` into what should be
+  a fast, isolated unit test.
+- `lib/agents/build/live-clients.ts` — deep path to `agent-governed.ts` for
+  `recentTraces`. It is statically imported (via `instrumentation.ts`, a
+  Next.js file bundled for BOTH the Node and Edge runtimes) into a build
+  target that cannot resolve `node:crypto` / `node:fs` / `node:https` /
+  `node:net` — the barrel's `secrets.ts`/`k8s.ts`/`mailer.ts` pull those in.
+  `next build` is the gate that catches this; `tsc` does not.
+- Lazy `await import()` calls stay on their deep path — the barrel would
+  eagerly load the whole module tree, defeating the lazy load:
+  `lib/science/deploy.ts:113`, `lib/science/training.ts:232`,
+  `lib/software/build-service.ts:281` (`@/lib/infra/k8s`),
+  `lib/science/model-service.ts:730` (`@/lib/infra/agent-governed`), and three
+  test-isolation dynamic imports of `@/lib/infra/secrets`
+  (`lib/connections/cloud-keyservices-store.test.ts`,
+  `lib/connections/connector-wave-store.test.ts`,
+  `lib/connections/rotate-credential.test.ts`).
+- Seven `mock.module()` test interceptors target internal files directly, not
+  the barrel, and must supply EVERY named export of the file they target
+  (`governed.ts` has 10, `agent-governed.ts` has 13, `k8s.ts` has 2), because
+  the barrel re-exports the full surface:
+  - `lib/data/build/live-clients.test.ts` → `@/lib/infra/governed`
+  - `lib/science/launch-grounding.test.ts` → `@/lib/infra/k8s`
+  - `lib/science/assistant-grounding.test.ts` → `@/lib/infra/governed`
+  - `lib/metrics/build/explore-presave.test.ts` → `@/lib/infra/governed`
+  - `lib/metrics/build/live-clients.test.ts` → `@/lib/infra/governed`
+  - `lib/software/ask-app-origin-route.test.ts` → `@/lib/infra/governed`
+  - `lib/software/app-tool-call.test.ts` → `@/lib/infra/agent-governed`
 
 Test coverage: `governed-failclosed.test.ts`, `governed-execute.test.ts`, and
 `governed-rls-scrub.test.ts` are the policy-correctness regression suite; they

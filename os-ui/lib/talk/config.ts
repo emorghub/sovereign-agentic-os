@@ -22,13 +22,13 @@
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import { config } from '@/lib/core/config';
-import { roleModel } from '@/lib/models/roles';
+import { roleModel } from '@/lib/models';
 import { runAsk, type AskMessage, type AskOutcome } from '@/lib/data/ask';
 import { deriveChart } from '@/lib/data/ask-chart';
 import { listAskable, type AskableDataset } from '@/lib/data';
 import { readPrincipalFor } from '@/lib/data/store-fqn';
-import { queryRun } from '@/lib/infra/governed';
-import { liteLlmCaller } from '@/lib/assistant/runtime';
+import { queryRun } from '@/lib/infra';
+import { liteLlmCaller } from '@/lib/assistant';
 import { retrieveKnowledge } from '@/lib/knowledge/retrieve';
 import { searchFiles } from '@/lib/files';
 import { getTabMetadata } from './metadata.ts';

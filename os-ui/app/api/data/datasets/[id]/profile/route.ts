@@ -7,7 +7,7 @@ import type { CurrentUser } from '@/lib/core/auth';
 import { requirePrincipal } from '@/lib/data/server';
 import { getDataset } from '@/lib/data/store';
 import { builtLayerFqn } from '@/lib/data/store';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import type { Layer } from '@/lib/data';
 import {
   assembleProfile,

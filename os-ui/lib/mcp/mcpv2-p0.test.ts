@@ -14,7 +14,7 @@ import { __resetDashboards } from '@/lib/dashboards/store';
 import { __resetBets } from '@/lib/bigbets/store';
 import { __resetForTests as resetPillars, createPillar } from '@/lib/strategy/pillars';
 import { __resetStore as resetAgents } from '@/lib/agents/store';
-import { __resetApprovals } from '@/lib/governance/approvals';
+import { __resetApprovals } from '@/lib/governance';
 
 /**
  * MCP v2 — P0 (the cross-cutting primitives). The SECURITY-CRITICAL foundation:

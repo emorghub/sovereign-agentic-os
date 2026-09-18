@@ -3,9 +3,9 @@
  */
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
-import { serviceBearerHeader } from '@/lib/infra/service-bearer';
+import { serviceBearerHeader } from '@/lib/infra';
 import { deleteBatchSql, type SyncTarget } from '@/lib/data/sync-sql';
-import type { ExecuteIdentity } from '@/lib/infra/governed';
+import type { ExecuteIdentity } from '@/lib/infra';
 import { config } from '@/lib/core/config';
 import { dialectFor } from './dialect.ts';
 import { detectCursorProperty } from './metadata.ts';

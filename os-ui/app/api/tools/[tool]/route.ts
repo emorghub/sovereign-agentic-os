@@ -3,7 +3,7 @@
  */
 import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
-import { resolveTool, roleAllowed } from '@/lib/infra/tool-proxy';
+import { resolveTool, roleAllowed } from '@/lib/infra';
 
 /**
  * Embed metadata for one registry tool — how the ToolWindow should present it:

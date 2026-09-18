@@ -8,7 +8,7 @@ import { getPersonalKnowledge, ensureHydrated as ensurePersonalHydrated } from '
 import { getMetric } from '@/lib/metrics/store';
 import { getFile, ensureHydrated as ensureFilesHydrated } from '@/lib/files/store';
 import { getConnectionForUser } from '@/lib/connections/store';
-import { estimateTokens, truncateToTokens } from '@/lib/infra/context/context-assembler';
+import { estimateTokens, truncateToTokens } from '@/lib/infra';
 import { CONTEXT_KINDS, type ContextGrants, type ContextKind } from '@/lib/core/context-grants';
 import type { CurrentUser } from '@/lib/core/auth';
 

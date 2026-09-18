@@ -37,6 +37,45 @@ mock.module('@/lib/core/auth', {
 mock.module('@/lib/connections/store', {
   namedExports: {
     getConnectionForUser: async () => ({ id: 'conn_1', template: 'warehouse', warehouse: { catalog: 'glue' }, endpoint: 'glue' }),
+    // Unused by this test, but importing `@/lib/assistant` now transitively
+    // reaches this module's full real surface — this mock must provide every
+    // named binding it does.
+    moveConnectionsDomain: () => [],
+    listConnectionsForUser: () => [],
+    listConnectionsSync: () => [],
+    getConnectionById: () => null,
+    listWarehouseConnections: () => [],
+    listSnapshotableConnections: () => [],
+    sanitizeWorkdayReports: () => {},
+    createConnection: async () => ({}),
+    updateCapabilities: async () => ({}),
+    testConnection: async () => ({}),
+    warehouseRegistration: () => ({}),
+    discoverWarehouse: async () => ({}),
+    registerWarehouseCatalog: async () => ({}),
+    importWarehouseTable: async () => ({}),
+    promoteConnection: async () => ({}),
+    demoteConnection: async () => ({}),
+    grantToAgent: async () => ({}),
+    callConnectionTool: async () => ({}),
+    enableDataUsage: async () => ({}),
+    approveOnce: async () => ({}),
+    approveAndRemember: async () => ({}),
+    storeConnectionTokens: async () => {},
+    resolveConnectionAccessToken: async () => null,
+    storeNotionConnection: async () => ({}),
+    getNotionClientReg: () => null,
+    verifyNotionConnection: async () => ({}),
+    renameConnection: async () => ({}),
+    rotateConnectionCredential: async () => ({}),
+    moveConnection: async () => ({}),
+    setConnectionArchivedSync: () => ({}),
+    deleteConnectionSync: () => {},
+    setConnectionArchived: async () => ({}),
+    listConnectionVersions: () => [],
+    restoreConnectionVersion: async () => ({}),
+    deleteConnection: async () => ({}),
+    __resetConnections: () => {},
   },
 });
 
@@ -48,6 +87,15 @@ mock.module('@/lib/connections/warehouse/catalog-snapshot', {
       tables: [{ schema: 'sales', table: 'orders' }, { schema: 'sales', table: 'customers' }],
       prevDiff: { added: [], removed: [] }, detail: '',
     }),
+    // Unused by this test, but importing `@/lib/assistant` now transitively
+    // reaches this module's full real surface — this mock must provide every
+    // named binding it does.
+    refreshCatalogSnapshot: async () => ({}),
+    refreshCatalogSnapshotService: async () => ({}),
+    describeTable: async () => ({}),
+    describeEntity: async () => ({}),
+    countEntity: async () => 0,
+    __resetCatalogSnapshots: () => {},
   },
 });
 mock.module('@/lib/connections/warehouse/catalog-classification', {
@@ -58,12 +106,44 @@ mock.module('@/lib/connections/warehouse/catalog-classification', {
       placements: { 'sales.orders': { category: 'orders', source: 'ai' }, 'sales.customers': { category: 'unsorted', source: 'unsorted' } },
       lastRunDetail: '1 classified, 1 unsorted.',
     }),
+    // Unused by this test, but importing `@/lib/assistant` now transitively
+    // reaches this module's full real surface — this mock must provide every
+    // named binding it does.
+    CONFIDENCE_THRESHOLD: 0.7,
+    BATCH_SIZE: 100,
+    CONCURRENCY: 2,
+    PASS2_DESCRIBE_CAP: 50,
+    UNSORTED: 'unsorted',
+    STARTER_TAXONOMY: [],
+    hasMeaningfulSchemas: () => false,
+    taxonomyForSeed: () => [],
+    smartDefaultSeed: () => 'starter',
+    mergedPlacement: () => ({}),
+    setSeed: async () => ({}),
+    patchTaxonomy: async () => ({}),
+    overridePlacement: async () => ({}),
+    chunk: <T,>(arr: T[]) => [arr],
+    validateBatch: () => ({}),
+    runClassification: async () => ({}),
+    describeRun: () => '',
+    __resetCatalogClassifications: () => {},
   },
 });
 mock.module('@/lib/connections/exposures', {
   namedExports: {
     listExposureSets: async () => [],
     entityActionKey: (e: string) => String(e ?? '').trim().toLowerCase(),
+    // Unused by this test, but importing `@/lib/assistant` now transitively
+    // reaches this module's full real surface — this mock must provide every
+    // named binding it does.
+    actionsBroadenWrites: () => false,
+    actionsRequestWrites: () => false,
+    allActiveExposures: () => [],
+    createExposureSet: async () => ({}),
+    updateExposureSet: async () => ({}),
+    approveExposureActions: async () => ({}),
+    revokeExposureSet: async () => ({}),
+    __resetExposures: () => {},
   },
 });
 mock.module('@/lib/platform-admin/domains', {
@@ -82,6 +162,12 @@ mock.module('@/lib/assistant/complete', {
       if (MODEL_THROW) throw MODEL_THROW;
       return { content: MODEL_REPLY, model: 'test-model' };
     },
+    // Unused by this test, but the `@/lib/assistant` barrel re-exports the
+    // full complete.ts surface, so this mock must provide every named binding it does.
+    AssistantNotConfiguredError: class AssistantNotConfiguredError extends Error {},
+    CostCapExceededError: class CostCapExceededError extends Error {},
+    resolveAssistantModelId: () => 'test-model',
+    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
   },
 });
 

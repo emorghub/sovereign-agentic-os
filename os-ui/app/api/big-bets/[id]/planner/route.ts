@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
 import { proposePlan, approvePlan, type Mode, type PlanCompleter } from '@/lib/bigbets/planner';
 import { principal, plannerHooks } from '@/lib/bigbets/server';
-import { assistantComplete } from '@/lib/assistant/complete';
+import { assistantComplete } from '@/lib/assistant';
 
 export const dynamic = 'force-dynamic';
 

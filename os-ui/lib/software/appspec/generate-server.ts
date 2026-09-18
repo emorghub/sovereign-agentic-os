@@ -5,8 +5,8 @@ import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import { roleAtLeast } from '@/lib/core/session';
 import { getAppByIdInternal, getAppForUser, withStatus, type App } from '@/lib/software/apps';
-import { assistantComplete } from '@/lib/assistant/complete';
-import { roleModel } from '@/lib/models/roles';
+import { assistantComplete } from '@/lib/assistant/complete.ts';
+import { roleModel } from '@/lib/models';
 import { peekDatasetColumns, peekDatasetMeta } from '@/lib/data/store';
 import {
   buildGeneratePrompt,

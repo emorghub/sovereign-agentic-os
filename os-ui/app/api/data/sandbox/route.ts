@@ -3,7 +3,8 @@
  */
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
-import { authorize, queryRun, trace } from '@/lib/infra/governed';
+import { authorize, trace } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import {
   privatePrefix,
   pullExtract,

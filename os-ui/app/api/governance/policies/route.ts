@@ -5,9 +5,12 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { errorResponse } from '@/lib/core/route-server';
 import { listUsers } from '@/lib/platform-admin/users';
-import { canViewPolicyPlane, consolidatedPlane, listEgress, overrideRevoke, policySources, readOpaGrants } from '@/lib/governance/policy-view';
-import { listStanding, ensureHydrated } from '@/lib/governance/standing';
-import { record as audit } from '@/lib/governance/audit';
+import {
+  canViewPolicyPlane, consolidatedPlane, listEgress, overrideRevoke, policySources, readOpaGrants,
+  listStanding,
+  record as audit,
+} from '@/lib/governance';
+import { ensureHydrated } from '@/lib/governance/standing';
 
 export const dynamic = 'force-dynamic';
 

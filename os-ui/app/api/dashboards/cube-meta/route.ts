@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
 import { requirePrincipal } from '@/lib/data/server';
 import { withRoute } from '@/lib/core/route-server';
 import type { CurrentUser } from '@/lib/core/auth';
-import { cubeMeta } from '@/lib/infra/governed';
+import { cubeMeta } from '@/lib/infra';
 import { listMetrics } from '@/lib/metrics/store';
 import { narrowCubeMeta, type RegistryViewDims } from '@/lib/dashboards/cube-meta';
 import { listDatasets, getDataset } from '@/lib/data/store';

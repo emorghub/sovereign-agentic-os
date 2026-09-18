@@ -24,6 +24,27 @@ Two things sit on the page:
 Everything is **OPA/RLS-scoped**: Home never shows what the viewer isn't entitled
 to.
 
+## Public API
+
+Import via `@/lib/home` (the barrel):
+
+- `homeFeed(user)`, `cockpitFeed(user)`, `type HomeFeed` — `feed.ts` (`server-only`)
+- `ask(...)` — `assistant.ts` (`server-only`)
+- `type ModuleKey`, `type TopGroup` — `scope.ts` (types only)
+- `type PathId`, `type LauncherCard` — `launcher.ts` (types only)
+
+Deep-path only (pure modules; the barrel's runtime surface is `server-only`):
+
+- `launcher.ts` — `PATHS`, `personaFor`, `personaLabel`, `personaStance`,
+  `launcherFor`, `PERSONA_RANK`
+- `scope.ts` — `whatNeedsMe`, `myWip`, `recentActivity`, `cockpitOrder`
+- `intents.ts` — `classifyAsk`, `deriveName`, `TAB_FOR_TYPE`
+
+Internal (not public):
+
+- `stubs.ts` — consolidation seam; to be replaced by `@/lib/strategy`
+  and `@/lib/monitoring`
+
 ## The two adapters
 
 ### 1. Launcher adapter — `launcher.ts` (pure)

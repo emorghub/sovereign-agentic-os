@@ -18,7 +18,7 @@ import {
   type ToolSpec,
 } from './agentic.ts';
 import { resolveAssistantModelId } from './complete.ts';
-import { inputBudget, modelContext } from '@/lib/models/context-windows';
+import { inputBudget, modelContext } from '@/lib/models';
 
 /**
  * Server wiring for the agentic assistant harness. Binds the pure PLAN→ACT loop

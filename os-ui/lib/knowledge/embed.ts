@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { roleModel } from '@/lib/models/roles';
+import { roleModel } from '@/lib/models';
 import { hashEmbed } from './embed-core.ts';
 
 /**

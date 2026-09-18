@@ -2,8 +2,8 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import { queryRun } from '@/lib/infra/governed';
-import { assistantComplete } from '@/lib/assistant/complete';
+import { queryRun } from '@/lib/infra';
+import { assistantComplete } from '@/lib/assistant';
 import type { Role } from '@/lib/core/session';
 import { emptyVersions, type Dataset } from './dataset-schema.ts';
 import { getDataset, buildVersion, setDocs } from './store.ts';

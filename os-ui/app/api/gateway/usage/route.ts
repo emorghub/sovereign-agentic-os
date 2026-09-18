@@ -4,13 +4,13 @@
 import { NextResponse } from 'next/server';
 import { config } from '@/lib/core/config';
 import { withRoute } from '@/lib/core/route-server';
-import { tenantRuns } from '@/lib/monitoring/adapters/agent-telemetry';
 import {
+  tenantRuns,
   shapeActivity,
   weeklyRunSpend,
   type GatewayUsage,
   type RawActivity,
-} from '@/lib/monitoring/gateway-usage';
+} from '@/lib/monitoring';
 
 export const dynamic = 'force-dynamic';
 

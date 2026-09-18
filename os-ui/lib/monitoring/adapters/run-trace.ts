@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { recentTraces } from '@/lib/infra/agent-governed';
+import { recentTraces } from '@/lib/infra';
 import { readFetch } from '../util';
 import { MOCK_RUNS, mockTrace } from '../mock';
 import type { Health, HealthItem, TraceDetail, TraceStep } from '../types';

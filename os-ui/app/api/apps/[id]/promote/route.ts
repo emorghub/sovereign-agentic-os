@@ -4,8 +4,7 @@
 import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
 import { getAppForUser } from '@/lib/software/apps';
-import { promoteOrRequest } from '@/lib/governance/ladder';
-import { listApprovals } from '@/lib/governance/approvals';
+import { promoteOrRequest, listApprovals } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

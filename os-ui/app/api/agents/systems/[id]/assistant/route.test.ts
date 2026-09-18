@@ -70,6 +70,12 @@ mock.module('@/lib/assistant/complete', {
       if (MODEL_THROW) throw MODEL_THROW;
       return { content: MODEL_REPLY, model: 'test-model' };
     },
+    // Unused by this test, but the `@/lib/assistant` barrel re-exports the
+    // full complete.ts surface, so this mock must provide every named binding it does.
+    AssistantNotConfiguredError: class AssistantNotConfiguredError extends Error {},
+    CostCapExceededError: class CostCapExceededError extends Error {},
+    resolveAssistantModelId: () => 'test-model',
+    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
   },
 });
 

@@ -12,7 +12,7 @@ import { classifyStepError, type AgenticGraphResult } from '@/lib/agents/build/a
 import { governYamlForOwner } from '@/lib/agents/build/owner-grants';
 import { deriveContextUsage } from '@/lib/agents/build/context-usage';
 import { parseSystem, serializeSystem } from '@/lib/agents/system-schema';
-import { cleanTurns } from '@/lib/assistant/turns';
+import { cleanTurns } from '@/lib/assistant';
 
 export const dynamic = 'force-dynamic';
 // A multi-node team walk (each node a PLAN→ACT loop on a large model) can run long;

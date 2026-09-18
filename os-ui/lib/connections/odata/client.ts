@@ -4,7 +4,7 @@
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide, isEgressAllowed } from '@/lib/infra/secrets';
+import { getSecretServerSide, isEgressAllowed } from '@/lib/infra';
 import { fetchWithBackoff } from '@/lib/connections/retry';
 import { parseEdmx, type ODataModel } from './metadata.ts';
 import { dialectFor, type ODataDialect } from './dialect.ts';

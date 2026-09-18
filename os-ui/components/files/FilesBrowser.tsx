@@ -21,6 +21,8 @@ import { ensureFolderId, renamedPath } from '@/lib/folders/client';
 import { useFolders } from '@/lib/folders/useFolders';
 import { ConfirmProvider, useConfirm } from '@/components/lifecycle/ConfirmDialog';
 import { archiveFolderCopy, deleteFolderCopy } from '@/lib/core/lifecycle';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
 import { uploadRawFile, createNoteFile } from '@/lib/files/upload-client';
 import FilePreview from './FilePreview';

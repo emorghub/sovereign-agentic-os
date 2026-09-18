@@ -3,14 +3,14 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { grantsForDurable as appGrantsForDurable } from '@/lib/infra/app-registry';
+import { grantsForDurable as appGrantsForDurable } from './app-registry.ts';
 import {
   compileConnectionProfile,
   decide,
   exposedTools,
   type OpaConnectionBundle,
   type CapMode,
-} from '@/lib/infra/capability-compiler';
+} from './capability-compiler.ts';
 import { type Principal as DlsPrincipal, canSee } from '@/lib/knowledge/retrieve-core';
 import { roleAtLeast } from '@/lib/core/session';
 import type { Provenance } from '@/lib/knowledge/chunk';

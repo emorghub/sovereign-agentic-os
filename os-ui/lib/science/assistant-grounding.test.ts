@@ -73,6 +73,17 @@ mock.module('@/lib/infra/governed', {
         rows: [['true', '12', '340.5', '5.5'], ['false', '3', '1290.0', '18.0']], rowCount: 2,
       };
     },
+    // Unused by this test, but the `@/lib/infra` barrel re-exports the full
+    // governed.ts surface, so this mock must provide every named binding.
+    authorize: async () => ({ allowed: true, policy: 'opa-allow' }),
+    trace: async () => true,
+    scrubSecurityContext: (ctx: unknown) => ctx,
+    __setCubeMetaForTest: () => {},
+    cubeMeta: async () => [],
+    cubeLoad: async () => ({ rows: [], annotation: {} }),
+    cubeScalar: async () => 0,
+    executeRun: async () => ({ ok: true, rowsAffected: null }),
+    SALES: {},
   },
 });
 

@@ -11,7 +11,7 @@ import {
   setAgentPreset,
   setAgentToolPreset,
   setDomainDefaultPreset,
-} from '@/lib/governance/governance';
+} from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

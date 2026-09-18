@@ -13,7 +13,7 @@
 import type { CapabilityMode } from '@/lib/connections/schema';
 import type { Role } from '@/lib/core/session';
 import type { Visibility } from '@/lib/core/lifecycle';
-import type { OAuthProvider } from '@/lib/oauth/providers';
+import type { OAuthProvider } from '@/lib/oauth';
 
 // ---- Types (mirror the /api/connections payload) ---------------------------
 

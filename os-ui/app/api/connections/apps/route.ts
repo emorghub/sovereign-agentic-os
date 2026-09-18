@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
 import { listAppsForUser } from '@/lib/software/apps';
-import { getConnectionByApp } from '@/lib/infra/app-registry';
+import { getConnectionByApp } from '@/lib/infra';
 
 export const dynamic = 'force-dynamic';
 

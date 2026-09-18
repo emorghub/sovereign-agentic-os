@@ -3,7 +3,7 @@
  */
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
-import { failResponse, runStageAssistant } from '@/lib/assistant/stage-route';
+import { failResponse, runStageAssistant } from '@/lib/assistant';
 import { runSuggest } from '@/lib/metrics/suggest-server';
 
 export const dynamic = 'force-dynamic';

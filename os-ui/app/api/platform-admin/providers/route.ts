@@ -7,7 +7,7 @@ import { recompile } from '../_compile';
 import { config } from '@/lib/core/config';
 import { registerModel } from '@/lib/platform-admin/models';
 import { classifyProviderType, litellmModelString, PROVIDER_TYPE_LABELS, type ProviderType } from '@/lib/agents/routing';
-import { putSecret, secretFingerprint, getSecretServerSide } from '@/lib/infra/secrets';
+import { putSecret, secretFingerprint, getSecretServerSide } from '@/lib/infra';
 import { audit } from '@/lib/platform-admin/audit';
 
 export const dynamic = 'force-dynamic';

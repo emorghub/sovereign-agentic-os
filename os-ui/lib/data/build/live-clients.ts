@@ -3,8 +3,8 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { cubeLoad, executeRun, queryRun } from '@/lib/infra/governed';
-import { serviceBearerHeader } from '@/lib/infra/service-bearer';
+import { cubeLoad, executeRun, queryRun } from '@/lib/infra';
+import { serviceBearerHeader } from '@/lib/infra';
 import { listUsers as userRoster } from '@/lib/platform-admin/users';
 import { importDashboardBundle } from '@/lib/superset/client';
 import {

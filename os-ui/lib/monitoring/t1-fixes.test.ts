@@ -13,8 +13,8 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { setCap, __resetCost } from '@/lib/governance';
-import { collectCost } from '@/lib/monitoring/adapters/cost.ts';
-import { collectSystem } from '@/lib/monitoring/adapters/system-health.ts';
+import { collectCost } from './adapters/cost.ts';
+import { collectSystem } from './adapters/system-health.ts';
 
 const realFetch = globalThis.fetch;
 

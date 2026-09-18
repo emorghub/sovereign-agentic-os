@@ -27,7 +27,7 @@ import { useConfirm } from './ConfirmDialog';
 import { useToast } from '@/components/core/Toast';
 import { useApprovalNotifier } from './useApprovalNotifier';
 import { promoteVerb } from '@/lib/core/scopes';
-import type { FiledApproval } from '@/lib/governance/approval-notice';
+import type { FiledApproval } from '@/lib/governance';
 
 export type PromoteTier = 'Personal' | 'Shared' | 'Marketplace';
 

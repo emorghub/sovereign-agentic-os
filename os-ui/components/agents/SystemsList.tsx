@@ -6,6 +6,8 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useApi } from '@/lib/useApi';
 import { useUser } from '@/lib/useUser';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { canManageArtifact } from '@/lib/governance/edit-scope';
 import NewSystemPanel from './NewSystemPanel';
 import { roleAtLeast } from '@/lib/core/session';

@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
 import { getDashboard } from '@/lib/dashboards';
-import { demoteThroughSeam } from '@/lib/governance/ladder';
+import { demoteThroughSeam } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

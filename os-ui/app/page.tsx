@@ -3,7 +3,7 @@
  */
 import Link from 'next/link';
 import { currentUser } from '@/lib/core/auth';
-import { homeFeed } from '@/lib/home/feed';
+import { homeFeed } from '@/lib/home';
 import HomeLauncher from '@/components/home/HomeLauncher';
 import HomeTalkToOs from '@/components/home/HomeTalkToOs';
 import McpDrawer from '@/components/McpDrawer';

@@ -8,10 +8,8 @@ import { getSystem, readFile, writeFile } from '@/lib/agents/store';
 import { serializeSystem, SystemError, type System } from '@/lib/agents/system-schema';
 import { applyInstruction, scaffoldSystem, type InstructionResult } from '@/lib/agents/assistant';
 import { buildCatalog } from '@/lib/agents/tool-catalog';
-import { assistantComplete } from '@/lib/assistant/complete';
-import { parseJsonReply } from '@/lib/assistant/json-reply';
-import { roleModel } from '@/lib/models/roles';
-import { failResponse } from '@/lib/assistant/stage-route';
+import { assistantComplete, parseJsonReply, failResponse } from '@/lib/assistant';
+import { roleModel } from '@/lib/models';
 import { proposeTeam } from '@/lib/agents/propose-team';
 import { resolveSystemGrounding } from '@/lib/agents/grounding';
 import {

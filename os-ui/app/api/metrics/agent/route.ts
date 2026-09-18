@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
 import { requirePrincipal, errorResponse } from '@/lib/data/server';
 import { getDataset } from '@/lib/data/store';
 import { metricAgentMessages, parseMetricProposal } from '@/lib/metrics/agent';
-import { assistantComplete, AssistantNotConfiguredError } from '@/lib/assistant/complete';
+import { assistantComplete, AssistantNotConfiguredError } from '@/lib/assistant';
 
 export const dynamic = 'force-dynamic';
 

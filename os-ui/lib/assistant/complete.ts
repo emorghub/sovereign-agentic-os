@@ -4,7 +4,7 @@
 import 'server-only';
 import { config } from '@/lib/core/config';
 import { getAssistantModel } from '@/lib/platform-admin/models';
-import { checkCap } from '@/lib/governance/cost';
+import { checkCap } from '@/lib/governance';
 
 /**
  * THE ONE ASSISTANT LLM.

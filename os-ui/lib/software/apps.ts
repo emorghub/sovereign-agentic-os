@@ -7,7 +7,7 @@ import { emptyContextGrants, normalizeContextGrants, type ContextGrants } from '
 import { emptyAgentGrants, normalizeAgentGrants, type AppAgentGrant } from '@/lib/software/app-agent-grants';
 import type { CurrentUser } from '@/lib/core/auth';
 import { canPromote, roleAtLeast } from '@/lib/core/session';
-import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
+import { canManageArtifact, type ArtifactScope } from '@/lib/governance';
 import type { Visibility } from '@/lib/core/artifact-model';
 import {
   createArtifact,
@@ -21,7 +21,7 @@ import {
   getConnectionByApp,
   type AppConnection,
   type AppTool,
-} from '@/lib/infra/app-registry';
+} from '@/lib/infra';
 import { trace } from '@/lib/infra/agent-governed';
 import type {
   AppStatus,
@@ -49,14 +49,14 @@ import { snapshotFiles, getSnapshot, hydrateSnapshot, deleteSnapshot } from '@/l
 import { generateAndCompile } from '@/lib/software/auto-mcp';
 import { dataPlaneToolsFromGrants, agentToolsFromGrants } from '@/lib/software/grant-tools';
 import { parseAppManifest, renderAppYaml, defaultOpenApi, resolveSurface } from '@/lib/software/metadata';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 import { getPublicUser, type PublicUser } from '@/lib/platform-admin/users';
 import { codedAppsEnabled, ensureHydrated as ensureSettingsHydrated } from '@/lib/platform-admin/settings';
 import { createFolder, type FolderScope, type Principal as FolderPrincipal } from '@/lib/folders';
 import { normaliseFolderPath } from '@/lib/core/folders';
 import { type ArtifactVersion, versionLog } from '@/lib/core/versioning';
 import { listGitVersions, restoreGitVersion, shaForVersion, type GitVersion } from '@/lib/core/git-versioning';
-import type { ForgejoClient, ForgejoCommit, ForgejoCommitFiles } from '@/lib/infra/forgejo';
+import type { ForgejoClient, ForgejoCommit, ForgejoCommitFiles } from '@/lib/infra';
 
 /**
  * App registry — the home of record for every application built in the Software
