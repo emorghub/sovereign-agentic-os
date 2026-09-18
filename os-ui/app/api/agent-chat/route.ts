@@ -2,11 +2,10 @@
  * Copyright 2026 Borek Data Ventures UG
  */
 import { NextResponse } from 'next/server';
-import { roleModel } from '@/lib/models/roles';
+import { roleModel } from '@/lib/models';
 import { contextForAgentKey, tabForAgentKey } from '@/lib/tabs/context';
 import { currentUser } from '@/lib/core/auth';
-import { runTabAgent, renderAssistantText } from '@/lib/assistant/runtime';
-import { assistantComplete, AssistantNotConfiguredError } from '@/lib/assistant/complete';
+import { runTabAgent, renderAssistantText, assistantComplete, AssistantNotConfiguredError } from '@/lib/assistant';
 
 export const dynamic = 'force-dynamic';
 

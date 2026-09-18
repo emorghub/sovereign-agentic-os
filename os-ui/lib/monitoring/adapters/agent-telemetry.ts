@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { recentTraces, type TraceRecord } from '@/lib/infra/agent-governed';
+import { recentTraces, type TraceRecord } from '@/lib/infra';
 import { principalFor } from '@/lib/agents/build/runtime-contract';
 import { readFetch } from '../util';
 import { type RawRun, type RunHealth } from '../telemetry-core';

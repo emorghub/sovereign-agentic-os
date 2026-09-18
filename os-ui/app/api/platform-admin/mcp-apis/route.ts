@@ -6,7 +6,7 @@ import { adminCtx, fail } from '../_ctx';
 import { config } from '@/lib/core/config';
 import { ALL_MCP_TOOLS, MCP_TABS } from '@/lib/mcp/server';
 import { listAppsForUser } from '@/lib/software/apps';
-import { getConnectionByApp } from '@/lib/infra/app-registry';
+import { getConnectionByApp } from '@/lib/infra';
 import { listConnectionsForUser } from '@/lib/connections';
 import { isExposed } from '@/lib/connections';
 import {

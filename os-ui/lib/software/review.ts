@@ -12,7 +12,7 @@ import {
   withStatus,
   type App,
 } from '@/lib/software/apps';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 import { trace } from '@/lib/infra/agent-governed';
 import {
   enqueue,

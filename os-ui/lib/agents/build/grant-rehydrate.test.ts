@@ -25,8 +25,8 @@ import {
   grantsForDurable,
   registerDurableGrantResolver,
   type DurableGrantResolver,
-} from '@/lib/infra/app-registry';
-import { authorizeAppTool } from '@/lib/infra/agent-governed';
+} from '@/lib/infra';
+import { authorizeAppTool } from '@/lib/infra';
 
 /** A persisted agent system: grants span data (query_data) + knowledge. */
 function persistedYaml(): string {

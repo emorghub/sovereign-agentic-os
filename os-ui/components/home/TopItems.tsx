@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import Link from 'next/link';
-import type { TopGroup } from '@/lib/home/scope';
+import type { TopGroup } from '@/lib/home';
 
 /**
  * "Top items per artifact" — a scannable board of the viewer's most-notable

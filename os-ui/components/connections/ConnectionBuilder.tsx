@@ -34,6 +34,8 @@ import { CAPABILITY_MODES, type CapabilityMode, type ConnectionTemplateKey } fro
 import { isOperationalTemplate, operationalPlatformFor, templateHasActionTools } from '@/lib/connections/operational-platform';
 import { type Role, roleAtLeast } from '@/lib/core/session';
 import { canManageArtifact } from '@/lib/governance/edit-scope';
+// Deep-path by design: this is a 'use client' component and must not pull the
+// server-only surfaces the @/lib/oauth barrel re-exports.
 import { providerForTemplate, providerConfig, type OAuthProvider } from '@/lib/oauth/providers';
 import { driveConnectionStatus, driveAuthorizePath } from '@/lib/oauth/drive-status';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';

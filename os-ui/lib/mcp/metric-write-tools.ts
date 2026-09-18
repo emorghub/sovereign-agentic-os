@@ -27,7 +27,7 @@ import {
 } from '@/lib/data/store';
 import { runQualityChecks } from '@/lib/data/dq-run';
 import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import { publishPromotionLive } from '@/lib/data/publish-server';
 import { enqueue, getApproval, decide, listApprovals } from '@/lib/governance/approvals';
 import { canBuildStage, canPassThrough, stageArtifact } from '@/lib/data/panels';
@@ -46,7 +46,7 @@ import {
   type JoinType,
 } from '@/lib/data/transform';
 import { assetTarget } from '@/lib/data/store-fqn';
-import type { ExecuteIdentity } from '@/lib/infra/governed';
+import type { ExecuteIdentity } from '@/lib/infra';
 import type { Layer, Quality, DataVisibility, Grant, ColumnDoc, DatasetUpstream } from '@/lib/data';
 import { measureFromForm, measureMember, sameMeasure, type MetricForm, type GuidedFilter, type GuidedWindow } from '@/lib/metrics/model';
 import type { MeasureType } from '@/lib/data/metrics';

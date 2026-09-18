@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
-import { recentTraces } from '@/lib/infra/agent-governed';
+import { recentTraces } from '@/lib/infra';
 import { listCaps, getSpend, reconcileSpendFromLiteLLM } from '@/lib/governance';
 import { collectRuns } from './adapters/run-trace';
 import { collectPipelines } from './adapters/pipeline-health';

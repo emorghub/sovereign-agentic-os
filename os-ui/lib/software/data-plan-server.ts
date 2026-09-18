@@ -3,9 +3,9 @@
  */
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
-import { assistantComplete } from '@/lib/assistant/complete';
-import { parseJsonReply } from '@/lib/assistant/json-reply';
-import { roleModel } from '@/lib/models/roles';
+import { assistantComplete } from '@/lib/assistant/complete.ts';
+import { parseJsonReply } from '@/lib/assistant/json-reply.ts';
+import { roleModel } from '@/lib/models';
 import { roleAtLeast } from '@/lib/core/session';
 import {
   createDataset,

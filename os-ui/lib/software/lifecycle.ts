@@ -13,8 +13,9 @@ import {
   withStatus,
   type App,
 } from '@/lib/software/apps';
-import { removeConnection, setConnectionVisibility } from '@/lib/infra/app-registry';
-import { unregisterConnectionProfile, trace } from '@/lib/infra/agent-governed';
+import { removeConnection, setConnectionVisibility } from '@/lib/infra';
+import { trace } from '@/lib/infra/agent-governed';
+import { unregisterConnectionProfile } from '@/lib/infra';
 import { stopApp as stopRunner, deleteApp as deleteRunner } from './runner.ts';
 import type { ConsumedResource } from './model.ts';
 import { roleAtLeast } from '@/lib/core/session';

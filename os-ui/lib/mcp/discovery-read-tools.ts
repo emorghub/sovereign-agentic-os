@@ -66,7 +66,7 @@ import { scaffoldCubeYaml, cubeViewName } from '@/lib/data/metrics';
 import { cubeDeliverable } from '@/lib/data/cube-models';
 import { loadGuide, isGuidePath, GUIDE_PATHS, type GuidePath } from '@/lib/tabs/guides';
 import { config } from '@/lib/core/config';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import { versionTarget } from '@/lib/data/store-fqn';
 import { builtLayerFqn } from '@/lib/data/store';
 import type { Layer } from '@/lib/data';

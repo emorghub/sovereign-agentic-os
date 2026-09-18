@@ -4,7 +4,7 @@
 import { parseSystem, type System } from '../system-schema.ts';
 import { resolveGrantedTools } from './os-tools.ts';
 import { principalFor } from './runtime-contract.ts';
-import { registerDurableGrantResolver } from '@/lib/infra/app-registry';
+import { registerDurableGrantResolver } from '@/lib/infra';
 import { systemForScheduler } from '@/lib/agents/store';
 
 /**

@@ -31,7 +31,7 @@
 
 import type { ContextGrants, ContextKind } from '@/lib/core/context-grants';
 import type { AppAgentGrant } from '@/lib/software/app-agent-grants';
-import type { AppTool } from '@/lib/infra/app-registry';
+import type { AppTool } from '@/lib/infra';
 
 /**
  * The governed OS tools a granted KIND enables. An `action` tool is the thing the

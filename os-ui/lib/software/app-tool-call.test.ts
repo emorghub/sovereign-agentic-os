@@ -24,6 +24,18 @@ mock.module('@/lib/infra/agent-governed', {
       traced.push(e);
       return { id: `tr_${traced.length}` };
     },
+    // Unused by this test, but the `@/lib/infra` barrel re-exports the full
+    // agent-governed.ts surface, so this mock must provide every named binding.
+    authorize: async () => ({ effect: 'allow', policy: 'app-grant', reason: 'grant' }),
+    registerConnectionProfile: () => {},
+    unregisterConnectionProfile: () => {},
+    connectionBundle: () => null,
+    exposedConnectionTools: () => [],
+    restrictConnectionForAgent: () => ({}),
+    recentTraces: () => [],
+    metricsTool: async () => ({ value: 0, source: 'seed-offline', measure: '' }),
+    retrieveTool: async () => [],
+    SALES: {},
   },
 });
 mock.module('@/lib/governance/approvals', {

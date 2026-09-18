@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
-import { completeWithEscalation } from '@/lib/assistant/escalate';
+import { completeWithEscalation } from '@/lib/assistant';
 import { listPillars } from '@/lib/strategy/pillars';
 import { resolveManual, type ManualScope } from '@/lib/knowledge/manual';
 import { getDomainKnowledge, listWorkflows, getWorkflow } from '@/lib/knowledge/store';

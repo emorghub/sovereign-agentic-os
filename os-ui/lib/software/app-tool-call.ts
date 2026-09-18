@@ -3,7 +3,8 @@
  */
 import 'server-only';
 import { executeAppTool, type RecordActor } from './app-records.ts';
-import { authorizeAppTool, authorizeConnectionCall, trace } from '@/lib/infra/agent-governed';
+import { trace } from '@/lib/infra/agent-governed';
+import { authorizeAppTool, authorizeConnectionCall } from '@/lib/infra';
 import { enqueue } from '@/lib/governance/approvals';
 import type { App } from './apps.ts';
 

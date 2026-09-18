@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 import type { CurrentUser } from '@/lib/core/auth';
 import { canPromote, roleAtLeast } from '@/lib/core/session';
 import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
@@ -193,27 +193,27 @@ import { providerFor } from '@/lib/connections/warehouse/registry';
 import { buildImportCtas } from '@/lib/connections/warehouse/import';
 import { catalogRegistration, type CatalogRegistration } from '@/lib/connections/warehouse/registration';
 import { applyLiveRegistration, type RegK8s, type RegisterK8sOutcome, type SecretValues } from '@/lib/connections/warehouse/k8s-registration';
-import { executeRun, queryRun, type ExecuteIdentity } from '@/lib/infra/governed';
+import { executeRun, queryRun, type ExecuteIdentity } from '@/lib/infra';
 // Data-tab registry seam for the warehouse IMPORT (P0 A2): an import must create a
 // real governed Dataset row pointing at the materialized table, not just a table.
 import { createDataset, buildVersion, deleteDataset } from '@/lib/data';
 import { personalSchema, slug } from '@/lib/data/store-fqn';
 import { stageArtifact } from '@/lib/data/panels';
-import { putSecret, secretFingerprint, getSecretServerSide, isEgressAllowed, deleteSecret, hasSecret } from '@/lib/infra/secrets';
+import { putSecret, secretFingerprint, getSecretServerSide, isEgressAllowed, deleteSecret, hasSecret } from '@/lib/infra';
 import { type ArtifactVersion, versionLog } from '@/lib/core/versioning';
 import {
   type PhysicalDeleteReport,
   purgeConnectionSecrets,
 } from '@/lib/connections/connections-physical-delete';
+import { trace } from '@/lib/infra/agent-governed';
 import {
   registerConnectionProfile,
   unregisterConnectionProfile,
   restrictConnectionForAgent,
   authorizeConnectionCall,
   exposedConnectionTools,
-  trace,
   type ConnToolPolicy,
-} from '@/lib/infra/agent-governed';
+} from '@/lib/infra';
 import { enqueue } from '@/lib/governance/approvals';
 import {
   isSalesforceActionTool,
@@ -237,11 +237,11 @@ import {
 } from '@/lib/governance/governance';
 import { registerBronzeSource, indexToFiles } from '@/lib/data/data-handoff';
 import { logEgress } from '@/lib/connections/egress-requests';
-import { providerForTemplate, providerConfig, type OAuthProvider } from '@/lib/oauth/providers';
-import { storeTokens, readTokens, resolveAccessToken } from '@/lib/oauth/connection-token';
-import { probeDrive } from '@/lib/oauth/client';
-import { isExpired, type TokenSet } from '@/lib/oauth/token-set';
 import {
+  providerForTemplate, providerConfig, type OAuthProvider,
+  storeTokens, readTokens, resolveAccessToken,
+  probeDrive,
+  isExpired, type TokenSet,
   refreshNotionToken,
   listNotionMcpTools,
   serializeClientReg,
@@ -249,10 +249,10 @@ import {
   type FetchFn,
   type NotionClientReg,
   type McpToolInfo,
-} from '@/lib/oauth/notion-mcp';
+} from '@/lib/oauth';
 // The GOVERNED folder registry (Wave-2 parity) — a moved-into folder is upserted as an
 // explicit row so it persists even when empty. Reused, never forked (mirrors Data/Metrics).
-import { createFolder, type FolderScope, type Principal as FolderPrincipal } from '@/lib/folders/index';
+import { createFolder, type FolderScope, type Principal as FolderPrincipal } from '@/lib/folders';
 import { normaliseFolderPath } from '@/lib/core/folders';
 
 /**

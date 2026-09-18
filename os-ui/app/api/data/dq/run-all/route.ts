@@ -8,7 +8,7 @@ import { requirePrincipal } from '@/lib/data/server';
 import { requireUser } from '@/lib/core/auth';
 import { roleAtLeast } from '@/lib/core/session';
 import { listGovernedDatasets, builtLayerFqn } from '@/lib/data/store';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import { ensureHydrated, latestRun } from '@/lib/data/dq-results';
 import { runAndRecord, isNewFailure } from '@/lib/data/dq-run-server';
 import { omDqAppenderFor } from '@/lib/connections/openmetadata';

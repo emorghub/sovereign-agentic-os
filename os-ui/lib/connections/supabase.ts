@@ -4,7 +4,7 @@
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 import { getConnectionForUser } from '@/lib/connections/store';
 import { fetchWithBackoff } from '@/lib/connections/retry';
 

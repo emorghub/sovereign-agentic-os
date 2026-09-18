@@ -3,11 +3,11 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 import { ROLES, roleAtLeast, type Role } from '@/lib/core/session';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { hashPassword, verifyPassword, isHashed } from '@/lib/core/password';
-import { emailVerificationEnabled, sendVerificationEmail } from '@/lib/infra/mailer';
+import { emailVerificationEnabled, sendVerificationEmail } from '@/lib/infra';
 
 /**
  * User directory — a pragmatic, self-hosted identity store (the seam Ory would

@@ -35,7 +35,7 @@ import { kajabiCursorField } from '@/lib/connections/kajabi-resources';
 import { runQualityChecks } from '@/lib/data/dq-run';
 import { proposeFixes, applyFixes, dqComplete, type FixApplyInput } from '@/lib/data/dq-fix-server';
 import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data';
-import { queryRun, executeRun } from '@/lib/infra/governed';
+import { queryRun, executeRun } from '@/lib/infra';
 import { publishPromotionLive, rematerializeDomainTableLive } from '@/lib/data/publish-server';
 import { reconcileDomainTablesLive } from '@/lib/data/reconcile-server';
 import { enqueue, getApproval, decide, listApprovals } from '@/lib/governance/approvals';
@@ -55,7 +55,7 @@ import {
   type JoinType,
 } from '@/lib/data/transform';
 import { assetTarget } from '@/lib/data/store-fqn';
-import type { ExecuteIdentity } from '@/lib/infra/governed';
+import type { ExecuteIdentity } from '@/lib/infra';
 import type { Layer, Quality, DataVisibility, Grant, ColumnDoc, DatasetUpstream } from '@/lib/data';
 import { measureFromForm, measureMember, type MetricForm, type GuidedFilter, type GuidedWindow } from '@/lib/metrics/model';
 import type { MeasureType } from '@/lib/data/metrics';

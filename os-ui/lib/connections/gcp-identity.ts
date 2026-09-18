@@ -4,7 +4,7 @@
 import 'server-only';
 import { createSign } from 'crypto';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 
 /**
  * Google Cloud identity/resource-governance client — the per-connection bridge to a
