@@ -29,7 +29,10 @@ import { runQualityChecks } from '@/lib/data/dq-run';
 import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data';
 import { queryRun } from '@/lib/infra';
 import { publishPromotionLive } from '@/lib/data/publish-server';
-import { enqueue, getApproval, decide, listApprovals } from '@/lib/governance/approvals';
+import {
+  enqueue, getApproval, decide, listApprovals,
+  fileArtifactPromotion, promoteThroughSeam, isLadderKind, type LadderKind,
+} from '@/lib/governance';
 import { canBuildStage, canPassThrough, stageArtifact } from '@/lib/data/panels';
 import { scaffoldCubeYaml } from '@/lib/data/metrics';
 import { ingestAndRegisterBronze } from '@/lib/data/ingest';
@@ -70,7 +73,6 @@ import { exportWorkflowBundle, exportAndValidate } from '@/lib/knowledge/okf-exp
 import { importOkfZip } from '@/lib/knowledge/okf-import';
 import { zipBundle, OkfZipError, OKF_MAX_UNPACKED_BYTES } from '@/lib/knowledge/okf-zip';
 import { knowledgeConsumers } from '@/lib/knowledge/consumers';
-import { fileArtifactPromotion, promoteThroughSeam, isLadderKind, type LadderKind } from '@/lib/governance/ladder';
 import { pendingHandle } from '@/lib/mcp/pending';
 import {
   serializeWorkflow,

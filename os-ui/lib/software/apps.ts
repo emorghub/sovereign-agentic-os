@@ -7,7 +7,7 @@ import { emptyContextGrants, normalizeContextGrants, type ContextGrants } from '
 import { emptyAgentGrants, normalizeAgentGrants, type AppAgentGrant } from '@/lib/software/app-agent-grants';
 import type { CurrentUser } from '@/lib/core/auth';
 import { canPromote, roleAtLeast } from '@/lib/core/session';
-import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
+import { canManageArtifact, type ArtifactScope } from '@/lib/governance';
 import type { Visibility } from '@/lib/core/artifact-model';
 import {
   createArtifact,

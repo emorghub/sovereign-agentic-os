@@ -17,7 +17,7 @@ import { ensureHydrated as datasetsHydrated } from '@/lib/data/store';
 import { ensureHydrated as filesHydrated } from '@/lib/files/store';
 import { ensureHydrated as knowledgeHydrated } from '@/lib/knowledge/store';
 import { ensureHydrated as betsHydrated } from '@/lib/bigbets/store';
-import { principalFor } from '@/lib/governance/roles';
+import { principalFor } from '@/lib/governance';
 import { readPrincipalFor } from '@/lib/data/store-fqn';
 import { sanitizeSingleStatement } from '@/lib/data/sql-guard';
 import { ALL_WRITE_TOOLS } from '@/lib/mcp/write-tools';

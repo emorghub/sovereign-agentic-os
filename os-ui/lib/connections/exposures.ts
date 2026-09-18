@@ -9,7 +9,7 @@ import { trace } from '@/lib/infra/agent-governed';
 import { getConnectionForUser } from '@/lib/connections/store';
 import { isOperationalTemplate, templateHasActionTools } from '@/lib/connections/operational-platform';
 import { config } from '@/lib/core/config';
-import { enqueue } from '@/lib/governance/approvals';
+import { enqueue } from '@/lib/governance';
 import type { ConnectionTemplateKey } from '@/lib/connections/schema';
 
 /**

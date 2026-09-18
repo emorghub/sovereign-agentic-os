@@ -38,7 +38,10 @@ import { DATA_CHECK_RULES, type DataCheckRule } from '@/lib/data';
 import { queryRun, executeRun } from '@/lib/infra';
 import { publishPromotionLive, rematerializeDomainTableLive } from '@/lib/data/publish-server';
 import { reconcileDomainTablesLive } from '@/lib/data/reconcile-server';
-import { enqueue, getApproval, decide, listApprovals } from '@/lib/governance/approvals';
+import {
+  enqueue, getApproval, decide, listApprovals,
+  fileArtifactPromotion, promoteThroughSeam, isLadderKind, type LadderKind,
+} from '@/lib/governance';
 import { canBuildStage, canPassThrough, stageArtifact } from '@/lib/data/panels';
 import { scaffoldCubeYaml } from '@/lib/data/metrics';
 import { ingestAndRegisterBronze } from '@/lib/data/ingest';
@@ -76,7 +79,6 @@ import {
   deleteWorkflow,
 } from '@/lib/knowledge/store';
 import { knowledgeConsumers } from '@/lib/knowledge/consumers';
-import { fileArtifactPromotion, promoteThroughSeam, isLadderKind, type LadderKind } from '@/lib/governance/ladder';
 import { pendingHandle } from '@/lib/mcp/pending';
 import {
   serializeWorkflow,

@@ -10,8 +10,8 @@ import {
   type ArtifactOrigin,
 } from '@/lib/core/artifact-model';
 import { canPromote } from '@/lib/core/session';
-import { roleRank } from '@/lib/governance/roles';
-import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
+import { roleRank } from '@/lib/governance';
+import { canManageArtifact, type ArtifactScope } from '@/lib/governance';
 import type { CurrentUser } from '@/lib/core/auth';
 import { osMirror } from '@/lib/infra';
 import { type ArtifactVersion, versionLog } from '@/lib/core/versioning';

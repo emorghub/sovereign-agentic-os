@@ -43,6 +43,15 @@ mock.module('@/lib/governance/approvals', {
     enqueue: (x: unknown) => {
       enqueued.push(x);
     },
+    // Unused by this test, but the `@/lib/governance` barrel re-exports the
+    // full approvals.ts surface, so this mock must provide every named
+    // binding it does.
+    listApprovals: () => [],
+    getApproval: () => null,
+    decide: () => null,
+    recordEffect: () => {},
+    __resetApprovals: () => {},
+    ensureHydrated: async () => {},
   },
 });
 mock.module('./app-records.ts', {

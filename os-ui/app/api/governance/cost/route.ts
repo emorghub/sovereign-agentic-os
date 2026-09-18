@@ -4,8 +4,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { errorResponse } from '@/lib/core/route-server';
-import { listCaps, setCap, type CapScope } from '@/lib/governance/cost';
-import { record as audit } from '@/lib/governance/audit';
+import { listCaps, setCap, type CapScope, record as audit } from '@/lib/governance';
 import { roleAtLeast } from '@/lib/core/session';
 
 export const dynamic = 'force-dynamic';

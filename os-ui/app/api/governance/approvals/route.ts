@@ -4,12 +4,15 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { errorResponse } from '@/lib/core/route-server';
-import { decide, ensureHydrated, getApproval, listApprovals, recordEffect } from '@/lib/governance/approvals';
-import { canApprove, canSee, roleLabel } from '@/lib/governance/roles';
-import { applyEffect } from '@/lib/governance/effects';
-import { buildEffectDeps } from '@/lib/governance/ladder';
-import { record as audit } from '@/lib/governance/audit';
-import { remember } from '@/lib/governance/standing';
+import {
+  decide, getApproval, listApprovals, recordEffect,
+  canApprove, canSee, roleLabel,
+  applyEffect,
+  buildEffectDeps,
+  record as audit,
+  remember,
+} from '@/lib/governance';
+import { ensureHydrated } from '@/lib/governance/approvals';
 
 export const dynamic = 'force-dynamic';
 

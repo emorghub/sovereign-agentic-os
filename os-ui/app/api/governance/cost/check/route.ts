@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { errorResponse } from '@/lib/core/route-server';
-import { addSpend, checkCap, type CapScope } from '@/lib/governance/cost';
+import { addSpend, checkCap, type CapScope } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

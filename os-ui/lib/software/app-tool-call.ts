@@ -5,7 +5,7 @@ import 'server-only';
 import { executeAppTool, type RecordActor } from './app-records.ts';
 import { trace } from '@/lib/infra/agent-governed';
 import { authorizeAppTool, authorizeConnectionCall } from '@/lib/infra';
-import { enqueue } from '@/lib/governance/approvals';
+import { enqueue } from '@/lib/governance';
 import type { App } from './apps.ts';
 
 /**

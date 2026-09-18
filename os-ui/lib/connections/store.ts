@@ -6,7 +6,7 @@ import { config } from '@/lib/core/config';
 import { osMirror } from '@/lib/infra';
 import type { CurrentUser } from '@/lib/core/auth';
 import { canPromote, roleAtLeast } from '@/lib/core/session';
-import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
+import { canManageArtifact, type ArtifactScope } from '@/lib/governance';
 import type { Visibility } from '@/lib/core/artifact-model';
 import {
   type Connection,
@@ -214,7 +214,7 @@ import {
   exposedConnectionTools,
   type ConnToolPolicy,
 } from '@/lib/infra';
-import { enqueue } from '@/lib/governance/approvals';
+import { enqueue } from '@/lib/governance';
 import {
   isSalesforceActionTool,
   decideActionTool,
@@ -234,7 +234,7 @@ import {
   rememberPolicy,
   resolveAutonomous,
   effectivePreset,
-} from '@/lib/governance/governance';
+} from '@/lib/governance';
 import { registerBronzeSource, indexToFiles } from '@/lib/data/data-handoff';
 import { logEgress } from '@/lib/connections/egress-requests';
 import {

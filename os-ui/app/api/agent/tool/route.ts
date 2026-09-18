@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { authorize, trace, SALES, type ToolName } from '@/lib/infra/agent-governed';
 import { metricsTool, retrieveTool } from '@/lib/infra';
-import { enqueue } from '@/lib/governance/approvals';
+import { enqueue } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

@@ -17,7 +17,7 @@ import { commitWorkflow } from './commitWorkflow';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
-import type { FiledApproval } from '@/lib/governance/approval-notice';
+import type { FiledApproval } from '@/lib/governance';
 import DomainTag from '@/components/DomainTag';
 import { FolderPickerModal } from '@/components/core/FolderTree';
 import { useFolders } from '@/lib/folders/useFolders';
