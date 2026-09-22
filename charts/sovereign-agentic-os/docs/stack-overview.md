@@ -1,4 +1,4 @@
-# Stack Overview (Phase 2.2, trimmed in Phase 3.5)
+# Stack Overview 
 
 ## Overview
 

@@ -1,4 +1,4 @@
-# Quickstart: Base Golden Path on Kind
+# Quickstart: Local Deployment on Kind
 
 Bring up the Phase 2.2 base golden-path slice (LiteLLM, Langfuse, Postgres,
 ClickHouse, Valkey, MinIO, OpenSearch-free agent-core stack, OS UI, Forgejo)
