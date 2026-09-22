@@ -99,7 +99,7 @@ c "Bootstrapping cluster-scoped operators (CloudNativePG)…"
 
 if [ "$TARGET" = "kind" ]; then
   c "Building + loading the bespoke images into kind…"
-  ./scripts/build-images.sh "$CLUSTER"
+  ./scripts/build-images.sh "$CLUSTER" --with-extensions
 fi
 
 # --- 5. install ------------------------------------------------------------
