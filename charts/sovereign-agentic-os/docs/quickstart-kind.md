@@ -155,6 +155,16 @@ to iterate on one without re-running the full installer), the same command
 ./scripts/build-images.sh agentic-os --with-extensions
 ```
 
+### Watch the pods
+
+After starting the full stack, watch the workloads come up with:
+
+```bash
+kubectl get pods -n agentic-os -w
+```
+
+Press Ctrl+C to stop watching.
+
 ## 9. Updating an existing base cluster
 
 After changing Helm values for a running base release, re-apply them with:
@@ -163,10 +173,6 @@ After changing Helm values for a running base release, re-apply them with:
 helm upgrade --install agentic-os charts/sovereign-agentic-os \
   -f charts/sovereign-agentic-os/values.base.yaml \
   --namespace agentic-os
-```
-
-```bash
-kubectl get pods -n agentic-os
 ```
 
 ### Example: updating an API key
