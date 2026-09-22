@@ -25,9 +25,6 @@ cd "$ROOT"
 BASE_IMAGES="
 mock-model:0.1.1
 agent-runtime:0.1.2
-egress-proxy:0.1.0
-web-fetch:0.1.0
-mcp-test-agent:0.1.0
 "
 
 EXT_IMAGES="
@@ -44,6 +41,9 @@ terminal-broker:0.1.0
 sandbox-shell:0.1.0
 workbench-broker:0.1.0
 code-server-workbench:0.1.0
+egress-proxy:0.1.0
+web-fetch:0.1.0
+mcp-test-agent:0.1.0
 "
 
 build_one() {
