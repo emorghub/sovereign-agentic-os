@@ -4,7 +4,6 @@ Bring up the Phase 2.2 base golden-path slice (LiteLLM, Langfuse, Postgres,
 ClickHouse, Valkey, MinIO, OpenSearch-free agent-core stack, OS UI, Forgejo)
 on a local Kind cluster.
 
-Assumes the repo is already cloned and checked out.
 
 ## 1. Prerequisites
 
@@ -45,8 +44,18 @@ docker build -t sovereign-os/os-ui:0.1.0 -f images/base/os-ui/Dockerfile .
 kind load docker-image sovereign-os/os-ui:0.1.0 --name agentic-os
 ```
 
-> `scripts/build-images.sh` automates this (and the other, non-base-slice
-> bespoke images) if you'd rather run one script.
+`scripts/build-images.sh` automates this if you'd rather run one script. Its
+default (no flags) build is **base-only** — it builds exactly the three
+images above (mock-model, agent-runtime, and os-ui, the latter unconditional)
+and nothing else:
+
+```bash
+./scripts/build-images.sh agentic-os
+```
+
+Extension images (used by the full self-contained stack, not the base
+profile) are only built when `--with-extensions` is passed — see
+[Full stack](#full-stack) below.
 
 ## 4. Helm dependencies
 
@@ -108,7 +117,92 @@ kubectl -n agentic-os port-forward svc/agentic-os-litellm 4000:4000
 ```
 → http://localhost:4000
 
-## 8. Teardown
+## 8. Full stack
+
+The steps above bring up the **base profile** only. To run the full
+self-contained stack (all extensions — OpenSearch, Dagster, OpenMetadata,
+Superset, Argo CD, Layer-4 Science, and the rest of `templates/extensions/*`)
+instead, use the supported full-stack entry point. It starts after creating
+the Kind cluster:
+
+```bash
+kind create cluster --name agentic-os
+```
+
+On a first-time/fresh checkout, where the chart's subchart dependencies
+(`charts/sovereign-agentic-os/charts/*.tgz`) aren't already present, fetch
+them first:
+
+```bash
+helm dependency build charts/sovereign-agentic-os
+```
+
+Then run the supported full-stack entry point:
+
+```bash
+./install.sh --defaults
+```
+
+This installs with `values.selfcontained.yaml` and automatically invokes the
+extension image build path (`scripts/build-images.sh --with-extensions`) for
+you — you don't need to build extension images yourself first.
+
+If you need to build or reload the extension images separately (for example,
+to iterate on one without re-running the full installer), the same command
+`install.sh` uses is also available directly:
+
+```bash
+./scripts/build-images.sh agentic-os --with-extensions
+```
+
+## 9. Updating an existing base cluster
+
+After changing Helm values for a running base release, re-apply them with:
+
+```bash
+helm upgrade --install agentic-os charts/sovereign-agentic-os \
+  -f charts/sovereign-agentic-os/values.base.yaml \
+  --namespace agentic-os
+```
+
+```bash
+kubectl get pods -n agentic-os
+```
+
+### Example: updating an API key
+
+If you change an API key or other Helm-configured runtime value in
+`values.base.yaml`, you do not need to rebuild the Docker images — this is a
+runtime configuration change, so `build-images.sh` is not required.
+
+For example, after updating the configured API key, re-apply the Helm
+values:
+
+```bash
+helm upgrade --install agentic-os charts/sovereign-agentic-os \
+  -f charts/sovereign-agentic-os/values.base.yaml \
+  --namespace agentic-os
+```
+
+Then verify the workloads:
+
+```bash
+kubectl get pods -n agentic-os
+```
+
+If the affected application does not automatically restart and pick up the
+updated configuration, restart the affected deployment:
+
+```bash
+kubectl rollout restart deployment/<deployment-name> -n agentic-os
+```
+
+> **Security note:** do not commit real API keys or other credentials to
+> `values.yaml` or `values.base.yaml`. For production/STACKIT deployments,
+> use the repository's supported secret-management / External Secrets
+> mechanism.
+
+## 10. Teardown
 
 ```bash
 kind delete cluster --name agentic-os
