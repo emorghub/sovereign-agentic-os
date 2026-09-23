@@ -1,6 +1,6 @@
 # Quickstart: Local Deployment on Kind
 
-Bring up the Phase 2.2 base golden-path slice (LiteLLM, Langfuse, Postgres,
+Bring up the  base golden-path slice (LiteLLM, Langfuse, Postgres,
 ClickHouse, Valkey, MinIO, OpenSearch-free agent-core stack, OS UI, Forgejo)
 on a local Kind cluster.
 
@@ -165,36 +165,25 @@ kubectl get pods -n agentic-os -w
 
 Press Ctrl+C to stop watching.
 
-## 9. Updating an existing base cluster
+## 9. Updating an existing cluster
 
-After changing Helm values for a running base release, re-apply them with:
+After changing a values file for a running release, re-apply the configuration
+using the same deployment method and values files used by that release.
+
+### Base stack
+
+For a base-stack deployment, re-apply the updated values with:
 
 ```bash
 helm upgrade --install agentic-os charts/sovereign-agentic-os \
   -f charts/sovereign-agentic-os/values.base.yaml \
   --namespace agentic-os
 ```
-
 ### Example: updating an API key
 
-If you change an API key or other Helm-configured runtime value in
-`values.base.yaml`, you do not need to rebuild the Docker images — this is a
-runtime configuration change, so `build-images.sh` is not required.
-
-For example, after updating the configured API key, re-apply the Helm
-values:
-
-```bash
-helm upgrade --install agentic-os charts/sovereign-agentic-os \
-  -f charts/sovereign-agentic-os/values.base.yaml \
-  --namespace agentic-os
-```
-
-Then verify the workloads:
-
-```bash
-kubectl get pods -n agentic-os
-```
+For example, if you change an API key or another Helm-configured runtime
+value, you do not need to rebuild the Docker images. This is a runtime
+configuration change, `build-images.sh` is not required.
 
 If the affected application does not automatically restart and pick up the
 updated configuration, restart the affected deployment:
@@ -202,6 +191,18 @@ updated configuration, restart the affected deployment:
 ```bash
 kubectl rollout restart deployment/<deployment-name> -n agentic-os
 ```
+
+### Full stack
+
+For a full self-contained deployment, re-apply the configuration through the
+supported entry point:
+
+```bash
+./install.sh --defaults`
+```
+
+`install.sh --defaults` uses `helm upgrade --install`, so it can update an
+existing full-stack release as well as install a new one.
 
 > **Security note:** do not commit real API keys or other credentials to
 > `values.yaml` or `values.base.yaml`. For production/STACKIT deployments,

@@ -107,26 +107,6 @@ configuration changes through the supported entry point:
 ./install.sh --defaults
 ```
 
-## Updating Runtime Configuration
-
-If you change an API key or other Helm-configured runtime value, re-apply
-the Helm configuration rather than rebuilding images:
-
-```bash
-helm upgrade --install agentic-os charts/sovereign-agentic-os \
-  -f charts/sovereign-agentic-os/values.base.yaml \
-  --namespace agentic-os
-```
-
-Then verify the workloads:
-
-```bash
-kubectl get pods -n agentic-os
-```
-
-If the affected workload doesn't automatically restart and pick up the
-updated configuration, restart it (`kubectl rollout restart deployment/...`).
-
 ## Step-by-Step Guides
 
 For the actual commands to run either stack locally on Kind, see the
