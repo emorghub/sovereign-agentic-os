@@ -1,8 +1,8 @@
 # Quickstart: Local Deployment on Kind
 
-Bring up the  base golden-path slice (LiteLLM, Langfuse, Postgres,
-ClickHouse, Valkey, MinIO, OpenSearch-free agent-core stack, OS UI, Forgejo)
-on a local Kind cluster.
+Bring up the base golden-path slice (LiteLLM, Langfuse, Postgres,
+ClickHouse, Valkey, MinIO, the agent-core stack without OpenSearch, OS UI,
+and Forgejo) on a local Kind cluster.
 
 
 ## 1. Prerequisites
@@ -13,7 +13,8 @@ on a local Kind cluster.
 - `kubectl`
 - Helm v3.22+
 
-## 2. Create a Kind cluster
+## 1. Base Stack
+### Create a Kind cluster
 
 The repo ships a Kind cluster config (`kind-config.yaml`) that enables
 containerd's `certs.d` registry config (needed later if you pull images from
@@ -23,7 +24,7 @@ Forgejo's in-cluster registry). The project's cluster name is `agentic-os`.
 kind create cluster --name agentic-os --config kind-config.yaml
 ```
 
-## 3. Build and load local images
+## 3. Build and load base images
 
 Three images are **repo-owned** and must be built locally and loaded into the
 Kind cluster. All other components in the base slice (Postgres, ClickHouse,
@@ -46,8 +47,7 @@ kind load docker-image sovereign-os/os-ui:0.1.0 --name agentic-os
 
 `scripts/build-images.sh` automates this if you'd rather run one script. Its
 default (no flags) build is **base-only** — it builds exactly the three
-images above (mock-model, agent-runtime, and os-ui, the latter unconditional)
-and nothing else:
+images above and nothing else:
 
 ```bash
 ./scripts/build-images.sh agentic-os
@@ -88,7 +88,7 @@ helm list -A
 kubectl get pods -n agentic-os
 ```
 
-Watch until every base-slice pod reaches `1/1 Running`:
+Watch until the base-slice workloads are ready:
 
 ```bash
 kubectl get pods -n agentic-os -w
@@ -120,10 +120,9 @@ kubectl -n agentic-os port-forward svc/agentic-os-litellm 4000:4000
 ## 8. Full stack
 
 The steps above bring up the **base profile** only. To run the full
-self-contained stack (all extensions — OpenSearch, Dagster, OpenMetadata,
-Superset, Argo CD, Layer-4 Science, and the rest of `templates/extensions/*`)
-instead, use the supported full-stack entry point. It starts after creating
-the Kind cluster:
+self-contained stack, including the optional extension components configured
+by `values.selfcontained.yaml`, use the supported full-stack entry point.
+It starts after creating the Kind cluster:
 
 ```bash
 kind create cluster --name agentic-os
@@ -179,6 +178,7 @@ helm upgrade --install agentic-os charts/sovereign-agentic-os \
   -f charts/sovereign-agentic-os/values.base.yaml \
   --namespace agentic-os
 ```
+
 ### Example: updating an API key
 
 For example, if you change an API key or another Helm-configured runtime
@@ -198,7 +198,7 @@ For a full self-contained deployment, re-apply the configuration through the
 supported entry point:
 
 ```bash
-./install.sh --defaults`
+./install.sh --defaults
 ```
 
 `install.sh --defaults` uses `helm upgrade --install`, so it can update an
