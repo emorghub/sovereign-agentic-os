@@ -1,0 +1,263 @@
+# =============================================================================
+# kind overlay — BASE SUBTREE ONLY (Phase 2.2, issue #23).
+# =============================================================================
+# Enables just the agent-core slice + its infra backends, so the chart runs on
+# a local kind cluster with roughly the same service set as the Phase 2.1
+# Compose stack. Unlike values.local.yaml (which layers a few disables on top
+# of values.yaml's mostly-on defaults), this file is a full allowlist: every
+# extension guard is explicitly set to false below so the base slice doesn't
+# depend on values.yaml's current defaults staying the way they are today.
+#
+#   helm install agentic-os charts/sovereign-agentic-os \
+#     -n agentic-os --create-namespace -f charts/sovereign-agentic-os/values.base.yaml
+# =============================================================================
+
+global:
+  profile: local
+  storageClass: "standard"   # kind's default StorageClass (rancher local-path)
+
+networkPolicies:
+  defaultDeny: true
+
+# -----------------------------------------------------------------------------
+# Base subtree — enabled.
+# -----------------------------------------------------------------------------
+agentRuntime:
+  enabled: true
+litellm:
+  enabled: true
+  # Offline golden path: values.yaml's default sovereign-default/-mock/-reasoning
+  # aliases route to STACKIT with no key, which breaks the local/kind Agent
+  # golden path. Override just those three routes to the bundled mock-model
+  # (leave STACKIT config in values.yaml untouched for production).
+  # NOTE: Helm merges maps but REPLACES lists wholesale across -f files, so this
+  # must restate the full model_list (including sovereign-embed unchanged) —
+  # a partial list here would silently drop the embeddings route.
+  proxy_config:
+    model_list:
+      - model_name: sovereign-default
+        litellm_params:
+          model: openai/mock-gpt
+          api_base: http://mock-model:8080/v1
+          api_key: "sk-mock-unused"
+
+          # To use LiteLLM with real models, replace the values below with your
+          # gateway endpoint, model name, and API key.
+          # model: openai/gpt-4.1-mini
+          # api_base: https://your-gateway.example.com/v1
+          # api_key: "YOUR_API_KEY"
+
+      - model_name: sovereign-mock
+        litellm_params:
+          model: openai/mock-gpt
+          api_base: http://mock-model:8080/v1
+          api_key: "sk-mock-unused"
+
+          # model: openai/gpt-4.1-mini
+          # api_base: https://your-gateway.example.com/v1
+          # api_key: "YOUR_API_KEY"
+
+      - model_name: sovereign-reasoning
+        litellm_params:
+          model: openai/mock-gpt
+          api_base: http://mock-model:8080/v1
+          api_key: "sk-mock-unused"
+
+          # model: openai/gpt-4.1
+          # api_base: https://gateway.azure.enablerminds.com/v1
+          # api_key: "YOUR_API_KEY"
+
+      - model_name: sovereign-embed
+        litellm_params:
+          model: openai/mock-embed
+          api_base: http://mock-model:8080/v1
+          api_key: "sk-mock-unused"
+litellmAgentKey:
+  enabled: true
+langfuse:
+  enabled: true
+mockModel:
+  enabled: true
+opa:
+  enabled: true
+osUI:
+  enabled: true
+postgres:
+  enabled: true
+clickhouse:
+  enabled: true
+valkey:
+  enabled: true
+objectStorage:
+  enabled: true
+# Added beyond the issue's named list: the DoD needs a working agent build,
+# and os-ui's Build path writes the built repository to Forgejo.
+forgejo:
+  enabled: true
+
+# priorityClasses left at its values.yaml default (true), not disabled here.
+# templates/base/ workloads (agent-runtime, clickhouse, opa, valkey,
+# object-storage, os-ui, mcp-test-agent, postgres) all set priorityClassName
+# via the nil-safe soa.priorityClassName helper, so disabling would be safe
+# for them — but the opensearch subchart hardcodes priorityClassName with no
+# such guard (values.yaml:1006), so leaving this on is the one setting that
+# stays consistent whether or not that coupling ever matters again.
+
+# -----------------------------------------------------------------------------
+# queryTool — disabled
+# -----------------------------------------------------------------------------
+# query-tool hardwires TRINO_HOST=trino (templates/base/_helpers.tpl
+# soa.queryToolEnv), and Trino's iceberg catalog is itself REST-backed by
+# Polaris — enabling queryTool alone ships a pod that starts and passes its
+# own /health check but fails every real query.
+# Adding Trino (1cpu/2Gi request, 4cpu/8Gi limit) + Polaris (200m/512Mi
+# request) to make it actually work would blow the 6-8 GB target.
+# Same trade-off already made in values.selfcontained.yaml, which turns off
+# trino on a tiny kind node and accepts that the governed query path needs a
+# bigger node instead.
+queryTool:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Chart.yaml subchart dependencies with no templates/extensions/ wrapper of
+# their own — not named in the issue's base list, but default enabled: true.
+# -----------------------------------------------------------------------------
+opensearch:
+  enabled: false     # retrieval backbone — not part of the base slice
+osdashboards:
+  enabled: false     # UI over opensearch, same reason
+dagster:
+  enabled: false     # orchestrator (Layer 2) — not part of the base slice
+argo-cd:
+  enabled: false     # GitOps controller, only consumed by extensions/software/argocd-app.yaml
+
+# -----------------------------------------------------------------------------
+# templates/extensions/<dir> — every guard disabled below, grouped by directory.
+# -----------------------------------------------------------------------------
+
+# extensions/agent/
+sampleAgent:
+  enabled: false
+
+# extensions/backup/ — no single directory guard; two independent flags.
+opensearchSnapshots:
+  enabled: false
+backup:
+  pgDump:
+    enabled: false
+
+# extensions/connections/ — no single directory guard; three independent flags.
+connections:
+  enabled: false
+  catalogRefresh:
+    enabled: false
+  externalSecrets:
+    enabled: false
+
+# extensions/cube/
+cube:
+  enabled: false
+
+# extensions/dbt/
+dbt:
+  enabled: false
+
+# extensions/docling/
+docling:
+  enabled: false
+
+# extensions/haystack/
+haystack:
+  enabled: false
+
+# extensions/hermes/ — single master switch; every file in the dir ANDs it.
+hermes:
+  enabled: false
+
+# extensions/lakehouse/ — no single directory guard; five independent flags
+# beyond queryTool (already disabled above).
+dataRunner:
+  enabled: false
+marts:
+  enabled: false
+polaris:
+  enabled: false
+serviceBearer:
+  enabled: false
+trino:
+  enabled: false
+
+# extensions/mail/
+mail:
+  enabled: false
+
+# extensions/metrics/ — no single directory guard; three independent flags.
+metrics:
+  alerts:
+    cron:
+      enabled: false
+data:
+  quality:
+    cron:
+      enabled: false
+dataSync:
+  sweep:
+    enabled: false
+
+# extensions/model-server/
+stackitPremium:
+  enabled: false
+
+# extensions/openmetadata/ — single master switch; every file in the dir ANDs it.
+openmetadata:
+  enabled: false
+
+# extensions/sales-assistant/
+salesAssistant:
+  enabled: false
+
+# extensions/science/ — single master switch; every file in the dir ANDs it.
+ml:
+  enabled: false
+jupyterhub:
+  enabled: false
+
+# extensions/software/ — no single directory guard; forgejo itself stays on
+# (enabled above), the rest of the directory's flags are disabled.
+ciRunner:
+  enabled: false
+softwareDelivery:
+  demoApp:
+    enabled: false
+analyticsRepo:
+  enabled: false
+forgejoDiskAlert:
+  enabled: false
+harbor:
+  enabled: false
+
+# extensions/superset/
+superset:
+  enabled: false
+
+# extensions/terminal/
+terminal:
+  enabled: false
+
+# extensions/wireguard/
+wireguard:
+  enabled: false
+
+# extensions/workbench/
+workbench:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# base/-side extras outside the issue's named list — default true, disabled.
+# -----------------------------------------------------------------------------
+mcpTestAgent:
+  enabled: false
+egressProxy:
+  enabled: false
+webFetch:
+  enabled: false

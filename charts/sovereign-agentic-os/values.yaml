@@ -233,8 +233,8 @@ objectStorage:
   # SeaweedFS is the air-gap/sovereign alternative but proved unreliable for
   # Iceberg writes on kind. MinIO is AGPL — local dev stand-in only, never bundled.
   image:
-    repository: minio/minio
-    digest: sha256:8834ae47a2de3509b83e0e70da9369c24bbbc22de42f2a2eddc530eee88acd1b
+    repository: quay.io/minio/minio
+    digest: sha256:c7175077d39a8cc10c9fd611cdcc68b6a5b365793e9ac6f4198ffff1ef0fe555
   awsCli:
     repository: amazon/aws-cli
     digest: sha256:e14216fb361cce909ce199616711ad103182d5937f851cda9bebf25867d7180a   # 2.31.13
@@ -820,6 +820,35 @@ litellm:
   # the subchart Job does still run it is a redundant idempotent no-op — kept
   # enabled only for the DISABLE_SCHEMA_UPDATE=true it sets on the proxy, above.)
   extraInitContainers:
+    # STARTUP-RACE FIX: on a fresh cluster (no node-local image cache), pg-rw's
+    # backing pod can still be pulling its image / running initdb when this
+    # Deployment's pod is created — Kubernetes gives NO ordering guarantee
+    # between a StatefulSet and a Deployment (the `argocd.argoproj.io/sync-wave`
+    # annotations elsewhere in this chart are ArgoCD-only and inert under plain
+    # `helm install`). Without this wait, db-migrate below can exhaust its own
+    # internal retry budget (prisma_migration.py: 4 attempts) before Postgres
+    # ever accepts a connection (P1001), and — since ENFORCE_PRISMA_MIGRATION_CHECK
+    # defaulted off — used to exit 0 anyway, leaving the schema missing. Mirrors
+    # the same pg_isready wait already used in
+    # templates/base/postgres/extra-databases-reconcile.yaml (that Job's header
+    # comment documents the identical race hitting Featureform) and the
+    # wait-for-clickhouse initContainer above for Langfuse.
+    - name: wait-for-postgres
+      # Same pinned image as the plain-engine Postgres StatefulSet — ships
+      # pg_isready, and is already resident on the node (pg-0 pulls the same
+      # image), so this adds no extra image pull.
+      image: "postgres:17@sha256:5c855ad7b85e68e48a62f34662853f38b57c1c1d80f3a927ab58034fd6d31c5e"
+      imagePullPolicy: "{{ .Values.global.imagePullPolicy }}"
+      command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for Postgres at pg-rw:5432 …"
+          until pg_isready -h pg-rw -p 5432 -q; do
+            echo "  pg-rw not ready, retrying in 5s"
+            sleep 5
+          done
+          echo "pg-rw is ready."
     - name: db-migrate
       image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
       imagePullPolicy: "{{ .Values.image.pullPolicy }}"
@@ -843,12 +872,21 @@ litellm:
         # disabled (schema ownership lives in this initContainer).
         - name: DISABLE_SCHEMA_UPDATE
           value: "false"
+        # STARTUP-RACE FIX: litellm_proxy_extras' setup_database() silently
+        # returns False (and prisma_migration.py exits 0) after 4 failed
+        # `prisma migrate deploy` attempts unless this is set — which is exactly
+        # how a missing schema went undetected before. This makes a real
+        # migration failure fail the initContainer, so kubelet retries it
+        # (Deployment pods run initContainers under restartPolicy: Always)
+        # instead of the proxy silently starting with no schema.
+        - name: ENFORCE_PRISMA_MIGRATION_CHECK
+          value: "true"
       resources:
         # Prisma client-generate + `migrate deploy` spikes RAM; 1Gi OOMKills
         # (exit 137) on a cold DB. 2Gi limit matches the proxy container and
         # migrates a fresh schema reliably. Short-lived (runs once per pod start).
         requests: { cpu: 100m, memory: 512Mi }
-        limits: { cpu: "1", memory: 2Gi }
+        limits: { cpu: "1", memory: 3Gi }
   # Master key + Langfuse env come from our local Secret.
   masterkeySecretName: litellm-credentials
   masterkeySecretKey: masterkey
