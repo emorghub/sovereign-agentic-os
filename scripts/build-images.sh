@@ -2,9 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Borek Data Ventures UG
 # Build + load the bespoke Sovereign OS images into the kind cluster.
-# Idempotent; safe to re-run. Usage: ./scripts/build-images.sh [kind-cluster-name]
+# Idempotent; safe to re-run.
+# Usage: ./scripts/build-images.sh [kind-cluster-name] [--with-extensions]
+#   Default: builds BASE images + os-ui only.
+#   --with-extensions: also builds EXT_IMAGES + dagster.
 set -euo pipefail
-CLUSTER="${1:-agentic-os}"
+
+WITH_EXTENSIONS=0
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --with-extensions) WITH_EXTENSIONS=1 ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+CLUSTER="${POSITIONAL[0]:-agentic-os}"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -12,15 +25,13 @@ cd "$ROOT"
 BASE_IMAGES="
 mock-model:0.1.1
 agent-runtime:0.1.2
-egress-proxy:0.1.0
-web-fetch:0.1.0
-mcp-test-agent:0.1.0
 "
 
 EXT_IMAGES="
 sample-agent:0.1.0
 haystack-retriever:0.1.0
 query-tool:0.6.2
+data-runner:0.2.1
 dbt:0.2.0
 superset:6.1.0
 mlflow:2.19.0
@@ -30,6 +41,9 @@ terminal-broker:0.1.0
 sandbox-shell:0.1.0
 workbench-broker:0.1.0
 code-server-workbench:0.1.0
+egress-proxy:0.1.0
+web-fetch:0.1.0
+mcp-test-agent:0.1.0
 "
 
 build_one() {
@@ -42,15 +56,18 @@ build_one() {
 for entry in $BASE_IMAGES; do
   build_one base "${entry%%:*}" "${entry##*:}"
 done
-for entry in $EXT_IMAGES; do
-  build_one extensions "${entry%%:*}" "${entry##*:}"
-done
 
-# Dagster needs the images/extensions/ dir as context (it COPYs dagster/ + dbt/,
-# both extensions).
-echo "==> building sovereign-os/dagster:0.2.0 (context=images/extensions/)"
-docker build -q -f images/extensions/dagster/Dockerfile -t sovereign-os/dagster:0.2.0 images/extensions/ >/dev/null
-kind load docker-image sovereign-os/dagster:0.2.0 --name "$CLUSTER" >/dev/null 2>&1 || true
+if [ "$WITH_EXTENSIONS" = 1 ]; then
+  for entry in $EXT_IMAGES; do
+    build_one extensions "${entry%%:*}" "${entry##*:}"
+  done
+
+  # Dagster needs the images/extensions/ dir as context (it COPYs dagster/ + dbt/,
+  # both extensions).
+  echo "==> building sovereign-os/dagster:0.2.0 (context=images/extensions/)"
+  docker build -q -f images/extensions/dagster/Dockerfile -t sovereign-os/dagster:0.2.0 images/extensions/ >/dev/null
+  kind load docker-image sovereign-os/dagster:0.2.0 --name "$CLUSTER" >/dev/null 2>&1 || true
+fi
 
 # OS UI needs the repo root as context (it COPYs os-ui/ + bakes in docs/components
 # for the native Components surface). The standalone admin-console image is
