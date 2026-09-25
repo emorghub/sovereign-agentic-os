@@ -34,8 +34,10 @@ while keeping the core open under Apache-2.0.
 ## Pull requests
 
 - Keep changes small and focused; explain **what** and **why**.
-- **Never commit secrets** — secrets are external (see `README.md` → Conventions). Real
-  credentials, tokens, kubeconfigs, or `.env` values must never be committed.
+- **Never commit secrets** — secrets are external (Kubernetes Secrets / External
+  Secrets references); `.gitignore` blocks key/secret patterns and the chart ships
+  only safe local defaults. Real credentials, tokens, kubeconfigs, or `.env` values
+  must never be committed.
 - Match the existing style; pin upstream chart versions and image digests.
 - If you added source files or touched dependencies, run `scripts/add-spdx-headers.sh` and
   `scripts/license-check.sh` before pushing.

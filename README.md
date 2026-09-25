@@ -1,341 +1,142 @@
-# Sovereign Agentic OS — stack (umbrella chart)
+# Sovereign Agentic OS
 
-The downloadable/installable artifact for the Sovereign Agentic OS: one **umbrella Helm
-chart** (`charts/sovereign-agentic-os`) that brings up the platform (**Layers 1–4** + a
-secure-by-default baseline) on any Kubernetes cluster — **self-contained and works out of the
-box**. Layer 4 (Science/ML) is opt-in and off by default.
+A self-hosted, governed operating system for AI agents. Agents run in
+`agent-runtime`, reach models through LiteLLM, reach tools over MCP, are
+authorized by OPA, and are traced in Langfuse — all fronted by one web app,
+the **OS UI**. It ships as one umbrella Helm chart
+(`charts/sovereign-agentic-os`) and as a Docker Compose stack for local work.
 
-Spec lives one level up in `../stackit/`. Decisions there are settled — this repo
-implements them.
+The repo draws one boundary: **base** — the smallest set the OS needs to boot
+and demonstrate its core promise (a governed agent, talking to a governed
+model, over a governed data path, with tracing) — and **extensions**
+(a.k.a. experimental): everything opt-in, bespoke, or still proving itself.
+See [`experimental/README.md`](experimental/README.md) for the policy.
 
-## Quickstart (one command)
+## Run the base in 2 minutes
+
+<!-- TODO(#22): compose.yaml + compose/README.md land with PR #42 -->
+
+Needs only Docker. Runs fully offline — `mock-model` serves chat and
+embeddings, so no model API key and no Kubernetes cluster.
 
 ```bash
-# prereqs: docker (running), kind, helm, kubectl
-kind create cluster --name agentic-os     # or let install.sh create it
-./install.sh                               # press Enter through every prompt
+cp .env.example .env
+docker compose up
 ```
 
-Pressing Enter through every prompt gives the **fully self-contained** install: every
-backend bundled (Postgres/CloudNativePG, OpenSearch, ClickHouse, Valkey, MinIO object
-storage) and a tiny local mock LLM — nothing external required. The wizard can instead opt
-any backend into a managed/external service (or "all STACKIT managed").
+1. Wait for `docker compose ps` to show every service healthy.
+2. Open **http://localhost:3000** and sign in as `admin` / `admin`.
+3. **Agents** tab → **SimpleBuilder** → create a system → **Build** → **Run**.
+4. Open the **Monitoring** tab to see the trace.
 
-When it finishes, `install.sh` prints the **demo logins**. The default Administrator-style
-console login is **Langfuse**: `admin@datamasterclass.com` / `langfuse-local-dev-admin`
-(plus Superset `admin` / `superset-admin-local-dev`, LiteLLM `admin` /
-`litellm-admin-local-dev`, Forgejo `gitea_admin` / `forgejo-admin-local-dev`, and Argo CD
-`admin`). Non-interactive: `./install.sh --defaults`. Remove: `./install.sh --uninstall`.
+| Service  | URL                   | Login                                                    |
+|----------|-----------------------|----------------------------------------------------------|
+| OS UI    | http://localhost:3000 | `admin` / `admin`                                        |
+| Forgejo  | http://localhost:3001 | `gitea_admin` / `forgejo-admin-local-dev`                |
+| Langfuse | http://localhost:3002 | `alex@datamasterclass.com` / `langfuse-local-dev-admin`  |
 
-**Two front doors** (port-forward, then open):
-```bash
-kubectl -n agentic-os port-forward svc/os-ui 8080:3000           # OS UI — product front door
-kubectl -n agentic-os port-forward svc/admin-console 8081:8080   # Admin Console — operate the stack + docs
-```
+Compose covers the **Agents golden path only**: `os-ui`, `agent-runtime` and
+`mock-model`, plus OPA, LiteLLM, Langfuse and Forgejo. It does not run
+`egress-proxy`, `web-fetch` or `mcp-test-agent`, and the Knowledge, Files,
+Data, Metrics, Dashboards, Software, Components and Console tabs show empty or
+unavailable. For those, run the full platform (below).
 
-Presets: `values.selfcontained.yaml` (default) · `values.stackit-managed.yaml` (backends →
-STACKIT managed) · `values.example.yaml` (the `mode: bundled|external` contract).
+Profiles, external LiteLLM/Langfuse, real models and teardown:
+[`compose/README.md`](compose/README.md).
 
-> **Deploy to STACKIT (recommended: single node).** To run on STACKIT, follow
-> **[`docs/stackit-deployment-guide.md`](docs/stackit-deployment-guide.md)** — the primary,
-> verified path: one `g2i.8` node, single AZ, all backends self-contained, pause off-hours
-> with `deploy/stackit off`. (Managed-services Mode B and multi-node HA are **known-blocked**:
-> cross-node pod networking on SKE-in-an-SNA is broken — single node sidesteps it.)
+## Run on Kubernetes
 
-> **The OS UI** is a **v1.0 front door** (os-ui 0.5.99) — every sidebar tab is a real,
-> live surface. It ships with **real, self-hosted authentication** (scrypt-hashed passwords,
-> signed sessions, four roles) — see **First-run sign-in** below. A future swap to Ory keeps
-> the same `currentUser`/`requireUser` seam.
+Both paths need `docker` (running), `kind`, `kubectl` and `helm`.
 
-### First-run sign-in (OS UI)
+### Base only, on kind
 
-The OS UI ships with **no real or demo users** — only a secure first-run bootstrap:
+<!-- TODO(#23): values.base.yaml + quickstart-kind.md land with PR #46 -->
 
-1. **Bootstrap.** On the very first run the identity store is empty, so a single default
-   admin exists: **`admin` / `admin`**. Open the OS UI and sign in with it.
-2. **Forced setup.** You are immediately required to set a **real username + email + a
-   strong password** (min 12 chars, mixed character classes; weak passwords are rejected).
-   The instant you submit, the `admin/admin` login is **disabled**.
-3. **Email verification.** Setup returns a verification link (in a real deploy this is
-   emailed; on local-kind it is shown so you can click it). Verifying your email
-   **permanently deletes** the bootstrap admin — `admin/admin` is gone for good.
-4. **Recovery key.** As an admin, go to **Users → Account recovery** and **Generate a
-   master recovery key**. It is shown and downloaded **once**; the server stores only a
-   hash. If you are ever locked out, use it at **`/recover`** to reset any account's
-   password. **Lose it and it cannot be recovered** — store it offline.
-
-Passwords are never stored in plaintext, never logged, and never returned to the browser.
-The session secret is auto-generated into the `os-ui-session` Kubernetes Secret (never the
-in-code dev fallback). Operators can pre-provision real users via `osUI.usersSeed` (a JSON
-array; plaintext passwords there are hashed on ingest) — but the default ships none.
->
-> **Local only.** Real STACKIT provisioning stays gated on the SA key + cost sign-off
-> (`../stackit/stackit.md`).
-
-## What ships today
-
-os-ui **0.5.99** · chart **0.2.11**
-
-### Sidebar tabs (every one is live)
-
-Five sections. All tabs are real surfaces — no mocks, no stubs.
-
-**Entry** — Home (live stack status) · Cockpit · Tutorials · MCP (builder+) · About / Licenses
-
-**Plan** — Strategy · Big Bets · Operating Model · Workflows · Marketplace (builder+)
-
-**Context** — Knowledge · Files · Data · Connections · Metrics
-
-**Build** — Agents · Software · Science · Dashboards · Console (builder+, Shell admin-only)
-
-**Govern** — Policies & Approvals (builder+) · Monitoring (builder+) · Components (admin) · LLM Gateway (builder+) · Admin (builder+, admin-gated tiles)
-
-### Highlights
-
-- **Native ECharts dashboards.** Tier-1 panels are server-rendered ECharts queried from Cube via
-  the governed SQL API with per-user RLS — no `<iframe>`. Tier-2 links out to Power BI, Tableau,
-  or Superset in a dedicated tab.
-- **Connector catalogue.** 30+ connectors in 11 categories: messaging (Slack, Gmail, Google
-  Calendar, Outlook, Teams), code & DevOps (GitHub, Supabase, Atlassian), docs & knowledge
-  (Notion), operational databases (PostgreSQL, MySQL, SQL Server, MongoDB via Trino federation),
-  data warehouses (Snowflake, BigQuery, Databricks, AWS Glue, Fabric), enterprise apps (Salesforce,
-  Airflow, Kajabi), cloud governance & ML (Microsoft Entra, Purview, Azure AI Foundry, AWS
-  SageMaker, GCP identity, Snowflake governance), and LLM providers.
-- **FiveTran-style scheduled incremental sync.** Full-refresh, append (`_loaded_at`/`_batch_id`
-  lineage), and cursor-based incremental modes; a durable sync-runs store with cursor watermarks and
-  quarantine after 10 consecutive failures; per-dataset CronJob provisioning.
-- **Software builder.** Epic/story tree (Define stage picks from four templates — Application /
-  Website / APIs only / Empty; the Sovereign app template is the default scaffold with AppShell +
-  OS-delegated identity + MCP link); Build stage streams agent commits to Forgejo with sha-aware
-  writes; Publish runs a live security scan; Operate shows live tool activity.
-- **Governed MCP front door.** Every OS capability is reachable over the MCP protocol with the
-  same OPA-checked, RLS/DLS-filtered routes the UI uses. LiteLLM is the model/MCP gateway.
-- **Monitoring with honest accounting.** Token/cost tallies hydrated from live Langfuse traces on
-  read; per-model EUR/1M pricing admin-editable; detail expands in the main window.
-- **Analytics-as-code.** Promoted datasets dual-write to a Forgejo `analytics` monorepo as dbt
-  models + Cube YAML. Cube can be switched to serve from git (`cube.modelSync.source: git`).
-- **Agents builder — 5-stage flow.** Define · Design · Build · Run · Evaluate. Template library,
-  interactive grant picker (read / read+propose / read+write per capability), per-agent context
-  attribution in Evaluate, PDF results and evaluation reports.
-
-For the full user guide see **`docs/Sovereign-Agentic-OS-Guide.md`** (and PDF).
-
-## Platform foundations — how the base was built
-
-The thinnest end-to-end slice that proves the system works:
-
-| Component | Role | Packaged as |
-|---|---|---|
-| **LiteLLM** | model / MCP gateway | wrapped upstream chart |
-| **Langfuse v3** | observability / tracing | wrapped upstream chart |
-| ↳ **CloudNativePG Postgres** | Langfuse metadata DB | operator + `Cluster` CR |
-| ↳ **ClickHouse** | Langfuse analytics | bespoke template |
-| ↳ **Valkey** (BSD-3, not Redis) | Langfuse queue/cache | bespoke template |
-| ↳ **MinIO** (S3 API) | object-storage stand-in for STACKIT Object Storage (local dev only) | bespoke template |
-| **OpenSearch** | retrieval backbone (vector + lexical) | wrapped upstream chart |
-| **mock-model** | local OpenAI-compatible stub (sovereign/offline) | bespoke template |
-| **sample LangGraph agent** | calls LLM via LiteLLM, traced in Langfuse, RAG over OpenSearch | bespoke template |
-
-No pgvector (OpenSearch is the retrieval backbone). MinIO (AGPL) is the local S3 stand-in
-only — never bundled/shipped; on STACKIT the real Object Storage endpoint is used. No Redis (SSPL) — Valkey.
-
-## Prerequisites
-
-- A container runtime + `docker` CLI (Colima or Docker Desktop)
-- `kind`, `helm`, `kubectl`
-- ~14 GB / 6 CPU available to the runtime VM (the slice is RAM-bound: OpenSearch +
-  ClickHouse + Postgres)
-
-## Run it locally
-
-> **Recommended:** use `./install.sh` — it handles all steps below interactively. The manual
-> `helm install -f values.local.yaml` path below is kept for reference; the wizard supersedes it.
+Helm v3.22+, ≥ 6 GiB memory for the Docker VM.
 
 ```bash
-# 0. validate the chart (no cluster needed)
-helm lint charts/sovereign-agentic-os
-
-# 1. create the local cluster
-kind create cluster --name agentic-os
-
-# 2. bootstrap cluster-scoped operators (CloudNativePG) — see scripts/bootstrap-local.sh.
-#    Operators ship CRDs + admission webhooks and must exist before the OS chart's
-#    CRs are applied (mirrors stackit.md §2).
-./scripts/bootstrap-local.sh
-
-# 3. build the two bespoke images and load them into kind
-docker build -t sovereign-os/mock-model:0.1.0  images/mock-model
-docker build -t sovereign-os/sample-agent:0.1.0 images/sample-agent
-kind load docker-image sovereign-os/mock-model:0.1.0 sovereign-os/sample-agent:0.1.0 --name agentic-os
-
-# 4. render + client-validate (CRDs from step 2 must be present)
+kind create cluster --name agentic-os --config kind-config.yaml
+./scripts/build-images.sh            # builds + loads the repo-owned images
 helm dependency build charts/sovereign-agentic-os
-helm template agentic-os charts/sovereign-agentic-os -f values.local.yaml \
-  | kubectl apply --dry-run=client -f -
-
-# 5. install
 helm install agentic-os charts/sovereign-agentic-os \
-  -n agentic-os --create-namespace -f values.local.yaml
-
-# 6. watch it come up
-kubectl -n agentic-os get pods -w
+  -n agentic-os --create-namespace \
+  -f charts/sovereign-agentic-os/values.base.yaml
 ```
 
-Teardown: `kind delete cluster --name agentic-os`.
+Step-by-step: [`charts/sovereign-agentic-os/docs/quickstart-kind.md`](charts/sovereign-agentic-os/docs/quickstart-kind.md).
 
-## Validate the slice (the success gate)
+### Full platform (base + extensions)
+
+~14 GB / 6 CPU for the Docker VM.
 
 ```bash
-# RAG answer grounded in OpenSearch-retrieved context, traced in Langfuse:
-kubectl -n agentic-os run ask --rm -i --restart=Never --image=curlimages/curl:8.11.1 -- \
-  curl -sS http://sample-agent:8000/ask -G \
-  --data-urlencode "q=What provides the retrieval backbone for vector and lexical search?"
-
-# See the trace (uses the headless-provisioned dev keys):
-kubectl -n agentic-os run lf --rm -i --restart=Never --image=curlimages/curl:8.11.1 -- \
-  curl -sS -u pk-lf-localdev0000public:sk-lf-localdev0000secret \
-  http://agentic-os-langfuse-web:3000/api/public/traces?limit=5
+kind create cluster --name agentic-os   # or let install.sh create it
+./install.sh                            # Enter through every prompt = fully self-contained
 ```
 
-Open the UIs:
+`./install.sh --defaults` runs non-interactively; `./install.sh --uninstall`
+removes it. The wizard can point any backend at a managed/external service
+instead. Presets: `values.selfcontained.yaml` (default),
+`values.stackit-managed.yaml`.
+
+Open the OS UI:
+
 ```bash
-kubectl -n agentic-os port-forward svc/agentic-os-langfuse-web 3000:3000   # Langfuse
-kubectl -n agentic-os port-forward svc/agentic-os-litellm 4000:4000        # LiteLLM
+kubectl -n agentic-os port-forward svc/os-ui 8080:3000
 ```
 
-## Pinned versions
+**First sign-in (Helm installs):** `admin` / `admin` works only once — you are
+forced to set a real user and strong password, and verifying your email deletes
+the bootstrap admin for good. Then generate a master recovery key under
+**Users → Account recovery** and store it offline. Details in the
+[user guide](docs/Sovereign-Agentic-OS-Guide.md).
 
-| Thing | Version |
+Deploying to STACKIT: [`docs/stackit-deployment-guide.md`](docs/stackit-deployment-guide.md).
+
+## Repo map
+
+The folders are the source of truth; this table is a snapshot.
+
+| Path | What lives there |
 |---|---|
-| Umbrella chart | **0.2.11** |
-| OS UI | **0.5.99** |
-| Langfuse chart / app | 1.5.36 / v3.194.1 |
-| LiteLLM chart | 1.90.0 |
-| OpenSearch chart | 3.7.0 |
-| CloudNativePG operator chart | 0.28.3 (op 1.29.1) |
-| Postgres image | 17.5 (digest-pinned) |
-| ClickHouse / Valkey / SeaweedFS | 24.8 / 8.1-alpine / 3.97 (digest-pinned) |
-| Agent deps | langgraph 0.3.34, langfuse 3.15.0, openai 1.109.1 |
+| `images/base/` | Base images (below) |
+| `images/extensions/` | Everything else: BI/analytics, Science/ML, developer tooling, sample agents |
+| `charts/sovereign-agentic-os/templates/base/` | Base chart templates: agent-runtime, litellm, langfuse, mock-model, opa, os-ui, postgres, clickhouse, valkey, object-storage, network, example-agents |
+| `charts/sovereign-agentic-os/templates/extensions/` | Extension chart templates |
+| `os-ui/` | The OS UI (Next.js) — see [`os-ui/ARCHITECTURE.md`](os-ui/ARCHITECTURE.md) |
+| `compose.yaml`, `compose/` | Docker Compose stack |
+| `experimental/` | Base vs extensions policy + re-entry checklist |
+| `docs/` | User guide, deployment guides, component docs |
+| `scripts/` | Build, install and dev helpers |
 
-## Build order (incremental — thinnest runnable slice first)
+Base images:
 
-Each step was added to the same chart, installed, and validated before the next.
-**Step 1 is complete — all eight are running and validated on kind:**
+| Image | Role |
+|---|---|
+| `os-ui` | Front door — web app and the governed MCP registry (`/api/mcp`) |
+| `agent-runtime` | Executes agent systems |
+| `mock-model` | Offline OpenAI-compatible chat + embeddings stub |
+| `egress-proxy` | Single outbound chokepoint, deny-by-default allowlist |
+| `web-fetch` | Governed web-fetch tool (OPA-authorized, routed via the proxy) |
+| `mcp-test-agent` | Demo agent proving the MCP registry works end to end |
 
-1. ✅ Umbrella scaffold (lint gate)
-2. ✅ kind cluster + object storage (SeaweedFS) — bucket + S3 put/get
-3. ✅ CloudNativePG operator + Postgres `Cluster` — `langfuse` DB healthy
-4. ✅ Valkey + ClickHouse — auth + DDL
-5. ✅ Langfuse v3 (wired to all four backends) — health OK, 70 PG + 12 CH tables
-6. ✅ LiteLLM gateway + local mock model — chat + embeddings via the gateway
-7. ✅ OpenSearch + sample knowledge index — kNN search
-8. ✅ Sample LangGraph agent → **success gate**: RAG answer + Langfuse trace
+## Where next
 
-### Layer 2 (Context / Foundations) — all 7 built and validated
+- [`docs/development.md`](docs/development.md) — contributor dev guide <!-- TODO(#24) -->
+- [`os-ui/ARCHITECTURE.md`](os-ui/ARCHITECTURE.md) — how the OS UI is layered
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to send a change
+- [`docs/Sovereign-Agentic-OS-Guide.md`](docs/Sovereign-Agentic-OS-Guide.md) — full user guide
 
-Added incrementally on the same chart (light→heavy), each validated + committed:
+## License
 
-1. ✅ **OPA** — default-deny tool authorization (rag allowed, web_fetch denied)
-2. ✅ **Docling** — doc parsing (HTML→markdown)
-3. ✅ **Haystack** — RAG retrieval pipeline over OpenSearch (embeds via LiteLLM)
-4. ✅ **Dagster** — orchestrator on CNPG (arm64-native image; assets load in the UI)
-5. ✅ **dbt** — seed→staging→mart into the CNPG `warehouse`
-6. ✅ **Cube** — metrics over the dbt warehouse (revenue by day)
-7. ✅ **OpenMetadata** — catalog/lineage on CNPG + OpenSearch (175 tables, search indices)
-
-**Build-and-toggle (RAM):** the full L1+L2 set is sized for a 96 GB STACKIT node;
-on a 14 GB local VM, `values.local.yaml` turns **Docling** and **OpenSearch
-Dashboards** off to make room for OpenMetadata. Product defaults (`values.yaml`)
-keep everything enabled for STACKIT; flip the local toggles (or scale the VM) to
-run them together.
-
-### Secure-by-default egress baseline (security.md) — done
-
-Agents get no raw internet; outbound is granted, proxied, allowlisted, audited:
-
-- ✅ **Egress proxy** (tinyproxy) — single outbound chokepoint, deny-by-default
-  domain allowlist (allowlisted → through; others → blocked).
-- ✅ **Governed `web_fetch` tool** — the only sanctioned path to the web:
-  OPA-authorized per principal (grant-per-key), routed through the proxy, returns
-  sanitized content as DATA. Validated: ungranted → 403; granted+allowlisted →
-  200; granted+non-allowlisted → proxy-blocked.
-- ✅ **Default-deny NetworkPolicies** — shipped ON; deny egress except DNS /
-  intra-namespace / API-server, and only the proxy reaches the internet. (kindnet
-  doesn't enforce locally; Cilium enforces on STACKIT.)
-
-### Dagster → dbt — done
-
-The Dagster image bundles dbt + dagster-dbt; dbt models load as Dagster assets
-(`daily_revenue`/`stg_orders`/`raw_orders`) and materializing them runs `dbt
-build` against the warehouse (validated: RUN_SUCCESS).
-
-Layer 3 (MCP tools + central Trino/Iceberg) and the OS UI (os-ui 0.5.99) are complete and shipped.
-
-### Data tier wiring (Layer 2)
-
-`dbt` builds models into the CNPG **warehouse** → `Cube` serves metrics over them →
-`OpenMetadata` catalogs everything, searching via **OpenSearch**. `Dagster`
-orchestrates (dbt-as-assets is the next wiring). `Haystack` + `Docling` feed the
-**knowledge** RAG path the agents already use.
-
-## What runs (10 workloads)
-
-`seaweedfs` · `pg-1` (CloudNativePG) · `valkey` · `clickhouse` · `agentic-os-langfuse-web`
-· `agentic-os-langfuse-worker` · `agentic-os-litellm` · `mock-model` · `opensearch-master-0`
-· `sample-agent`. Pod requests sum to a few vCPU / ~7 GB; comfortable on a 6 CPU / 14 GB VM.
-
-## Notes & learnings (step 1)
-
-- **Operators are a bootstrap concern, not in-release.** CloudNativePG ships a `Cluster`
-  CRD + admission webhook; a single `helm install` that also creates the `Cluster` races
-  the webhook. Split out into `scripts/bootstrap-local.sh` (matches `stackit.md` §2). The
-  `kubectl apply --dry-run=client` gate therefore needs the CRDs present first.
-- **Bitnami images are now paywalled/"legacy".** Langfuse's and LiteLLM's bundled
-  subcharts default to `bitnamilegacy/*`. We disable them and wire our own permissive
-  backends (CloudNativePG / ClickHouse / Valkey / SeaweedFS) — which the spec mandates
-  anyway. This is the main reason to wire external backends explicitly.
-- **CNPG rejects digest-only images** (`spec.imageName`) — it needs a tag for upgrade
-  detection. Use `tag@digest` to pin *and* satisfy it.
-- **Langfuse requires Valkey `noeviction`** (it's a job queue) and **`clusterEnabled:false`**
-  for a single-node external ClickHouse (else it issues `ON CLUSTER` DDL that fails).
-- **LiteLLM OOMs under ~1 GiB** at startup (import-heavy). 1.5 GiB limit is stable. Run
-  DB-less for the thin slice; DB-backed virtual keys + cost caps (against CNPG) is a
-  fast-follow that security.md wants.
-- **SeaweedFS all-in-one** doesn't recover its raft leader after a kill, so it runs with
-  **no livenessProbe** (startup+readiness only) as an ephemeral local stand-in.
-- **Local secrets** are chart-created only under `profile: local` and clearly marked dev
-  throwaways; nothing real is committed. On STACKIT every one of these is external.
-
-## Conventions
-
-- **No secrets in git.** Secrets are external (k8s Secret / External Secrets references).
-  `.gitignore` blocks key/secret patterns; the chart ships only sane secure defaults.
-- Pin upstream chart versions (`Chart.yaml`) and image digests (`values.yaml`).
-- Only permissively-licensed components are bundled (see `../stackit/stack-decisions.md`);
-  not-bundled boundaries honored (LangGraph Platform, Langfuse `/ee`, ELv2 tools).
-- Commits: `aborek <alex@datamasterclass.com>`, small and clear.
-
-## License & Trademarks
-
-- **Core — Apache-2.0.** Borek Data Ventures UG's own code (the OS UI, integration glue,
-  bespoke images, and the Helm chart) is licensed under the **Apache License 2.0** — see
-  [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
-- **Bundled components keep their own licenses.** The platform **aggregates** independent
-  open-source components, each under its own license — we do **not** relicense them. The
-  full attribution manifest (component, version, SPDX id, and a pointer to the bundled
-  full license text under [`licenses/`](licenses/)) is in
-  [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md); a CycloneDX SBOM ships as
-  [`sbom.cdx.json`](sbom.cdx.json). Notably, **Forgejo (GPL-3.0-or-later) ships as a
-  separate service (mere aggregation)** and **Featureform (MPL-2.0) is optional**; their
-  source records are in [`licenses/source-offer.md`](licenses/source-offer.md).
-- **Trademarks.** "**Sovereign Agentic OS**" and "**Data Masterclass**" are trademarks of
-  **Borek Data Ventures UG**. All other names/marks are the property of their respective
-  owners. This project is **not affiliated with, or endorsed by, the Apache Software
-  Foundation**.
-- **Enterprise Edition.** Any future Enterprise features ship under [`ee/`](ee/) with their
-  **own commercial license** (separate from Apache-2.0), gated behind a license key — see
-  [`ee/README.md`](ee/README.md). The free core stays complete and open.
-- **Contributing.** Contributions are accepted into the Apache-2.0 core under a DCO
-  sign-off (`git commit -s`) — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-> Not legal advice — counsel should review before the public launch.
+- **Core — Apache-2.0.** The OS UI, integration glue, bespoke images and the
+  Helm chart — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+- **Bundled components keep their own licenses** — see
+  [`THIRD-PARTY-LICENSES.md`](THIRD-PARTY-LICENSES.md),
+  [`licenses/`](licenses/) and the SBOM [`sbom.cdx.json`](sbom.cdx.json).
+  Forgejo (GPL-3.0-or-later) ships as a separate service.
+- **Enterprise features**, if any, live under [`ee/`](ee/) with their own license.
+- **Contributions** are accepted into the Apache-2.0 core under the project
+  CLA — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- "Sovereign Agentic OS" and "Data Masterclass" are trademarks of Borek Data
+  Ventures UG. Not affiliated with or endorsed by the Apache Software Foundation.
