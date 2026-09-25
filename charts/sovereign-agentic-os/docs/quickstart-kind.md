@@ -13,7 +13,7 @@ and Forgejo) on a local Kind cluster.
 - `kubectl`
 - Helm v3.22+
 
-## 1. Base Stack
+## 2. Base Stack
 ### Create a Kind cluster
 
 The repo ships a Kind cluster config (`kind-config.yaml`) that enables
