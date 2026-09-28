@@ -10,12 +10,12 @@ import {
   type McpTool,
 } from '@/lib/mcp/server';
 import { ALL_WRITE_TOOLS } from '@/lib/mcp/write-tools';
-import type { ToolExecutor, ToolSpec } from '@/lib/assistant/agentic';
+import type { ToolExecutor, ToolSpec } from '@/lib/assistant';
 import type { ArtifactGrant, System, SafetyPreset } from '../system-schema.ts';
 import { type Effect } from '../gateway.ts';
 import { principalFor } from './runtime-contract.ts';
 import { trace as realTrace } from '@/lib/infra/agent-governed';
-import { enqueue as realEnqueue } from '@/lib/governance/approvals';
+import { enqueue as realEnqueue } from '@/lib/governance';
 import { resolveFolderGrant } from '@/lib/core/folders';
 import { config } from '@/lib/core/config';
 

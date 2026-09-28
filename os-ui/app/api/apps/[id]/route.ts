@@ -7,7 +7,7 @@ import { getAppForUser, updateAppDocs, patchAppDesign, renameApp, refreshActions
 import { normalizeContextGrants } from '@/lib/core/context-grants';
 import { normalizeAgentGrants } from '@/lib/software/app-agent-grants';
 import { reconcileDeployApproval } from '@/lib/software/review';
-import { getConnectionByApp } from '@/lib/infra/app-registry';
+import { getConnectionByApp } from '@/lib/infra';
 
 export const dynamic = 'force-dynamic';
 

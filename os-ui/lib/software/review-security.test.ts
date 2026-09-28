@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import type { CurrentUser } from '@/lib/core/auth';
 import { createApp, saveAppFile } from '@/lib/software/apps';
 import { requestDeploy, getReviewCard, __resetReviewCards } from './review.ts';
-import { __resetApprovals } from '@/lib/governance/approvals';
+import { __resetApprovals } from '@/lib/governance';
 
 /**
  * The deploy-scan SECURITY fixes:

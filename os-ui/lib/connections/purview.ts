@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 
 /**
  * Microsoft Purview client over the account's Atlas/Purview REST API

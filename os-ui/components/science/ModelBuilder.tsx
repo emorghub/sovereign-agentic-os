@@ -6,6 +6,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useUser } from '@/lib/useUser';
 import { roleAtLeast } from '@/lib/core/session';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { canManageArtifact } from '@/lib/governance/edit-scope';
 import type { Visibility } from '@/lib/core/lifecycle';
 import { visibilityForTier } from '@/lib/core/artifact-model';

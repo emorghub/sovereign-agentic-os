@@ -4,7 +4,7 @@
 import 'server-only';
 import yaml from 'js-yaml';
 import { config } from '@/lib/core/config';
-import { cubeLoad, cubeScalar } from '@/lib/infra/governed';
+import { cubeLoad, cubeScalar } from '@/lib/infra';
 import { type MetricCubeClient, type MetricLiveDeps } from './live.ts';
 
 /**

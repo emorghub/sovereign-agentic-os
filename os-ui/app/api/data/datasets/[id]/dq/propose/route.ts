@@ -6,7 +6,7 @@ import { withRoute } from '@/lib/core/route-server';
 import type { CurrentUser } from '@/lib/core/auth';
 import { requirePrincipal } from '@/lib/data/server';
 import { getDataset, builtLayerFqn } from '@/lib/data/store';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import { proposeFixes, dqComplete } from '@/lib/data/dq-fix-server';
 
 export const dynamic = 'force-dynamic';

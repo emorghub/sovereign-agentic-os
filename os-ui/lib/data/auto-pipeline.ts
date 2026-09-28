@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import type { Role } from '@/lib/core/session';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import type { Dataset } from './dataset-schema.ts';
 import { getDataset, builtLayerFqn, addCheck } from './store.ts';
 import { commitLayerVersion } from './build/server.ts';

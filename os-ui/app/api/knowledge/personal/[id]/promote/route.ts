@@ -9,7 +9,7 @@ import {
   promoteThroughSeam,
   fileArtifactPromotion,
   fileArtifactCertification,
-} from '@/lib/governance/ladder';
+} from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

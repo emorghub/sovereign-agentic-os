@@ -8,7 +8,7 @@ import { requirePrincipal } from '@/lib/data/server';
 import { listDatasets } from '@/lib/data/store';
 import { ensureHydrated, latestRun } from '@/lib/data/dq-results';
 import { monitorId } from '@/lib/data/dq-monitors';
-import { buildDqOverview, type DqDatasetInput } from '@/lib/monitoring/dq-overview';
+import { buildDqOverview, type DqDatasetInput } from '@/lib/monitoring';
 
 export const dynamic = 'force-dynamic';
 

@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import Link from 'next/link';
-import type { LauncherCard } from '@/lib/home/launcher';
+import type { LauncherCard } from '@/lib/home';
 import type { GoldenPathKey } from '@/lib/tutorials';
 import TutorialLink from '@/components/tutorials/TutorialLink';
 import PathIllustration from './illustrations';

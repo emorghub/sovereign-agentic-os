@@ -4,7 +4,7 @@
 import 'server-only';
 import { createSign, createPublicKey, createPrivateKey, createHash } from 'crypto';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 
 /**
  * Snowflake ACCOUNT_USAGE governance client — the per-connection bridge to a

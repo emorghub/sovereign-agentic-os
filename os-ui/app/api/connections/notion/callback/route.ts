@@ -5,10 +5,12 @@ import { NextResponse } from 'next/server';
 import { currentUser } from '@/lib/core/auth';
 import { config } from '@/lib/core/config';
 import { storeNotionConnection } from '@/lib/connections';
-import { exchangeNotionCode } from '@/lib/oauth/notion-mcp';
-import { verifyState, nonceMatches, OAUTH_STATE_COOKIE } from '@/lib/oauth/state';
-import { publicBaseUrl } from '@/lib/oauth/redirect';
-import { takePendingFlow } from '@/lib/oauth/notion-flow';
+import {
+  exchangeNotionCode,
+  verifyState, nonceMatches, OAUTH_STATE_COOKIE,
+  publicBaseUrl,
+  takePendingFlow,
+} from '@/lib/oauth';
 
 export const dynamic = 'force-dynamic';
 

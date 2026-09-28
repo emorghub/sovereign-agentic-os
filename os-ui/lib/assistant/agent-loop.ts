@@ -17,7 +17,7 @@ import { buildInstructions } from '@/lib/mcp/instructions';
 import { runAgentic, type AgenticResult, type LlmCall, type ToolExecutor, type ToolSpec } from './agentic.ts';
 import { liteLlmCaller } from './runtime.ts';
 import { resolveAssistantModelId } from './complete.ts';
-import { inputBudget, modelContext } from '@/lib/models/context-windows';
+import { inputBudget, modelContext } from '@/lib/models';
 import { renderPageContext, type PageContext } from './page-context.ts';
 
 /**

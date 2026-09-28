@@ -9,7 +9,7 @@ import { requireUser } from '@/lib/core/auth';
 import { addSource, listSources, CONNECTOR_TEMPLATES, type Provider, type SyncMode, type SyncScope } from '@/lib/files/connectors';
 import type { Sensitivity } from '@/lib/files/asset-schema';
 import { getConnectionForUser } from '@/lib/connections';
-import { providerForTemplate, filesProviderFor } from '@/lib/oauth/providers';
+import { providerForTemplate, filesProviderFor } from '@/lib/oauth';
 
 export const dynamic = 'force-dynamic';
 

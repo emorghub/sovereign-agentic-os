@@ -10,6 +10,84 @@ that stays in each tab (Connections authors capability profiles, Agents authors
 safety presets, Data authors grants). Here you **approve · see policy · audit ·
 cap cost · manage access**. Spec: [`governance-golden-path.md`](../../../../stackit/governance-golden-path.md).
 
+## Public API
+
+Import via `@/lib/governance` (the barrel):
+
+- `cost.ts` — `setCap`, `listCaps`, `addSpend`, `getSpend`,
+  `reconcileSpendFromLiteLLM`, `checkCap`, `__resetCost`, + its types
+- `roles.ts` — `roleRank`, `roleLabel`, `ROLE_RIGHTS`, `rightsToTools`,
+  `principalFor`, `inScope`, `canSee`, `canApprove`, `canManageRole`,
+  `canAdministerUsers`, `userAdminInScope`, `canTouchUser`, `writeGrantsToOpa`,
+  `compileRoleToGrants`, + its types
+- `effects.ts` — `applyEffect`, + its types
+- `audit.ts` — `record`, `search`, `verifyChain`, `__resetAudit`, + its types
+- `policy-view.ts` — `canViewPolicyPlane`, `addAccessGrant`,
+  `addEgressEndpoint`, `isEgressAllowed`, `listEgress`, `overrideRevoke`,
+  `isRevoked`, `consolidatedPlane`, `policySources`, `readOpaGrants`,
+  `__resetPlane`, + its types
+- `ladder.ts` — `isLadderKind`, `resolveLadderArtifact`,
+  `fileArtifactPromotion`, `fileArtifactCertification`, `buildEffectDeps`,
+  `promoteThroughSeam`, `promoteOrRequest`, `isDemotableKind`,
+  `demoteThroughSeam`, + its types
+- `approvals.ts` (`server-only`) — `enqueue`, `listApprovals`, `getApproval`,
+  `decide`, `recordEffect`, `__resetApprovals`, + its types.
+  `ensureHydrated` is **not** re-exported — collides with `standing.ts`.
+- `edit-scope.ts` (pure re-export shim for `lib/core/edit-scope`) —
+  `canManageArtifact`, `type ArtifactScope`
+- `approval-notice.ts` (pure) — `POLICIES_PATH`, `policiesHref`,
+  `canApproveInline`, `targetScopeWord`, `approvalNotice`, + its types
+- `governance.ts` — `buildPreview`, `rememberPolicy`, `matchStandingPolicy`,
+  `revokeStandingPolicy`, `_clearStandingPolicies`, `SAFETY_PRESETS`,
+  `resolveAutonomous`, `setDomainDefaultPreset`, `setAgentPreset`,
+  `setAgentToolPreset`, `_clearPresets`, `effectivePreset`, + its types.
+  `StandingPolicy` is **not** re-exported — collides with `standing.ts`.
+- `standing.ts` — `matchKey`, `remember`, `isRemembered`, `listStanding`,
+  `__resetStanding`. Neither `ensureHydrated` nor `StandingPolicy` is
+  re-exported — both collide.
+- `role-config.ts` — `COMPONENTS`, `CAPABILITIES`, `cellRights`,
+  `isApplicable`, `matrixToRights`, `DEFAULT_MATRIX`, `isValidMatrix`,
+  `getMatrix`, `ensureRoleConfigLoaded`, `getMatrixSync`, `resolveRoleRights`,
+  `setCapability`, `__resetRoleConfig`, + its types
+
+### Documented exceptions (deep-path, intentional)
+
+- `lib/software/review.ts`, `app/api/governance/approvals/route.ts`,
+  `app/api/governance/policies/route.ts` — each needs `ensureHydrated`
+  alongside other, non-colliding names; the collision keeps `ensureHydrated`
+  on its own deep import (`@/lib/governance/approvals` or
+  `@/lib/governance/standing`) while the rest goes through the barrel.
+- `app/api/governance/approvals/seed/route.ts` — `seedGovernanceDemo` from
+  `seed.ts`, a demo seeder with this one consumer; not re-exported.
+- `lib/connections/exposure-actions.test.ts:21` — a deliberate lazy
+  `await import('@/lib/governance/approvals')`.
+- `lib/software/app-tool-call.test.ts:41` — `mock.module('@/lib/governance/approvals', ...)`
+  targets the file directly; it must supply every named export of
+  `approvals.ts` because the barrel re-exports the full surface.
+- 13 `'use client'` components import `canManageArtifact` (`edit-scope.ts`) or
+  `approvalNotice`/`FiledApproval` (`approval-notice.ts`) as VALUES; since the
+  barrel also re-exports `server-only` surfaces (`approvals.ts`, `ladder.ts`),
+  these stay deep-path: `components/lifecycle/useApprovalNotifier.ts`,
+  `components/data/DataBuilder.tsx`, `components/data/DatasetTiles.tsx`,
+  `components/science/ModelTiles.tsx`, `components/science/ModelBuilder.tsx`,
+  `components/connections/ConnectionBuilder.tsx`,
+  `components/files/FilePreview.tsx`, `components/files/FilesBrowser.tsx`,
+  `components/agents/SystemsList.tsx`, `components/metrics/MetricsRegistry.tsx`,
+  `components/metrics/MetricBuilder.tsx`, `components/dashboards/Tiles.tsx`,
+  `components/dashboards/DashboardBuilder.tsx`,
+  `app/(context)/knowledge/page.tsx`. Type-only imports of the same modules
+  (e.g. `type FiledApproval`) go through the barrel — types erase at compile
+  time.
+
+### Note — `canManageArtifact` reaches core through a shim
+
+`governance/edit-scope.ts` is a one-line re-export of `lib/core/edit-scope.ts`
+(`export * from '../core/edit-scope'`). The 13 `'use client'` components
+importing `canManageArtifact` through `@/lib/governance/edit-scope` are really
+consuming a pure `core` helper. Pointing them at `@/lib/core/edit-scope`
+directly would remove most of the exceptions below — out of scope here, but
+worth deciding before #34.
+
 ## The one principle: an approval **is** an action
 
 On **Approve**, the platform doesn't just flip a flag — it **executes the governed

@@ -12,7 +12,7 @@ import {
   preRoute,
   lastUserText,
 } from '@/lib/agents/build/phase-router';
-import { cleanTurns } from '@/lib/assistant/turns';
+import { cleanTurns } from '@/lib/assistant';
 
 export const dynamic = 'force-dynamic';
 // The phase router runs ONE role-agent per turn; a 235B PLAN call can still take

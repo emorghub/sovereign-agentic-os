@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
 import { getSystem } from '@/lib/agents/store';
-import { assistantComplete } from '@/lib/assistant/complete';
+import { assistantComplete } from '@/lib/assistant';
 import { judgeRun, type JudgeComplete } from '@/lib/agents/evaluate-judge';
 import { getWorkflow } from '@/lib/knowledge/store';
 import type { CurrentUser } from '@/lib/core/auth';

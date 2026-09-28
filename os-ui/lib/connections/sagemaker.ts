@@ -4,7 +4,7 @@
 import 'server-only';
 import { createHash, createHmac } from 'crypto';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 
 /**
  * AWS SageMaker client over `https://api.sagemaker.<region>.amazonaws.com` — the

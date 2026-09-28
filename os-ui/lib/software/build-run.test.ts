@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildRunError, buildMaxIterations, honestBuildFinalText, BUILD_NOT_LANDED_PREFIX } from './build-run.ts';
-import { AssistantNotConfiguredError } from '@/lib/assistant/complete';
+import { AssistantNotConfiguredError } from '@/lib/assistant';
 
 /**
  * 0.6.110 — the streamed Build chat run's HONEST failure + iteration budget helpers.

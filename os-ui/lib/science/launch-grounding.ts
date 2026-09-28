@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { k8s, k8sText } from '@/lib/infra/k8s';
+import { k8s, k8sText } from '@/lib/infra';
 import { trainingLogs } from '@/lib/science/training';
 import { readDeploy, isServingRuntimeMisconfigured } from '@/lib/science/deploy';
 import { deployRuntime } from '@/lib/science/adapters';

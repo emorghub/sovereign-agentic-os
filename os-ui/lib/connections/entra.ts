@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 import { type GraphConn, GRAPH_API, GRAPH_PAGE, graphSend, type GraphResult } from '@/lib/connections/outlook';
 
 /**

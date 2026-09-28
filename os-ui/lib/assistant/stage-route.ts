@@ -3,9 +3,9 @@
  */
 import 'server-only';
 import { NextResponse } from 'next/server';
-import { assistantComplete } from '@/lib/assistant/complete';
-import { completeWithEscalation } from '@/lib/assistant/escalate';
-import { parseJsonReply, extractJsonArray } from '@/lib/assistant/json-reply';
+import { assistantComplete } from './complete.ts';
+import { completeWithEscalation } from './escalate.ts';
+import { parseJsonReply, extractJsonArray } from './json-reply.ts';
 
 /**
  * Shared scaffolding for the per-STAGE tab assistants (Data · Metrics · Dashboards ·

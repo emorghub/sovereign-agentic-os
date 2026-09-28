@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
 import { config } from '@/lib/core/config';
 import { requireUser } from '@/lib/core/auth';
 import { MODEL_CATALOG, modelInfo, classifyProviderType, type ModelInfo } from '@/lib/agents/routing';
-import { roleModels } from '@/lib/models/roles';
+import { roleModels } from '@/lib/models';
 
 export const dynamic = 'force-dynamic';
 

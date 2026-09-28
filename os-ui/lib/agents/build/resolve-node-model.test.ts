@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { IRNode } from '../langgraph-compile.ts';
-import type { ToolSpec } from '@/lib/assistant/agentic';
+import type { ToolSpec } from '@/lib/assistant';
 import { resolveNodeModel, type AgenticGraphDeps } from './agentic-graph.ts';
 import { classifyModelNeed } from '../routing.ts';
 

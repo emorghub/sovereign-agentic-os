@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 import type { CurrentUser } from '@/lib/core/auth';
 import type { Role } from '@/lib/core/session';
 import {

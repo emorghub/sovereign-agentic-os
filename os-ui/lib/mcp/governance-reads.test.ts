@@ -5,8 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CurrentUser } from '@/lib/core/auth';
 import { handleRpc, ALL_MCP_TOOLS, toolsForTab, type JsonRpcResponse, type ToolError } from './server.ts';
-import { __resetCost, setCap, addSpend } from '@/lib/governance/cost';
-import { __resetPlane } from '@/lib/governance/policy-view';
+import { __resetCost, setCap, addSpend, __resetPlane } from '@/lib/governance';
 
 /**
  * GOVERNANCE READS (mcp-v2 P1) — get_policy_view (policy plane, policy.view right,

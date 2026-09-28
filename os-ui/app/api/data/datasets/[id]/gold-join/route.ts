@@ -22,7 +22,7 @@ import {
 } from '@/lib/data/transform';
 import type { DatasetUpstream } from '@/lib/data';
 import { parseGoldSpec, type GoldSpec } from '@/lib/data/dataset-schema';
-import type { ExecuteIdentity } from '@/lib/infra/governed';
+import type { ExecuteIdentity } from '@/lib/infra';
 
 export const dynamic = 'force-dynamic';
 

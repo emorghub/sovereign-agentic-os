@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 import type {
   Grant,
   Listing,

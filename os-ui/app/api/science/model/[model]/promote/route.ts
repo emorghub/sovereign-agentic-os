@@ -5,8 +5,7 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { config } from '@/lib/core/config';
 import { getModel, compilePredictPolicy, ensureModelsHydrated } from '@/lib/science';
-import { promoteOrRequest } from '@/lib/governance/ladder';
-import { listApprovals } from '@/lib/governance/approvals';
+import { promoteOrRequest, listApprovals } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

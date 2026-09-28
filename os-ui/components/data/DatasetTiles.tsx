@@ -6,6 +6,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useUser } from '@/lib/useUser';
 import { roleAtLeast } from '@/lib/core/session';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { canManageArtifact } from '@/lib/governance/edit-scope';
 import { DATASET_SCOPES, tilesForScope, scopeCounts, type DatasetScope } from '@/lib/data/dataset-scopes';
 import { rootsForScope, TIER_BADGE_CLASS, type FolderRoot } from '@/lib/core/scopes';

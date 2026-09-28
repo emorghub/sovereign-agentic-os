@@ -4,10 +4,10 @@
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide, isEgressAllowed } from '@/lib/infra/secrets';
-import { serviceBearerHeader } from '@/lib/infra/service-bearer';
+import { getSecretServerSide, isEgressAllowed } from '@/lib/infra';
+import { serviceBearerHeader } from '@/lib/infra';
 import { deleteBatchSql, type SyncTarget } from '@/lib/data/sync-sql';
-import type { ExecuteIdentity } from '@/lib/infra/governed';
+import type { ExecuteIdentity } from '@/lib/infra';
 import { config } from '@/lib/core/config';
 
 /**

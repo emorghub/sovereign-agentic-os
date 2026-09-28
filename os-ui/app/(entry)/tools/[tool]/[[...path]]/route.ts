@@ -3,8 +3,8 @@
  */
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
-import { proxy, resolveTool, roleAllowed, type SessionSso } from '@/lib/infra/tool-proxy';
-import { getLangfuseSessionCookies, hasLangfuseSession } from '@/lib/infra/tool-sso-langfuse';
+import { proxy, resolveTool, roleAllowed, type SessionSso } from '@/lib/infra';
+import { getLangfuseSessionCookies, hasLangfuseSession } from '@/lib/infra';
 
 /**
  * Same-origin reverse proxy for embedded tools:

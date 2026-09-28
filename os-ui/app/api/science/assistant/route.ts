@@ -3,10 +3,8 @@
  */
 import { NextResponse } from 'next/server';
 import { requireUser, type CurrentUser } from '@/lib/core/auth';
-import { failResponse } from '@/lib/assistant/stage-route';
-import { parseJsonReply } from '@/lib/assistant/json-reply';
-import { assistantComplete } from '@/lib/assistant/complete';
-import { roleModel } from '@/lib/models/roles';
+import { failResponse, parseJsonReply, assistantComplete } from '@/lib/assistant';
+import { roleModel } from '@/lib/models';
 import {
   getModel,
   designGrounding,

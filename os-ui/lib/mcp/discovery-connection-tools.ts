@@ -32,7 +32,7 @@ import type { AirflowAuthType, AtlassianAuthKind, ODataAuthType, CapabilityMode 
 import { revokeActionAdoption } from '@/lib/connections/action-adoptions';
 import { WAREHOUSE_PROVIDERS } from '@/lib/connections/warehouse/registry';
 import { WAREHOUSE_PLATFORMS, type WarehousePlatform } from '@/lib/connections/warehouse/types';
-import { promoteThroughSeam } from '@/lib/governance/ladder';
+import { promoteThroughSeam } from '@/lib/governance';
 import { config } from '@/lib/core/config';
 
 // ================================ CONNECTIONS =================================

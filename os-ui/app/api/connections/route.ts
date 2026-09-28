@@ -6,7 +6,7 @@ import { withRoute } from '@/lib/core/route-server';
 import { createConnection, listConnectionsForUser, type WarehouseCreateInput, type AirflowCreateInput, type AtlassianCreateInput, type ODataCreateInput, type WorkdayCreateInput } from '@/lib/connections';
 import { userFacingTemplates, isUserFacingTemplate, templateByKey, type ConnectionTemplateKey } from '@/lib/connections';
 import { roleAtLeast } from '@/lib/core/session';
-import { providerCatalog, ensureHydrated as ensureOAuthAppsHydrated } from '@/lib/oauth/oauth-apps';
+import { providerCatalog, ensureHydrated as ensureOAuthAppsHydrated } from '@/lib/oauth';
 import { config } from '@/lib/core/config';
 import { WAREHOUSE_PROVIDERS } from '@/lib/connections/warehouse/registry';
 import { WAREHOUSE_PLATFORMS, type WarehousePlatform } from '@/lib/connections/warehouse/types';

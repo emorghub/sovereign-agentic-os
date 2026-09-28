@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CurrentUser } from '@/lib/core/auth';
-import { runAgentic, type LlmCall } from '@/lib/assistant/agentic';
+import { runAgentic, type LlmCall } from '@/lib/assistant';
 import { createApp } from '@/lib/software/apps';
 import { commitToApp, getSnapshot, refreshVendoredSdk } from './server.ts';
 import { sovereignAppFiles } from './scaffolds/sovereign-app.ts';

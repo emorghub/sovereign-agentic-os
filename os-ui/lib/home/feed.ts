@@ -21,7 +21,7 @@ import 'server-only';
  */
 
 import type { CurrentUser } from '@/lib/core/auth';
-import { listApprovals } from '@/lib/governance/approvals';
+import { listApprovals } from '@/lib/governance';
 import { listForUser, listMarketplace } from '@/lib/core/artifacts';
 import { listAppsForUser } from '@/lib/software';
 import { listBets } from '@/lib/bigbets';

@@ -40,6 +40,48 @@ lib/monitoring/
   mock.ts         offline fixtures that encode the validation-gate scenario
 ```
 
+## Public API
+
+Import via `@/lib/monitoring` (the barrel):
+
+- `types.ts` — the shared contract (`HealthItem`, `Overview`, `TraceDetail`, …)
+- `aggregate.ts` (`server-only`) — `buildOverview`, `collectAll`
+- `correlate.ts` (pure) — `correlate`
+- `scope.ts` (`server-only`) — `scopeForUser`, plus `scope-core.ts`'s pure
+  predicates re-exported through it: `canSee`, `filterScope`, `assertInScope`,
+  `deriveScope`
+- `detail-view.ts` (`server-only`) — `agentDetail`, `datasetDetail`,
+  `type AgentDetail`, `type DatasetCheckRow`, `type DatasetDetail`
+- `dq-overview.ts` (pure) — `riskScore`, `buildDqOverview`,
+  `type DqDatasetInput`, `type DqRiskRow`, `type DqOverview`
+- `artifacts-view.ts` (`server-only`) — `artifactMonitoring`, `type AgentTile`,
+  `type DataHealthRow`, `type AgentScopeGroups`, `type DataScopeGroups`,
+  `type ArtifactMonitoring`
+- `gateway-usage.ts` (pure) — `SPEND_WINDOW_MS`, `shapeActivity`,
+  `weeklyRunSpend`, `type RawActivity`, `type Activity`, `type WeeklySpend`,
+  `type GatewayUsage`
+- `adapters/cost.ts` (`server-only`) — `collectCost`, `litellmSpendByTag`
+- `adapters/run-trace.ts` (`server-only`) — `collectRuns`, `fetchTrace`
+- `adapters/system-health.ts` (`server-only`) — `collectSystem`
+- `adapters/agent-telemetry.ts` (`server-only`) — `tenantRuns`,
+  `agentTelemetryBatch`, `agentTelemetryFor`, `type AgentRunRecord`,
+  `type AgentTelemetryResult`
+
+### Documented exceptions (deep-path, intentional)
+
+- `lib/governance/cost.ts:99` — `await import('@/lib/monitoring/adapters/cost')`
+  is a deliberate lazy import; routing it through the barrel would defeat the
+  deferral and pull the whole adapter set.
+- `lib/mcp/monitoring-tools.test.ts:9` — `mock.ts` is test fixture data with one
+  consumer; it is not part of the public surface.
+
+### Note on scope
+
+`scope.ts` is `server-only` and re-exports `scope-core.ts`'s pure predicates
+(`canSee`, `filterScope`, `assertInScope`, `deriveScope`). The barrel surfaces
+them once, through `./scope`. Do not also export them from `scope-core.ts` —
+that is a duplicate-export error.
+
 ### OPA-scoping spine (the read filter)
 Every signal carries the `owner` + `domain` it belongs to. **One** predicate,
 `canSee(scope, item)`, governs every lens, alert and trace so no lens can widen

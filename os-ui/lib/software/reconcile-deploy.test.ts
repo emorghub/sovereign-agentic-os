@@ -14,7 +14,7 @@ import {
   IMAGE_BUILDING_NOTE,
 } from './review.ts';
 import type { RunnerK8s } from './runner.ts';
-import { decide, listApprovals, __resetApprovals } from '@/lib/governance/approvals';
+import { decide, listApprovals, __resetApprovals } from '@/lib/governance';
 
 /**
  * SELF-HEAL: an app stuck in `review` whose Governance app_deploy approval was

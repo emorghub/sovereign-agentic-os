@@ -27,6 +27,13 @@ mock.module('@/lib/data/ingest', {
       LANDED = { datasetId, rows: grid.rows.length };
       return { ok: true, report: { ok: true }, dataset: { id: datasetId } };
     },
+    // Unused by this test, but importing `@/lib/assistant` now transitively
+    // reaches this module's full real surface — this mock must provide every
+    // named binding it does.
+    ingestUpload: async () => ({}),
+    ingestAndRegisterBronze: async () => ({}),
+    gridToCsv: () => '',
+    listPersonalTables: () => [],
   },
 });
 
@@ -37,6 +44,12 @@ mock.module('@/lib/assistant/complete', {
       content: JSON.stringify({ rows: [{ id: 1, name: 'Ada' }, { id: 2, name: 'Grace' }] }),
       model: 'test',
     }),
+    // Unused by this test, but the `@/lib/assistant` barrel re-exports the
+    // full complete.ts surface, so this mock must provide every named binding it does.
+    AssistantNotConfiguredError: class AssistantNotConfiguredError extends Error {},
+    CostCapExceededError: class CostCapExceededError extends Error {},
+    resolveAssistantModelId: () => 'test-model',
+    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
   },
 });
 

@@ -12,7 +12,7 @@ import ProgressStepper from '@/components/core/ProgressStepper';
 import DomainTag from '@/components/DomainTag';
 import { useToolWindow } from '@/components/ToolWindowProvider';
 import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
-import type { FiledApproval } from '@/lib/governance/approval-notice';
+import type { FiledApproval } from '@/lib/governance';
 import { roleAtLeast, type Role as SessionRole } from '@/lib/core/session';
 import StageShell from '@/components/core/StageShell';
 import BuilderModeToggle from '@/components/core/BuilderModeToggle';

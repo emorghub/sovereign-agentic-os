@@ -2,14 +2,13 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { roleModel } from '@/lib/models/roles';
+import { roleModel } from '@/lib/models';
 import { requireUser } from '@/lib/core/auth';
 import { getAppForUser, saveChat } from '@/lib/software/apps';
 import { scheduleRepairCheck } from '@/lib/software/ci-repair';
 import { getSnapshot } from '@/lib/software/snapshot';
 import { diffTrees, type FileChange } from '@/lib/software/build-changeset';
-import { runTabAgent, renderAssistantText } from '@/lib/assistant/runtime';
-import { cleanTurns } from '@/lib/assistant/turns';
+import { runTabAgent, renderAssistantText, cleanTurns } from '@/lib/assistant';
 import { buildRunError, buildMaxIterations, honestBuildFinalText } from '@/lib/software/build-run';
 import { toolCallToLine, gateLineFromStep, committedSummaryLine, type ActivityLine } from '@/lib/software/build-activity';
 import { asChatRunMode, isReadOnlyMode, modelRoleForMode, tierNote, READ_ONLY_MODE_TOOLS, BUILD_MODE_TOOLS, type ChatRunMode } from '@/lib/software/chat-modes';

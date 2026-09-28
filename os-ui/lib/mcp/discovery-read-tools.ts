@@ -60,13 +60,12 @@ import {
 import { previewCatalogIngest } from '@/lib/connections/openmetadata-ingest';
 import { WAREHOUSE_PROVIDERS } from '@/lib/connections/warehouse/registry';
 import { WAREHOUSE_PLATFORMS, type WarehousePlatform } from '@/lib/connections/warehouse/types';
-import { promoteThroughSeam } from '@/lib/governance/ladder';
-import { enqueue } from '@/lib/governance/approvals';
+import { promoteThroughSeam, enqueue } from '@/lib/governance';
 import { scaffoldCubeYaml, cubeViewName } from '@/lib/data/metrics';
 import { cubeDeliverable } from '@/lib/data/cube-models';
 import { loadGuide, isGuidePath, GUIDE_PATHS, type GuidePath } from '@/lib/tabs/guides';
 import { config } from '@/lib/core/config';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import { versionTarget } from '@/lib/data/store-fqn';
 import { builtLayerFqn } from '@/lib/data/store';
 import type { Layer } from '@/lib/data';

@@ -4,9 +4,9 @@
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import { roleAtLeast, canPromote } from '@/lib/core/session';
-import { decide, enqueue, listApprovals, recordEffect, type Approval } from '@/lib/governance/approvals';
-import { applyEffect, type EffectDeps, type EffectResult } from '@/lib/governance/effects';
-import { record as auditRecord } from '@/lib/governance/audit';
+import { decide, enqueue, listApprovals, recordEffect, type Approval } from './approvals.ts';
+import { applyEffect, type EffectDeps, type EffectResult } from './effects.ts';
+import { record as auditRecord } from './audit.ts';
 import { publishPromotionLive } from '@/lib/data/publish-server';
 import { getWorkflow } from '@/lib/knowledge';
 import { getPersonalKnowledge, decertifyPersonalKnowledge, unsharePersonalKnowledge } from '@/lib/knowledge/personal-store';

@@ -4,10 +4,8 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { getAppForUser } from '@/lib/software/apps';
-import { failResponse } from '@/lib/assistant/stage-route';
-import { parseJsonReply } from '@/lib/assistant/json-reply';
-import { assistantComplete } from '@/lib/assistant/complete';
-import { roleModel } from '@/lib/models/roles';
+import { failResponse, parseJsonReply, assistantComplete } from '@/lib/assistant';
+import { roleModel } from '@/lib/models';
 import { availableContext, type AvailableContext } from '@/lib/software/available-context';
 import { normalizeAssistantReply } from '@/lib/software/assistant-suggestions';
 import { defineContextBlock } from '@/lib/software/define-context';

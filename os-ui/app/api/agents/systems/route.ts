@@ -5,7 +5,7 @@ import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
 import { listSystems, createSystem, ensureHydrated, markPendingShares } from '@/lib/agents/store';
 import { isTemplateKey } from '@/lib/agents/templates';
-import { listApprovals } from '@/lib/governance/approvals';
+import { listApprovals } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

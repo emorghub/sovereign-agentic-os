@@ -26,6 +26,8 @@ import { useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useToast } from '@/components/core/Toast';
 import { useUser } from '@/lib/useUser';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { approvalNotice, type FiledApproval } from '@/lib/governance/approval-notice';
 import type { ToastAction } from '@/lib/core/toast';
 

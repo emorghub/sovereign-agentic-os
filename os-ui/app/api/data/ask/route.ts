@@ -2,12 +2,13 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { roleModel } from '@/lib/models/roles';
+import { roleModel } from '@/lib/models';
 import { requirePrincipal, errorResponse } from '@/lib/data/server';
 import { listAskable } from '@/lib/data/store';
 import { readPrincipalFor } from '@/lib/data/store-fqn';
-import { queryRun, trace } from '@/lib/infra/governed';
-import { liteLlmCaller } from '@/lib/assistant/runtime';
+import { trace } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
+import { liteLlmCaller } from '@/lib/assistant';
 import { runAsk, type AskMessage } from '@/lib/data/ask';
 import { appSlugFromRequest, grantedIdSet } from '@/lib/software/app-origin';
 

@@ -5,7 +5,7 @@ import 'server-only';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { config } from '@/lib/core/config';
 import { signMcpPayload } from '@/lib/mcp/token';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 
 /**
  * OS-native OAuth 2.1 Authorization Server core for the MCP endpoint — the pure,

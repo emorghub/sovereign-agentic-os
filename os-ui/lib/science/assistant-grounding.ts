@@ -6,7 +6,7 @@ import { listDatasets, getDataset, builtLayerFqn, type DatasetSummary, type Prin
 import { LAYERS } from '@/lib/data/dataset-schema';
 import { parseDescribe, previewSql, classifyType, type ProfileColumn } from '@/lib/data/profile';
 import { slug } from '@/lib/data/store-fqn';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import { inferTaskFromTarget, type TargetProfile, type InferredTask } from '@/lib/science/infer-task';
 
 /**

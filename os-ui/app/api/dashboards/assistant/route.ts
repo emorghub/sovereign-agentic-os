@@ -3,7 +3,7 @@
  */
 import { NextResponse } from 'next/server';
 import { requireUser, type CurrentUser } from '@/lib/core/auth';
-import { failResponse, runStageAssistant } from '@/lib/assistant/stage-route';
+import { failResponse, runStageAssistant } from '@/lib/assistant';
 import { listMetrics } from '@/lib/metrics/store';
 import { narrowCubeMeta, type RegistryViewDims } from '@/lib/dashboards/cube-meta';
 import { listDatasets, getDataset } from '@/lib/data/store';

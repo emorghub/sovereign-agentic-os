@@ -12,7 +12,7 @@ import { listPersonalKnowledge } from '@/lib/knowledge/personal-store';
 import { listFiles, ensureHydrated as ensureFilesHydrated } from '@/lib/files/store';
 import { listMetrics } from '@/lib/metrics/store';
 import { listConnectionsForUser } from '@/lib/connections';
-import { recentTraces } from '@/lib/infra/agent-governed';
+import { recentTraces } from '@/lib/infra';
 import { lineageFor } from '@/lib/data/lineage';
 import { latestRun, healthTrend, ensureHydrated as ensureDqHydrated } from '@/lib/data/dq-results';
 import { agentTelemetryFor, type AgentRunRecord } from './adapters/agent-telemetry';

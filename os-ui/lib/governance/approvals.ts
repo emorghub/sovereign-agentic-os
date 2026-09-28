@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 
 /**
  * The Governance approval queue (golden path §6.5, §7). When a governed tool call

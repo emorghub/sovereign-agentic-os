@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import type { Connection } from '@/lib/connections/schema';
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 
 /**
  * Azure AI Foundry / Azure AI (Azure ML) client — the per-connection bridge to a

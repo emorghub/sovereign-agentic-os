@@ -4,8 +4,8 @@
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import type { Connection } from '@/lib/connections/schema';
-import { osMirror } from '@/lib/infra/os-mirror';
-import { queryRun } from '@/lib/infra/governed';
+import { osMirror } from '@/lib/infra';
+import { queryRun } from '@/lib/infra';
 import { discoverWarehouse, getConnectionForUser } from '@/lib/connections/store';
 import { providerFor } from '@/lib/connections/warehouse/registry';
 import { toWarehouseSource } from '@/lib/connections/warehouse/connection';

@@ -12,34 +12,24 @@ application logic.
 
 ## Public API
 
-### `context-windows.ts`
+Import via `@/lib/models` (the barrel). Isomorphic — safe from any layer.
 
-The single source of truth for context-window sizes.
+**`roles.ts`** — model-role resolution
+- `roleDefault(role)`, `roleModel(role)`, `roleModels()`
+- `standardFirstEscalationEnabled()`
+- `MOCK_MODEL`, `type ModelRole`
 
-- **`DEFAULT_MODEL_CONTEXTS`** — built-in window/reserved-output pairs for every
-  known model alias. Conservative fallback via `UNKNOWN_MODEL_CONTEXT` (32 k / 2 k).
-- **`parseOverrides(raw)`** — deserialises the `MODEL_CONTEXT_WINDOWS` env-var (JSON
-  map of `modelId → { contextWindow, reservedOutput }`). Malformed entries are skipped
-  with a warning; valid entries override defaults without a rebuild.
-- **`modelContext(modelName, overrides?)`** — looks up the effective `ModelContext`
-  for a given alias (env overrides win; fallback to built-in; fallback to unknown).
-- **`inputBudget(modelName, overrides?)`** — `contextWindow − reservedOutput − safetyHeadroom`.
-  Called by `lib/assistant` and the agent harness before every LLM call to prevent
-  `ContextWindowExceededError`.
-- **`safetyHeadroom(contextWindow)`** — internal headroom calculation (exposed for tests).
+**`context-windows.ts`** — context budgets
+- `DEFAULT_MODEL_CONTEXTS`, `UNKNOWN_MODEL_CONTEXT`
+- `parseOverrides(raw)`, `modelContext(model, overrides?)`, `inputBudget(model, overrides?)`
+- `type ModelContext`
 
-### `roles.ts`
+Internal (not in the barrel):
+- `safetyHeadroom(contextWindow)` — imported by `context-windows.test.ts` only
 
-Pure role-to-alias resolver. No network I/O.
-
-- **`ModelRole`** type — `'reasoning' | 'standard' | 'tools' | 'embeddings'`
-- **`roleDefault(role)`** — returns the compile-time default alias for a role.
-- **`roleModel(role)`** — reads the matching `*_MODEL` env var; falls back to
-  `roleDefault`. This is the function the rest of the platform calls.
-- **`roleModels()`** — returns a `Record<ModelRole, string>` snapshot of all four
-  current aliases (used by the Admin model-settings panel).
-- **`MOCK_MODEL`** — sentinel alias (`'sovereign-mock'`) used in tests to skip live
-  LLM calls.
+Documented exception:
+- `software/ask-app-origin-route.test.ts:79` intercepts `@/lib/models/roles`
+  via `mock.module()`; the deep path is required for the mock to bind.
 
 Both files are unit-tested in `context-windows.test.ts` and `roles.test.ts`.
 

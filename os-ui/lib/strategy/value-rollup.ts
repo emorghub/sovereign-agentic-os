@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import { cubeScalar } from '@/lib/infra/governed';
+import { cubeScalar } from '@/lib/infra';
 import {
   type Pillar,
   type MetricLink,

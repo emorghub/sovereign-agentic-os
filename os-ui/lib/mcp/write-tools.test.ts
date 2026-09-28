@@ -13,7 +13,7 @@ import { __resetBlobs, getBlob } from '@/lib/files/object-store';
 import { __resetDashboards } from '@/lib/dashboards/store';
 import { __resetBets } from '@/lib/bigbets/store';
 import { __resetStore as resetAgents } from '@/lib/agents/store';
-import { __resetApprovals } from '@/lib/governance/approvals';
+import { __resetApprovals } from '@/lib/governance';
 import { __resetForTests as resetPillars } from '@/lib/strategy/pillars';
 
 /**

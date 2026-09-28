@@ -22,6 +22,37 @@ mock.module('@/lib/knowledge/store', {
       throw new Error(`workflow ${id} not found`);
     },
     ensureHydrated: async () => {},
+    // Unused by this test, but `@/lib/connections/store` now imports the
+    // `@/lib/governance` barrel (which re-exports effects.ts, a consumer of
+    // this module's full surface) — this mock must provide every named
+    // binding knowledge/store.ts does.
+    sha: () => '',
+    __resetStore: () => {},
+    moveWorkflowsDomain: () => [],
+    listWorkflows: () => [],
+    createWorkflow: () => ({}),
+    reassignOwner: () => 0,
+    updateWorkflow: () => ({}),
+    renameKnowledge: () => ({}),
+    moveWorkflow: () => ({}),
+    deleteWorkflow: () => ({}),
+    publishWorkflow: () => ({}),
+    certifyWorkflow: () => ({}),
+    getDomainKnowledge: () => ({}),
+    updateDomainKnowledge: () => ({}),
+    listDomainKnowledgeVersions: () => [],
+    restoreDomainKnowledgeVersion: () => ({}),
+    getManual: () => ({}),
+    updateManual: () => ({}),
+    listManualVersions: () => [],
+    restoreManualVersion: () => ({}),
+    getTacit: () => ({}),
+    updateTacit: () => ({}),
+    setWorkflowLinks: () => ({}),
+    archiveWorkflow: () => ({}),
+    unarchiveWorkflow: () => ({}),
+    listWorkflowVersions: () => [],
+    restoreWorkflowVersion: () => ({}),
   },
 });
 // Personal store: the mis-prefixed `wf_legacy` id lives HERE.
@@ -32,6 +63,25 @@ mock.module('@/lib/knowledge/personal-store', {
       throw new Error(`personal ${id} not found`);
     },
     ensureHydrated: async () => {},
+    // Unused by this test, but `@/lib/connections/store` now imports the
+    // `@/lib/governance` barrel (which re-exports effects.ts, a consumer of
+    // this module's full surface) — this mock must provide every named
+    // binding personal-store.ts does.
+    __resetStore: () => {},
+    movePersonalKnowledgeDomain: () => [],
+    listPersonalKnowledge: () => [],
+    createPersonalKnowledge: () => ({}),
+    moveKnowledge: () => ({}),
+    updatePersonalKnowledge: () => ({}),
+    deletePersonalKnowledge: () => ({}),
+    archivePersonalKnowledge: () => ({}),
+    unarchivePersonalKnowledge: () => ({}),
+    listPersonalKnowledgeVersions: () => [],
+    restorePersonalKnowledgeVersion: () => ({}),
+    promotePersonalKnowledge: () => ({}),
+    certifyPersonalKnowledge: () => ({}),
+    decertifyPersonalKnowledge: () => ({}),
+    unsharePersonalKnowledge: () => ({}),
   },
 });
 // data/files/metrics/connections stores are NOT mocked — their real modules load
