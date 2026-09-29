@@ -94,8 +94,8 @@ The OS UI uses a self-hosted identity store with the following guarantees:
 
 ## Scope notes
 
-- **Secrets are external** to this repository by design (see `README.md` →
-  Conventions). Reporting that a committed example value is a placeholder is not a
+- **Secrets are external** to this repository by design (see `CONTRIBUTING.md`).
+  Reporting that a committed example value is a placeholder is not a
   vulnerability — but if you find a *real* leaked secret, report it privately and
   urgently.
 - Vulnerabilities in **bundled third-party components** (see
