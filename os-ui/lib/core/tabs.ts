@@ -146,11 +146,14 @@ const BASE_FEATURES = [
   'tutorials',
 ];
 
-export const TAB_FEATURES: Set<string> = (() => {
-  const raw = process.env.OS_ENABLED_TABS;
+/** Pure computation, exported so tests can check the unset/base-8 default
+ *  without depending on the real process.env (which test-setup.mjs sets). */
+export function computeTabFeatures(raw: string | undefined): Set<string> {
   if (!raw || raw.trim() === '') return new Set(BASE_FEATURES);
   return new Set(raw.split(',').map((s) => s.trim()).filter(Boolean));
-})();
+}
+
+export const TAB_FEATURES: Set<string> = computeTabFeatures(process.env.OS_ENABLED_TABS);
 
 // Flat list (kept for any consumer that just wants every tab in order).
 export const TABS: Tab[] = TAB_GROUPS.flatMap((g) => g.tabs);

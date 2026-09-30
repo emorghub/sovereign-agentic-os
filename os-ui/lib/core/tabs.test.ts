@@ -18,7 +18,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TAB_GROUPS, TAB_FEATURES, tabVisible, filterTabGroups } from './tabs.ts';
+import { TAB_GROUPS, TAB_FEATURES, computeTabFeatures, tabVisible, filterTabGroups } from './tabs.ts';
 import type { Role } from './session.ts';
 
 // Flat label list for a given role after filtering.
@@ -366,16 +366,20 @@ test('TAB-FEATURE every tab has a feature key', () => {
 });
 
 test('TAB-FEATURE default (OS_ENABLED_TABS unset) is exactly the base-8 tab set', () => {
-  assert.equal(process.env.OS_ENABLED_TABS, undefined, 'this test assumes OS_ENABLED_TABS is not set in the test env');
+  // computeTabFeatures(undefined) simulates the unset case directly — the real
+  // process.env.OS_ENABLED_TABS is set broadly by test-setup.mjs (#28), so
+  // TAB_FEATURES itself no longer reflects "unset" in this process.
+  const unset = computeTabFeatures(undefined);
   const expected = ['home', 'about', 'agents', 'monitoring', 'llm-gateway', 'mcp', 'governance', 'tutorials'];
-  assert.deepEqual([...TAB_FEATURES].sort(), expected.sort());
+  assert.deepEqual([...unset].sort(), expected.sort());
 });
 
 test('TAB-FEATURE tabVisible hides a tab whose feature is not enabled, for every role', () => {
   const data = CONTEXT_GROUP.tabs.find((t) => t.label === 'Data')!;
-  assert.equal(TAB_FEATURES.has(data.feature!), false, 'this test assumes "data" is not in the default base set');
+  const unset = computeTabFeatures(undefined);
+  assert.equal(unset.has(data.feature!), false, 'this test assumes "data" is not in the default base set');
   for (const role of ['creator', 'builder', 'domain_admin', 'admin', null, undefined] as (Role | null | undefined)[]) {
-    assert.equal(tabVisible(data, role), false, `${role} must not see Data when its feature is disabled`);
+    assert.equal(tabVisible(data, role, undefined, unset), false, `${role} must not see Data when its feature is disabled`);
   }
 });
 
