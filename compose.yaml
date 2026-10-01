@@ -91,6 +91,8 @@ services:
         condition: service_healthy
       mock-model:
         condition: service_healthy
+      query-tool:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -307,6 +309,28 @@ services:
       forgejo-http:
         condition: service_healthy
 
+  # Generic MCP-over-HTTP path (litellm.proxy_config.mcp_servers.sovereign_query).
+  # No Trino/lakehouse in the base stack - query-tool's own /health and MCP
+  # tools answer, but a real query returns a "no catalog configured" error
+  # (see images/query-tool/app.py) rather than hanging or crashing.
+  query-tool:
+    build:
+      context: ./images/query-tool
+    environment:
+      PORT: "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
   # Langfuse's analytics store.
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
@@ -353,7 +377,12 @@ services:
 
   # Langfuse's S3-compatible blob store.
   minio:
-    image: minio/minio@sha256:8834ae47a2de3509b83e0e70da9369c24bbbc22de42f2a2eddc530eee88acd1b
+    # minio/minio was pulled from Docker Hub (MinIO discontinued Docker Hub/Quay
+    # publishing, Oct 2025). quay.io/minio/aistor/minio (the Helm chart's #30/PR #48
+    # fix) is the new commercial AIStor image - runs, but denies all S3 ops without
+    # a paid license. Chainguard's free, source-built community image instead -
+    # the "-dev" variant, since "latest" has no wget/curl for the healthcheck below.
+    image: cgr.dev/chainguard/minio:latest-dev
     profiles: ["langfuse-local"]
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
@@ -362,7 +391,7 @@ services:
     volumes:
       - minio-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/ready"]
       interval: 5s
       timeout: 5s
       retries: 20
