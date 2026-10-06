@@ -4,6 +4,10 @@
 # CI — runs on pull requests targeting `main`. The job ids below (build,
 # helm-lint, secret-scan) are STABLE and are wired as required status checks in
 # the branch ruleset. Actions are pinned to commit SHAs.
+#
+# `e2e` (#32) is intentionally NOT in that required-checks list yet — it spins
+# the full compose base stack, which is heavier/slower and new. Runs on every
+# PR so it builds a track record; promote it to required once stable.
 name: ci
 
 on:
@@ -121,3 +125,43 @@ jobs:
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Base end-to-end smoke test (#32) — the automated version of #29's manual
+  # verification. Spins the real compose base stack and asserts the Phase 3.4
+  # flows against it for real (agent build+run both paths, an MCP tool call
+  # through LiteLLM, a Langfuse trace read-back, a LiteLLM chat completion).
+  # Not in the required-checks list yet — see the file header.
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Setup Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 20
+      - name: Configure environment
+        run: cp .env.example .env
+      - name: Start the base compose stack
+        run: docker compose up -d --build
+      - name: Wait for every service to be healthy
+        run: |
+          for i in $(seq 1 60); do
+            total=$(docker compose ps --format '{{.Name}}' | wc -l)
+            healthy=$(docker compose ps --format '{{.Health}}' | grep -c '^healthy$' || true)
+            echo "healthy: $healthy/$total"
+            [ "$healthy" -eq "$total" ] && exit 0
+            sleep 5
+          done
+          docker compose ps
+          echo "Stack did not become healthy in time" >&2
+          exit 1
+      - name: Run base e2e smoke test
+        run: node --env-file=.env --test test/e2e/base/base.e2e.test.mjs
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
