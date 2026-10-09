@@ -43,7 +43,7 @@ mock.module('@/lib/core/auth', {
 // The agents store is REAL (many transitive importers depend on its full export surface);
 // we seed a system into it and read it back to assert whether a write happened. Imported
 // AFTER the auth mock so the route + store share one module instance.
-const store = await import('../../../../../../lib/agents/store.ts');
+const store = await import('./store.ts');
 
 // Grounding + grantable resolvers — hermetic, return a tiny granted set.
 mock.module('@/lib/agents/grounding', {
@@ -73,7 +73,7 @@ mock.module('@/lib/assistant/complete', {
   },
 });
 
-const { POST } = await import('./route.ts');
+const { POST } = await import('../../app/api/agents/systems/[id]/assistant/route.ts');
 
 type Body = {
   summary?: string;

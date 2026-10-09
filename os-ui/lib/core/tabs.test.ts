@@ -403,3 +403,8 @@ test('TAB-FEATURE filterTabGroups: with default OS_ENABLED_TABS, admin sees only
     assert.ok(TAB_FEATURES.has(tab.feature!), `"${tab.label}" visible to admin but its feature "${tab.feature}" is not in the default base set`);
   }
 });
+
+test('TAB-FEATURE computeTabFeatures trims entries and drops blanks; whitespace-only → base default', () => {
+  assert.deepEqual([...computeTabFeatures('agents, ,data ,,')].sort(), ['agents', 'data']);
+  assert.deepEqual(computeTabFeatures('   '), computeTabFeatures(undefined));
+});

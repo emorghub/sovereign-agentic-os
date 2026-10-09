@@ -1,0 +1,8 @@
+{
+  "_ratchet": "Line-coverage floors (%) per module, checked by scripts/coverage-floor.mjs. Raise these when coverage rises; never lower them.",
+  "lib/agents": 94,
+  "lib/assistant": 97,
+  "lib/infra": 90,
+  "lib/mcp": 94,
+  "lib/monitoring": 86
+}

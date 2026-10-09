@@ -10,3 +10,5 @@ next-env.d.ts
 .env*.local
 .DS_Store
 npm-debug.log*
+# Coverage output (npm run test:coverage)
+/coverage
