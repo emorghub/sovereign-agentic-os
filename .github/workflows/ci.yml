@@ -27,11 +27,24 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: 20
+          # 22, not 20: the suite needs --experimental-test-module-mocks (22.3+),
+          # `--test` globs and built-in TypeScript type stripping.
+          node-version: 22
       - name: Install (os-ui)
         run: npm --prefix os-ui ci
-      - name: Test (os-ui)
-        run: npm --prefix os-ui test
+      - name: Test + coverage (os-ui)
+        run: npm --prefix os-ui run test:coverage
+      # Per-module line-coverage floors (os-ui/coverage-floors.json); the table is
+      # published to the job summary.
+      - name: Coverage floors (os-ui)
+        run: npm --prefix os-ui run coverage:floor
+      - name: Upload coverage report (os-ui)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: os-ui-coverage
+          path: os-ui/coverage/lcov.info
+          if-no-files-found: warn
 
   build:
     name: build
