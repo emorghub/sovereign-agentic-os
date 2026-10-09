@@ -23,7 +23,7 @@ where commercial, license-gated modules will live if/when they ship.
   root Apache-2.0 license does not extend into this directory.
 - No EE/proprietary source is committed until the commercial license and license-key
   gating are in place. Until then this file is the only content.
-- Community contributions are accepted into the Apache-2.0 **core** under the DCO (see
+- Community contributions are accepted into the Apache-2.0 **core** under the CLA (see
   `CONTRIBUTING.md`), **not** into `ee/`.
 
 _Not legal advice — the commercial license + key mechanism will be set up with counsel

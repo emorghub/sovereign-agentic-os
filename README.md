@@ -335,7 +335,7 @@ orchestrates (dbt-as-assets is the next wiring). `Haystack` + `Docling` feed the
 - **Enterprise Edition.** Any future Enterprise features ship under [`ee/`](ee/) with their
   **own commercial license** (separate from Apache-2.0), gated behind a license key — see
   [`ee/README.md`](ee/README.md). The free core stays complete and open.
-- **Contributing.** Contributions are accepted into the Apache-2.0 core under a DCO
-  sign-off (`git commit -s`) — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- **Contributing.** Contributions are accepted into the Apache-2.0 core under the
+  project CLA — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 > Not legal advice — counsel should review before the public launch.

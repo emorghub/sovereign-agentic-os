@@ -11,6 +11,38 @@
  * so credentials/keys never reach the browser.
  */
 
+/**
+ * About the `dev-only-insecure-*` / `*-local-dev` default values below.
+ *
+ * Several `env()` fallbacks in this file are deliberate THROWAWAYS — they exist so
+ * `profile: local` (the self-contained kind demo) boots with no configuration at
+ * all. They are not production credentials, and they are public on purpose: the
+ * local stack must survive a `helm upgrade` without rotating, or already-encrypted
+ * local data would be orphaned.
+ *
+ * On a real deploy the chart replaces them from Kubernetes Secrets, e.g.
+ *   OS_SESSION_SECRET     <- Secret os-ui-session      (templates/os-ui/os-ui.yaml)
+ *   AGENT_RUNTIME_TOKEN   <- Secret agent-runtime-token
+ *   LITELLM_MASTER_KEY    <- Secret litellm-credentials
+ *   FORGEJO_PASSWORD      <- Secret forgejo-admin
+ *   TERMINAL_BROKER_SECRET<- Secret terminal-broker
+ *
+ * Three caveats, so nobody reads this block as a blanket guarantee:
+ *
+ *  1. `LANGFUSE_SSO_PASSWORD` / `LANGFUSE_SSO_EMAIL` are NOT set by any chart
+ *     template. Their in-code defaults are what actually run, everywhere.
+ *  2. The production boot guard (`assertNoDevDefaultSecretsInProd`, below) covers
+ *     ONLY `OS_SESSION_SECRET` and `OS_MCP_TOKEN_SECRET`. Every other default here
+ *     will boot silently in production if left unset.
+ *  3. `.gitleaks.toml` allowlists only SOME of these literals. As of writing,
+ *     `dev-only-insecure-*`, `sk-lf-localdev0000secret` and `langfuse-local-dev-admin`
+ *     match no allowlist entry — the broader patterns that used to cover them were
+ *     dropped when `.gitleaks.toml` was rewritten (2a5d1c5f, 2026-07-14).
+ *
+ * If you add another throwaway default: give it a `dev-only-insecure-` prefix, wire
+ * the real value through a Secret in the chart, and add it to the boot guard.
+ */
+
 function env(name: string, fallback: string): string {
   const v = process.env[name];
   return v && v.length > 0 ? v : fallback;
