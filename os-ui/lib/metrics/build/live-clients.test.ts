@@ -22,8 +22,11 @@ mock.module('@/lib/core/config', {
 
 // Toggle the failure the governed helpers raise per test.
 let cubeError: Error | null = null;
+const realGoverned = await import('@/lib/infra/governed');
+
 mock.module('@/lib/infra/governed', {
   namedExports: {
+    ...realGoverned,
     cubeScalar: async () => {
       if (cubeError) throw cubeError;
       return 42;
@@ -32,13 +35,8 @@ mock.module('@/lib/infra/governed', {
       if (cubeError) throw cubeError;
       return { rows: [{ 'View.m': 7 }], annotation: {} };
     },
-    // Unused by this test, but the `@/lib/infra` barrel re-exports the full
-    // governed.ts surface, so this mock must provide every named binding.
     authorize: async () => ({ allowed: true, policy: 'opa-allow' }),
-    trace: async () => true,
     scrubSecurityContext: (ctx: unknown) => ctx,
-    __setCubeMetaForTest: () => {},
-    cubeMeta: async () => [],
     queryRun: async () => ({ engine: 'trino', tables: [], columns: [], rows: [], rowCount: 0 }),
     executeRun: async () => ({ ok: true, rowsAffected: null }),
     SALES: {},

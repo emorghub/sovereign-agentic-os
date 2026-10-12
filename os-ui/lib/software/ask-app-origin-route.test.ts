@@ -42,85 +42,63 @@ mock.module('@/lib/core/auth', {
   },
 });
 
+const realStoreFqn = await import('@/lib/data/store-fqn');
+
+// store-fqn and models/roles are mocked FIRST: the real data/store imports store-fqn,
+// and the real assistant/runtime reaches roles through the @/lib/models barrel. Loading
+// either for its spread before these are mocked would bind the real modules.
+mock.module('@/lib/data/store-fqn', {
+  namedExports: {
+    ...realStoreFqn,
+    readPrincipalFor: (_sql: string, u: { id: string }) => u.id,
+    slug: (name: string) => name,
+    physicalSlug: (d: { slug?: string; name: string }) => d.slug ?? d.name,
+    sanitizeIdent: (value: string) => value,
+    personalSchema: (principal: string) => principal,
+    domainSchema: (domain: string) => domain,
+    bronzeTarget: (schema: string, nameOrSlug: string) => `${schema}.${nameOrSlug}`,
+  },
+});
+
+const realRoles = await import('@/lib/models/roles');
+
+mock.module('@/lib/models/roles', {
+  namedExports: {
+    ...realRoles,
+    roleModel: () => 'test-model',
+    standardFirstEscalationEnabled: () => false,
+    roleDefault: () => 'test-model',
+    roleModels: () => ({ reasoning: 'test-model', standard: 'test-model', tools: 'test-model', embeddings: 'test-model' }),
+    MOCK_MODEL: 'test-model',
+  },
+});
+
 // The FULL canView-scoped set the session user can see: a granted dataset + an ungranted
 // one. `ensureHydrated` is what requirePrincipal awaits — a no-op here.
 const ALL_ASKABLE = [
   { id: 'ds_zpco1s6n7y', name: 'Northpeak Products', domain: 'sales', tier: 'dataset', fqn: 'iceberg.personal_own.gold_products', description: '', columns: [] },
   { id: 'ds_other', name: 'Other Dataset', domain: 'sales', tier: 'dataset', fqn: 'iceberg.personal_own.gold_other', description: '', columns: [] },
 ];
+const realDataStore = await import('@/lib/data/store');
+
 mock.module('@/lib/data/store', {
   namedExports: {
+    ...realDataStore,
     ensureHydrated: async () => {},
     listAskable: () => ALL_ASKABLE,
-    // Unused by this test, but importing `@/lib/assistant` now transitively
-    // reaches the FULL real surface of this module (via lib/files/store.ts's
-    // `@/lib/data` barrel import and the MCP write-tools' governance/promotion
-    // chains) — this mock must provide every named binding it does.
-    __resetStore: () => {},
-    __seedDatasetForTest: () => ({}),
-    moveDatasetsDomain: () => [],
     listDatasets: () => ({ personal: [], shared: [], certified: [] }),
-    getDataset: () => ({}),
-    peekDatasetMeta: () => null,
-    peekDatasetTier: () => null,
-    peekDatasetColumns: () => null,
-    peekDatasetMeasureNames: () => null,
-    isDatasetArchived: () => false,
-    requireDatasetEditable: () => ({}),
-    builtLayerFqn: () => '',
-    listGovernedDatasets: () => [],
-    listAllDatasets: () => [],
-    datasetForScheduler: () => null,
-    datasetsWithSync: () => [],
-    listJoinable: () => [],
-    createDataset: () => ({}),
-    adoptConnectedDataset: () => ({}),
-    markDatasetsSourceRevoked: () => [],
-    markDatasetsDrifted: () => ({}),
-    reassignOwner: () => 0,
-    buildVersion: () => ({}),
-    buildGoldJoin: () => ({}),
-    setDocs: () => ({}),
-    renameDataset: () => ({}),
-    moveDataset: () => ({}),
-    addCheck: () => ({}),
-    removeCheck: () => ({}),
-    updateCheckDescriptions: () => ({}),
-    setMonitor: () => ({}),
-    setDatasetSync: () => ({}),
-    defineMeasure: () => ({}),
-    removeMeasure: () => ({}),
-    setMeasureLabel: () => ({}),
-    transition: () => ({}),
-    requestPromotion: () => ({}),
-    validatePromotion: () => ({}),
-    assertPromoteTargetFree: () => ({}),
-    assertGrantsWithinAuthority: () => {},
-    applyApprovedPromotion: () => ({}),
-    requireDomainTableMaterialized: async () => {},
-    verifyPromotedMaterialization: async () => {},
-    clearDomainTableStale: () => ({}),
-    certify: () => ({}),
-    requestCertification: () => ({}),
-    applyApprovedCertification: () => ({}),
-    importProduct: () => ({}),
-    listImported: () => [],
-    archiveDataset: () => ({}),
-    unarchiveDataset: () => ({}),
-    deleteDataset: () => ({}),
-    listDatasetVersions: () => [],
-    restoreDatasetVersion: () => ({}),
     listFiles: () => ({ files: [], dataset: {} }),
-    readFile: () => ({}),
-    writeFile: () => ({}),
   },
 });
 
 // Capture the datasets runAsk actually receives — that IS the model's prompt context AND
 // the only tables the generated SQL can target. Returns a benign no_dataset outcome.
 let seenDatasetIds: string[] | null = null;
+const realAsk = await import('@/lib/data/ask');
+
 mock.module('@/lib/data/ask', {
   namedExports: {
+    ...realAsk,
     runAsk: async (input: { datasets: { id: string }[] }) => {
       seenDatasetIds = input.datasets.map((d) => d.id);
       return { ok: false, kind: 'no_dataset', message: 'none' };
@@ -128,70 +106,32 @@ mock.module('@/lib/data/ask', {
   },
 });
 
+const realRuntime = await import('@/lib/assistant/runtime');
+
 mock.module('@/lib/assistant/runtime', {
   namedExports: {
+    ...realRuntime,
     liteLlmCaller: () => async () => ({ content: '' }),
-    // Unused by this test, but the `@/lib/assistant` barrel re-exports the
-    // full runtime.ts surface, so this mock must provide every named binding it does.
-    tabToolSpecs: () => [],
     tabToolExecutor: () => async () => ({ text: '', isError: false }),
     bindToolArgs: (executor: unknown) => executor,
     boundExecutor: (executor: unknown) => executor,
-    parseLlmUsage: () => undefined,
     stripHarmonyTokens: (s: string) => s,
-    parseHarmonyToolCall: () => null,
     parseLlmMessage: () => ({ content: '' }),
     runTabAgent: async () => ({ steps: [], finalText: '' }),
-    renderAssistantText: () => '',
   },
 });
+const realGoverned = await import('@/lib/infra/governed');
+
 mock.module('@/lib/infra/governed', {
   namedExports: {
+    ...realGoverned,
     queryRun: async () => ({ columns: [], rows: [], rowCount: 0 }),
     trace: async () => ({ ok: true }),
-    // Unused by this test, but importing `@/lib/assistant` now transitively
-    // reaches this module's full real surface — this mock must provide every
-    // named binding it does.
     authorize: async () => ({ ok: true }),
     scrubSecurityContext: (x: unknown) => x,
-    __setCubeMetaForTest: () => {},
-    cubeMeta: async () => ({}),
-    cubeLoad: async () => ({}),
-    cubeScalar: async () => 0,
-    executeRun: async () => ({}),
     SALES: {},
   },
 });
-mock.module('@/lib/models/roles', {
-  namedExports: {
-    roleModel: () => 'test-model',
-    standardFirstEscalationEnabled: () => false,
-    // Unused by this test, but the `@/lib/models` barrel re-exports the full
-    // roles.ts surface, so this mock must provide every named binding it does.
-    roleDefault: () => 'test-model',
-    roleModels: () => ({ reasoning: 'test-model', standard: 'test-model', tools: 'test-model', embeddings: 'test-model' }),
-    MOCK_MODEL: 'test-model',
-  },
-});
-mock.module('@/lib/data/store-fqn', {
-  namedExports: {
-    readPrincipalFor: (_sql: string, u: { id: string }) => u.id,
-    // Unused by this test, but importing `@/lib/assistant` now transitively
-    // reaches `lib/data/metrics.ts`, which imports the full store-fqn.ts
-    // surface — this mock must provide every named binding it does.
-    slug: (name: string) => name,
-    physicalSlug: (d: { slug?: string; name: string }) => d.slug ?? d.name,
-    sanitizeIdent: (value: string) => value,
-    personalSchema: (principal: string) => principal,
-    domainSchema: (domain: string) => domain,
-    bronzeTarget: (schema: string, nameOrSlug: string) => `${schema}.${nameOrSlug}`,
-    assetTarget: () => '',
-    reuseSourceFqn: () => '',
-    productTarget: () => '',
-    versionTarget: () => '',
-  },
-});
-
 const { createApp, writeThroughApp, __resetAppsCache } = await import('./apps.ts');
 
 beforeEach(() => {

@@ -34,120 +34,80 @@ mock.module('@/lib/core/auth', {
   },
 });
 
+const realComplete = await import('@/lib/assistant/complete');
+
+// Mocked FIRST: the route and catalog-classification both import the `@/lib/assistant`
+// barrel. Any real import below that reaches the barrel would freeze it to the real
+// complete.ts, and a later mock on the deep path could not undo that.
+mock.module('@/lib/assistant/complete', {
+  namedExports: {
+    ...realComplete,
+    assistantComplete: async () => {
+      if (MODEL_THROW) throw MODEL_THROW;
+      return { content: MODEL_REPLY, model: 'test-model' };
+    },
+    resolveAssistantModelId: () => 'test-model',
+    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
+  },
+});
+
+const realConnStore = await import('@/lib/connections/store');
+
 mock.module('@/lib/connections/store', {
   namedExports: {
+    ...realConnStore,
     getConnectionForUser: async () => ({ id: 'conn_1', template: 'warehouse', warehouse: { catalog: 'glue' }, endpoint: 'glue' }),
-    // Unused by this test, but importing `@/lib/assistant` now transitively
-    // reaches this module's full real surface — this mock must provide every
-    // named binding it does.
-    moveConnectionsDomain: () => [],
-    listConnectionsForUser: () => [],
-    listConnectionsSync: () => [],
-    getConnectionById: () => null,
-    listWarehouseConnections: () => [],
-    listSnapshotableConnections: () => [],
-    sanitizeWorkdayReports: () => {},
-    createConnection: async () => ({}),
-    updateCapabilities: async () => ({}),
-    testConnection: async () => ({}),
-    warehouseRegistration: () => ({}),
-    discoverWarehouse: async () => ({}),
-    registerWarehouseCatalog: async () => ({}),
-    importWarehouseTable: async () => ({}),
-    promoteConnection: async () => ({}),
-    demoteConnection: async () => ({}),
-    grantToAgent: async () => ({}),
-    callConnectionTool: async () => ({}),
-    enableDataUsage: async () => ({}),
-    approveOnce: async () => ({}),
-    approveAndRemember: async () => ({}),
-    storeConnectionTokens: async () => {},
-    resolveConnectionAccessToken: async () => null,
-    storeNotionConnection: async () => ({}),
-    getNotionClientReg: () => null,
-    verifyNotionConnection: async () => ({}),
-    renameConnection: async () => ({}),
-    rotateConnectionCredential: async () => ({}),
-    moveConnection: async () => ({}),
-    setConnectionArchivedSync: () => ({}),
-    deleteConnectionSync: () => {},
-    setConnectionArchived: async () => ({}),
-    listConnectionVersions: () => [],
-    restoreConnectionVersion: async () => ({}),
-    deleteConnection: async () => ({}),
-    __resetConnections: () => {},
   },
 });
 
 // The REAL grounding: two snapshot tables, one seeded taxonomy, two domains, no sets.
+const realSnapshot = await import('@/lib/connections/warehouse/catalog-snapshot');
+
 mock.module('@/lib/connections/warehouse/catalog-snapshot', {
   namedExports: {
+    ...realSnapshot,
     getCatalogSnapshot: async () => ({
       connectionId: 'conn_1', catalog: 'glue', status: 'stale', takenAt: '2026-08-05T00:00:00Z',
       tables: [{ schema: 'sales', table: 'orders' }, { schema: 'sales', table: 'customers' }],
       prevDiff: { added: [], removed: [] }, detail: '',
     }),
-    // Unused by this test, but importing `@/lib/assistant` now transitively
-    // reaches this module's full real surface — this mock must provide every
-    // named binding it does.
-    refreshCatalogSnapshot: async () => ({}),
-    refreshCatalogSnapshotService: async () => ({}),
-    describeTable: async () => ({}),
-    describeEntity: async () => ({}),
-    countEntity: async () => 0,
-    __resetCatalogSnapshots: () => {},
   },
 });
+const realClassif = await import('@/lib/connections/warehouse/catalog-classification');
+
 mock.module('@/lib/connections/warehouse/catalog-classification', {
   namedExports: {
+    ...realClassif,
     getMergedClassification: async () => ({
       taxonomy: [{ id: 'orders', name: 'Orders' }, { id: 'unsorted', name: 'Unsorted' }],
       seed: 'starter',
       placements: { 'sales.orders': { category: 'orders', source: 'ai' }, 'sales.customers': { category: 'unsorted', source: 'unsorted' } },
       lastRunDetail: '1 classified, 1 unsorted.',
     }),
-    // Unused by this test, but importing `@/lib/assistant` now transitively
-    // reaches this module's full real surface — this mock must provide every
-    // named binding it does.
     CONFIDENCE_THRESHOLD: 0.7,
     BATCH_SIZE: 100,
     CONCURRENCY: 2,
     PASS2_DESCRIBE_CAP: 50,
     UNSORTED: 'unsorted',
     STARTER_TAXONOMY: [],
-    hasMeaningfulSchemas: () => false,
-    taxonomyForSeed: () => [],
     smartDefaultSeed: () => 'starter',
-    mergedPlacement: () => ({}),
-    setSeed: async () => ({}),
-    patchTaxonomy: async () => ({}),
-    overridePlacement: async () => ({}),
     chunk: <T,>(arr: T[]) => [arr],
-    validateBatch: () => ({}),
-    runClassification: async () => ({}),
-    describeRun: () => '',
-    __resetCatalogClassifications: () => {},
   },
 });
+const realExposures = await import('@/lib/connections/exposures');
+
 mock.module('@/lib/connections/exposures', {
   namedExports: {
+    ...realExposures,
     listExposureSets: async () => [],
     entityActionKey: (e: string) => String(e ?? '').trim().toLowerCase(),
-    // Unused by this test, but importing `@/lib/assistant` now transitively
-    // reaches this module's full real surface — this mock must provide every
-    // named binding it does.
-    actionsBroadenWrites: () => false,
-    actionsRequestWrites: () => false,
-    allActiveExposures: () => [],
-    createExposureSet: async () => ({}),
-    updateExposureSet: async () => ({}),
-    approveExposureActions: async () => ({}),
-    revokeExposureSet: async () => ({}),
-    __resetExposures: () => {},
   },
 });
+const realDomains = await import('@/lib/platform-admin/domains');
+
 mock.module('@/lib/platform-admin/domains', {
   namedExports: {
+    ...realDomains,
     listDomains: () => [{ id: 'commerce', name: 'Commerce', archived: false }, { id: 'finance', name: 'Finance', archived: false }],
   },
 });
@@ -156,21 +116,6 @@ mock.module('@/lib/platform-admin/domains', {
 // error to throw (503/402 passthrough).
 let MODEL_REPLY = '';
 let MODEL_THROW: (Error & { status?: number }) | null = null;
-mock.module('@/lib/assistant/complete', {
-  namedExports: {
-    assistantComplete: async () => {
-      if (MODEL_THROW) throw MODEL_THROW;
-      return { content: MODEL_REPLY, model: 'test-model' };
-    },
-    // Unused by this test, but the `@/lib/assistant` barrel re-exports the
-    // full complete.ts surface, so this mock must provide every named binding it does.
-    AssistantNotConfiguredError: class AssistantNotConfiguredError extends Error {},
-    CostCapExceededError: class CostCapExceededError extends Error {},
-    resolveAssistantModelId: () => 'test-model',
-    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
-  },
-});
-
 const { POST } = await import('../../app/api/connections/[id]/expose-assistant/route.ts');
 
 type Body = { message?: string; suggestions?: { classify?: boolean; selection?: { tables: string[] }; exposure?: { domains: string[]; tables: string[]; mode?: string; tier?: string; name?: string } }; error?: string };

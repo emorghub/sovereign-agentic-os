@@ -17,19 +17,16 @@ import assert from 'node:assert/strict';
 mock.module('@/lib/core/config', {
   namedExports: { config: { queryToolUrl: 'http://qt.test', opaUrl: 'http://opa.test' } },
 });
+const realGoverned = await import('@/lib/infra/governed');
+
 mock.module('@/lib/infra/governed', {
   namedExports: {
+    ...realGoverned,
     queryRun: async () => ({ engine: 'trino', tables: [], columns: [], rows: [], rowCount: 0 }),
     executeRun: async () => ({ ok: true, rowsAffected: null }),
     cubeLoad: async () => ({ rows: [], annotation: {} }),
-    // Unused by this test, but the `@/lib/infra` barrel re-exports the full
-    // governed.ts surface, so this mock must provide every named binding.
     authorize: async () => ({ allowed: true, policy: 'opa-allow' }),
-    trace: async () => true,
     scrubSecurityContext: (ctx: unknown) => ctx,
-    __setCubeMetaForTest: () => {},
-    cubeMeta: async () => [],
-    cubeScalar: async () => 0,
     SALES: {},
   },
 });

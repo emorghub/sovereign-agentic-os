@@ -16,41 +16,30 @@ const enqueued: unknown[] = [];
 const traced: { decision: string }[] = [];
 let executed = false;
 
+const realAgentGoverned = await import('@/lib/infra/agent-governed');
+
 mock.module('@/lib/infra/agent-governed', {
   namedExports: {
+    ...realAgentGoverned,
     authorizeConnectionCall: () => AUTHZ_CONN,
     authorizeAppTool: async () => ({ effect: 'allow', policy: 'app-grant', reason: 'grant' }),
     trace: async (e: { decision: string }) => {
       traced.push(e);
       return { id: `tr_${traced.length}` };
     },
-    // Unused by this test, but the `@/lib/infra` barrel re-exports the full
-    // agent-governed.ts surface, so this mock must provide every named binding.
     authorize: async () => ({ effect: 'allow', policy: 'app-grant', reason: 'grant' }),
-    registerConnectionProfile: () => {},
-    unregisterConnectionProfile: () => {},
-    connectionBundle: () => null,
-    exposedConnectionTools: () => [],
-    restrictConnectionForAgent: () => ({}),
-    recentTraces: () => [],
     metricsTool: async () => ({ value: 0, source: 'seed-offline', measure: '' }),
-    retrieveTool: async () => [],
     SALES: {},
   },
 });
+const realApprovals = await import('@/lib/governance/approvals');
+
 mock.module('@/lib/governance/approvals', {
   namedExports: {
+    ...realApprovals,
     enqueue: (x: unknown) => {
       enqueued.push(x);
     },
-    // Unused by this test, but the `@/lib/governance` barrel re-exports the
-    // full approvals.ts surface, so this mock must provide every named
-    // binding it does.
-    listApprovals: () => [],
-    getApproval: () => null,
-    decide: () => null,
-    recordEffect: () => {},
-    __resetApprovals: () => {},
     ensureHydrated: async () => {},
   },
 });

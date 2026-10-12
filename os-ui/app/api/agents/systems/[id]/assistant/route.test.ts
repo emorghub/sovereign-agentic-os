@@ -40,14 +40,34 @@ mock.module('@/lib/core/auth', {
   },
 });
 
+const realComplete = await import('@/lib/assistant/complete');
+
+// Mocked FIRST: the route imports the assistant BARREL (@/lib/assistant), so any real
+// import below that reaches it would bind the real complete.ts and this mock could not
+// undo it.
+mock.module('@/lib/assistant/complete', {
+  namedExports: {
+    ...realComplete,
+    assistantComplete: async () => {
+      if (MODEL_THROW) throw MODEL_THROW;
+      return { content: MODEL_REPLY, model: 'test-model' };
+    },
+    resolveAssistantModelId: () => 'test-model',
+    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
+  },
+});
+
 // The agents store is REAL (many transitive importers depend on its full export surface);
 // we seed a system into it and read it back to assert whether a write happened. Imported
 // AFTER the auth mock so the route + store share one module instance.
 const store = await import('../../../../../../lib/agents/store.ts');
 
 // Grounding + grantable resolvers — hermetic, return a tiny granted set.
+const realGrounding = await import('@/lib/agents/grounding');
+
 mock.module('@/lib/agents/grounding', {
   namedExports: {
+    ...realGrounding,
     resolveSystemGrounding: async () => ({
       description: 'Handle overdue invoices',
       data: [{ id: 'ds_1', name: 'invoices' }],
@@ -55,8 +75,11 @@ mock.module('@/lib/agents/grounding', {
     }),
   },
 });
+const realGrantable = await import('@/lib/agents/grantable');
+
 mock.module('@/lib/agents/grantable', {
   namedExports: {
+    ...realGrantable,
     listGrantableForKinds: async () => ({ data: [{ id: 'ds_1', name: 'invoices', scope: 'personal' }] }),
   },
 });
@@ -64,21 +87,6 @@ mock.module('@/lib/agents/grantable', {
 // The ONE model call — steered per test via MODEL_REPLY, or MODEL_THROW for 503/402 passthrough.
 let MODEL_REPLY = '';
 let MODEL_THROW: (Error & { status?: number }) | null = null;
-mock.module('@/lib/assistant/complete', {
-  namedExports: {
-    assistantComplete: async () => {
-      if (MODEL_THROW) throw MODEL_THROW;
-      return { content: MODEL_REPLY, model: 'test-model' };
-    },
-    // Unused by this test, but the `@/lib/assistant` barrel re-exports the
-    // full complete.ts surface, so this mock must provide every named binding it does.
-    AssistantNotConfiguredError: class AssistantNotConfiguredError extends Error {},
-    CostCapExceededError: class CostCapExceededError extends Error {},
-    resolveAssistantModelId: () => 'test-model',
-    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
-  },
-});
-
 const { POST } = await import('./route.ts');
 
 type Body = {
