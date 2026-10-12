@@ -9,7 +9,7 @@ import { getDataset, transition, listAllDatasets } from '@/lib/data/store';
 import { stepperStages } from '@/lib/data/panels';
 import { retireDomainTables, sharedFootprintFqns } from '@/lib/data/physical-delete';
 import { dependentsOf } from '@/lib/core/dependents';
-import { executeRun } from '@/lib/infra/governed';
+import { executeRun } from '@/lib/infra';
 
 export const dynamic = 'force-dynamic';
 

@@ -19,7 +19,7 @@ import {
 } from '@/lib/software/apps';
 import { describeApp } from '@/lib/software/appspec/describe';
 import { normalizeContextGrants } from '@/lib/core/context-grants';
-import { promoteThroughSeam } from '@/lib/governance/ladder';
+import { promoteThroughSeam } from '@/lib/governance';
 import { trace } from '@/lib/infra/agent-governed';
 import { startPreview, requestDeploy, decideDeploy } from './review.ts';
 import { archiveApp, deleteApp, useAsData, consumeResource } from './lifecycle.ts';

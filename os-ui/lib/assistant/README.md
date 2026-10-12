@@ -32,22 +32,63 @@ A tab assistant call follows this sequence:
 
 ## Public API
 
-- **`agentic.ts`** — `runAgentic(opts)`: the pure PLAN→ACT loop. IO is injected
-  via `opts.planModel` / `opts.actModel` / `opts.executor` so the loop is fully
-  unit-testable without network calls.
-- **`runtime.ts`** — `runTabAssistant(req, tabId)`: server wiring. Resolves
-  models, compiles context, binds the governed executor, then delegates to
-  `runAgentic`. This is the only public entry point for route handlers.
-- **`complete.ts`** — `resolveAssistantModelId(tier)`: maps `'plan'` / `'act'`
-  to concrete model IDs from the admin-configured model table. Never hardcodes a
-  model name.
-- **`agent-loop.ts`** — SSE streaming wrapper. Translates `runAgentic` async
-  generator output to a `ReadableStream` for `Response` objects.
-- **`stage-route.ts`** — shared scaffolding for the per-STAGE tab assistants
-  (see "Per-stage tab assistants" below). `runStageAssistant(opts)` runs one
-  `assistantComplete` turn and shapes the response (prose `{ text }` or parsed
-  JSON under a caller-chosen key); `failResponse(e)` is the shared error → status
-  tail. Owns no prompts — each tab keeps its own stage table.
+Import via `@/lib/assistant` (the barrel). There are no client consumers today,
+so the whole module — server-only surfaces included — is re-exported.
+
+**`server-only`**
+- `complete.ts` — governed completion + its typed failures: `assistantComplete`,
+  `resolveAssistantModelId`, `liteLlmAssistantCaller`,
+  `AssistantNotConfiguredError` (503), `CostCapExceededError` (402),
+  `type AssistantMessage`, `type AssistantRequest`, `type AssistantCaller`
+- `escalate.ts` — `completeWithEscalation`, `type EscalationResult`,
+  `type EscalationOpts`
+- `runtime.ts` — the tab-assistant runtime: `tabToolSpecs`, `tabToolExecutor`,
+  `bindToolArgs`, `boundExecutor`, `liteLlmCaller`, `parseLlmUsage`,
+  `stripHarmonyTokens`, `parseHarmonyToolCall`, `parseLlmMessage`, `runTabAgent`,
+  `renderAssistantText`, `type RunTabAgentInput`
+- `agent-loop.ts` — the SSE-streaming OS assistant loop: `mcpTabForPath`,
+  `osAssistantSystem`, `osToolSpecs`, `osToolExecutor`, `runOsAssistant`,
+  `type RunOsAssistantInput`, `type OsAssistantResult`
+- `stage-route.ts` — shared scaffolding for the per-STAGE tab assistants (see
+  "Per-stage tab assistants" below): `failResponse`, `parseStageJson`,
+  `runStageAssistant`, `type StagePrompt`, `type StageUser`,
+  `type StageAssistantOptions`
+
+**Pure**
+- `agentic.ts` — the PLAN→ACT loop: `runAgentic(opts)`, `trackUsage`,
+  `ToolCallingUnsupportedError`, `toolCallSignature`, `toOpenAiTools`,
+  `parseReactAction`, `budgetMessages`, + its full type surface (`ChatRole`,
+  `LlmMessage`, `ToolSpec`, `OpenAiTool`, `ToolCall`, `LlmUsage`,
+  `LlmCompletion`, `LlmRequest`, `LlmCall`, `UsageTracker`, `ToolExecutor`,
+  `AgenticStep`, `AgenticResult`). IO is injected via `opts.planModel` /
+  `opts.actModel` / `opts.executor` so the loop is fully unit-testable without
+  network calls.
+- `json-reply.ts` — `extractJsonObject`, `extractJsonArray`, `parseJsonReply`,
+  `parseJsonArrayReply`
+- `turns.ts` — `cleanTurns`, `type ConversationTurn`
+- `page-context.ts` — `sanitizePageContext`, `renderPageContext`,
+  `type PageContextInput`, `type PageContext` — sanitiser for the Ask-the-OS box
+
+### Documented exceptions (deep-path, intentional)
+
+- `lib/assistant/stage-route.ts:6-8` — self-imports `./complete.ts`,
+  `./escalate.ts`, `./json-reply.ts` by relative path, not the barrel, to avoid
+  a circular import.
+- `lib/software/appspec/generate-server.ts` and `generate.ts` — deep-path
+  (`@/lib/assistant/complete`, `@/lib/assistant/json-reply`) for the same
+  reason. Both sit on `lib/mcp/server.ts -> platform-mcp.ts ->
+  appspec/generate-server.ts`, and `runtime.ts`/`agent-loop.ts` (re-exported by
+  the barrel) import `lib/mcp/server.ts` back; going through the barrel here
+  closes that cycle and throws a TDZ `ReferenceError` at module-init time.
+- Four `mock.module()` test interceptors target internal files directly, not
+  the barrel:
+  - `lib/connections/expose-assistant-route.test.ts` → `@/lib/assistant/complete`
+  - `lib/software/data-plan-server.test.ts` → `@/lib/assistant/complete`
+  - `lib/software/ask-app-origin-route.test.ts` → `@/lib/assistant/runtime`
+  - `app/api/agents/systems/[id]/assistant/route.test.ts` → `@/lib/assistant/complete`
+
+  The four `mock.module()` interceptors must supply EVERY named export of the
+  file they target, because the barrel re-exports the full surface.
 
 Test suite: `agentic.test.ts` (loop logic), `runtime.test.ts` (context assembly
 and executor binding), `budget-messages.test.ts` (context-window budgeting and

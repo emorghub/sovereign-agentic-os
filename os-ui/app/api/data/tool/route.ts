@@ -3,7 +3,8 @@
  */
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
-import { authorize, cubeLoad, queryRun, trace, type CubeQuery } from '@/lib/infra/governed';
+import { authorize, trace } from '@/lib/infra/governed';
+import { cubeLoad, queryRun, type CubeQuery } from '@/lib/infra';
 
 export const dynamic = 'force-dynamic';
 

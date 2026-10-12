@@ -8,7 +8,7 @@ import { withRoute } from '@/lib/core/route-server';
 import { realForgejo } from '@/lib/agents/build/live-clients';
 import { listGovernedDatasets } from '@/lib/data/store';
 import { writeAnalyticsFiles } from '@/lib/data/analytics-repo';
-import type { ForgejoClient } from '@/lib/infra/forgejo';
+import type { ForgejoClient } from '@/lib/infra';
 
 export const dynamic = 'force-dynamic';
 

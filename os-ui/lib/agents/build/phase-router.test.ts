@@ -7,7 +7,7 @@ import { parseSystem } from '../system-schema.ts';
 import { compile } from '../langgraph-compile.ts';
 import { SOFTWARE_TEAM_YAML } from '../software-team.ts';
 import { runNode, type AgenticGraphDeps } from './agentic-graph.ts';
-import type { LlmCall, LlmCompletion, ToolSpec } from '@/lib/assistant/agentic';
+import type { LlmCall, LlmCompletion, ToolSpec } from '@/lib/assistant';
 import {
   preRoute,
   postRoute,

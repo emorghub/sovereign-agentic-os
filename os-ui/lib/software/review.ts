@@ -12,14 +12,14 @@ import {
   withStatus,
   type App,
 } from '@/lib/software/apps';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 import { trace } from '@/lib/infra/agent-governed';
 import {
   enqueue,
   decide as decideApproval,
   listApprovals,
-  ensureHydrated as ensureApprovalsHydrated,
-} from '@/lib/governance/approvals';
+} from '@/lib/governance';
+import { ensureHydrated as ensureApprovalsHydrated } from '@/lib/governance/approvals';
 import { securityScan } from './scan.ts';
 import { resolveSurface } from './metadata.ts';
 import { ungrantedDatasetWarningForApp } from './dataset-guard.ts';

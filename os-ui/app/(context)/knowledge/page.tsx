@@ -8,6 +8,8 @@ import { useSearchParams } from 'next/navigation';
 import PageHeader from '@/components/PageHeader';
 import Markdown from '@/components/Markdown';
 import { roleAtLeast, type Role } from '@/lib/core/session';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
 import { useTabNavReset } from '@/lib/core/tab-nav';
 import { SCOPE_GROUPS, type ScopeKey } from '@/lib/core/scopes';
@@ -15,7 +17,7 @@ import type { PersonalKnowledgeSummary } from '@/lib/knowledge/personal-store';
 import { ConfirmProvider, useConfirm } from '@/components/lifecycle/ConfirmDialog';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
-import type { FiledApproval } from '@/lib/governance/approval-notice';
+import type { FiledApproval } from '@/lib/governance';
 import DomainTag from '@/components/DomainTag';
 import type { Visibility as LcVisibility } from '@/lib/core/lifecycle';
 import { archiveFolderCopy, deleteFolderCopy } from '@/lib/core/lifecycle';

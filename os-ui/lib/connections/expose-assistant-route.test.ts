@@ -34,15 +34,38 @@ mock.module('@/lib/core/auth', {
   },
 });
 
+const realComplete = await import('@/lib/assistant/complete');
+
+// Mocked FIRST: the route and catalog-classification both import the `@/lib/assistant`
+// barrel. Any real import below that reaches the barrel would freeze it to the real
+// complete.ts, and a later mock on the deep path could not undo that.
+mock.module('@/lib/assistant/complete', {
+  namedExports: {
+    ...realComplete,
+    assistantComplete: async () => {
+      if (MODEL_THROW) throw MODEL_THROW;
+      return { content: MODEL_REPLY, model: 'test-model' };
+    },
+    resolveAssistantModelId: () => 'test-model',
+    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
+  },
+});
+
+const realConnStore = await import('@/lib/connections/store');
+
 mock.module('@/lib/connections/store', {
   namedExports: {
+    ...realConnStore,
     getConnectionForUser: async () => ({ id: 'conn_1', template: 'warehouse', warehouse: { catalog: 'glue' }, endpoint: 'glue' }),
   },
 });
 
 // The REAL grounding: two snapshot tables, one seeded taxonomy, two domains, no sets.
+const realSnapshot = await import('@/lib/connections/warehouse/catalog-snapshot');
+
 mock.module('@/lib/connections/warehouse/catalog-snapshot', {
   namedExports: {
+    ...realSnapshot,
     getCatalogSnapshot: async () => ({
       connectionId: 'conn_1', catalog: 'glue', status: 'stale', takenAt: '2026-08-05T00:00:00Z',
       tables: [{ schema: 'sales', table: 'orders' }, { schema: 'sales', table: 'customers' }],
@@ -50,24 +73,41 @@ mock.module('@/lib/connections/warehouse/catalog-snapshot', {
     }),
   },
 });
+const realClassif = await import('@/lib/connections/warehouse/catalog-classification');
+
 mock.module('@/lib/connections/warehouse/catalog-classification', {
   namedExports: {
+    ...realClassif,
     getMergedClassification: async () => ({
       taxonomy: [{ id: 'orders', name: 'Orders' }, { id: 'unsorted', name: 'Unsorted' }],
       seed: 'starter',
       placements: { 'sales.orders': { category: 'orders', source: 'ai' }, 'sales.customers': { category: 'unsorted', source: 'unsorted' } },
       lastRunDetail: '1 classified, 1 unsorted.',
     }),
+    CONFIDENCE_THRESHOLD: 0.7,
+    BATCH_SIZE: 100,
+    CONCURRENCY: 2,
+    PASS2_DESCRIBE_CAP: 50,
+    UNSORTED: 'unsorted',
+    STARTER_TAXONOMY: [],
+    smartDefaultSeed: () => 'starter',
+    chunk: <T,>(arr: T[]) => [arr],
   },
 });
+const realExposures = await import('@/lib/connections/exposures');
+
 mock.module('@/lib/connections/exposures', {
   namedExports: {
+    ...realExposures,
     listExposureSets: async () => [],
     entityActionKey: (e: string) => String(e ?? '').trim().toLowerCase(),
   },
 });
+const realDomains = await import('@/lib/platform-admin/domains');
+
 mock.module('@/lib/platform-admin/domains', {
   namedExports: {
+    ...realDomains,
     listDomains: () => [{ id: 'commerce', name: 'Commerce', archived: false }, { id: 'finance', name: 'Finance', archived: false }],
   },
 });
@@ -76,15 +116,6 @@ mock.module('@/lib/platform-admin/domains', {
 // error to throw (503/402 passthrough).
 let MODEL_REPLY = '';
 let MODEL_THROW: (Error & { status?: number }) | null = null;
-mock.module('@/lib/assistant/complete', {
-  namedExports: {
-    assistantComplete: async () => {
-      if (MODEL_THROW) throw MODEL_THROW;
-      return { content: MODEL_REPLY, model: 'test-model' };
-    },
-  },
-});
-
 const { POST } = await import('../../app/api/connections/[id]/expose-assistant/route.ts');
 
 type Body = { message?: string; suggestions?: { classify?: boolean; selection?: { tables: string[] }; exposure?: { domains: string[]; tables: string[]; mode?: string; tier?: string; name?: string } }; error?: string };

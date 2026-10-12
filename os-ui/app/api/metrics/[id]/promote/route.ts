@@ -10,7 +10,7 @@ import { delegatedToken } from '@/lib/infra/identity-server';
 import { getMetric } from '@/lib/metrics/store';
 import { governMetric, canPromote as canPromoteMetric } from '@/lib/metrics/governance';
 import { exploreMetric } from '@/lib/metrics/build/explore-server';
-import { enqueue, listApprovals } from '@/lib/governance/approvals';
+import { enqueue, listApprovals } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

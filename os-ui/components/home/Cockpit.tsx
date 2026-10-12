@@ -2,8 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import Link from 'next/link';
-import type { HomeFeed } from '@/lib/home/feed';
-import type { ModuleKey } from '@/lib/home/scope';
+import type { HomeFeed, ModuleKey } from '@/lib/home';
 import { visibilityLabel } from '@/lib/core/scopes';
 import AskAssistant from './AskAssistant';
 

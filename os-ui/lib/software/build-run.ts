@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { classifyTeamError } from '@/lib/agents/build/phase-router';
-import { AssistantNotConfiguredError } from '@/lib/assistant/complete';
+import { AssistantNotConfiguredError } from '@/lib/assistant';
 import { config } from '@/lib/core/config';
 import type { ChatRunMode } from '@/lib/software/chat-modes';
 

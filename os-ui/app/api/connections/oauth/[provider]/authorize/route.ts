@@ -5,11 +5,13 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { config } from '@/lib/core/config';
 import { getConnectionForUser } from '@/lib/connections';
-import { asOAuthProvider, providerForTemplate, providerConfig } from '@/lib/oauth/providers';
-import { getOAuthApp, isConfigured, ensureHydrated } from '@/lib/oauth/oauth-apps';
-import { buildAuthorizeUrl } from '@/lib/oauth/token-set';
-import { signState, newNonce, OAUTH_STATE_COOKIE } from '@/lib/oauth/state';
-import { publicBaseUrl, callbackUri } from '@/lib/oauth/redirect';
+import {
+  asOAuthProvider, providerForTemplate, providerConfig,
+  getOAuthApp, isConfigured, ensureHydrated,
+  buildAuthorizeUrl,
+  signState, newNonce, OAUTH_STATE_COOKIE,
+  publicBaseUrl, callbackUri,
+} from '@/lib/oauth';
 
 export const dynamic = 'force-dynamic';
 

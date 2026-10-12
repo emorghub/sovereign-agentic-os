@@ -3,7 +3,7 @@
  */
 import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
-import { datasetDetail } from '@/lib/monitoring/detail-view';
+import { datasetDetail } from '@/lib/monitoring';
 
 export const dynamic = 'force-dynamic';
 

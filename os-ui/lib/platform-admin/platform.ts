@@ -16,7 +16,7 @@
  *   toggle: whether the UI may scale it 0<->1 (false = core / not a workload)
  */
 import { config } from '@/lib/core/config';
-import { k8s } from '@/lib/infra/k8s';
+import { k8s } from '@/lib/infra';
 
 const NS = config.platformNamespace;
 

@@ -3,8 +3,8 @@
  */
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
-import { roleModel } from '@/lib/models/roles';
-import { runTabAgent, renderAssistantText } from '@/lib/assistant/runtime';
+import { roleModel } from '@/lib/models';
+import { runTabAgent, renderAssistantText } from '@/lib/assistant';
 import { diffTrees } from '@/lib/software/build-changeset';
 import { getSnapshot } from '@/lib/software/snapshot';
 import { trace } from '@/lib/infra/agent-governed';

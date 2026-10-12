@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { config } from '@/lib/core/config';
-import { k8s, k8sText } from '@/lib/infra/k8s';
+import { k8s, k8sText } from '@/lib/infra';
 import { trace } from '@/lib/infra/agent-governed';
 import {
   getModel,

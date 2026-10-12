@@ -29,23 +29,50 @@ access/refresh token pairs alive. Secrets never leave — tokens are stored as
 
 ## Public API
 
-- **`providers.ts`** — `OAUTH_PROVIDERS`: auth/token URLs + minimal read-only scopes
-  for `google` and `microsoft`. Pure + client-safe (contains no secrets).
-- **`pkce.ts`** — `generatePkce()`: returns `{ verifier, challenge, method }`.
-- **`state.ts`** — `signState(payload)`, `verifyState(raw)`: CSRF-safe round-trip.
-- **`redirect.ts`** — `buildAuthorizationUrl`, `handleRedirect`: redirect lifecycle.
-- **`token-set.ts`** — `storeTokenSet`, `loadTokenSet`, `refreshAccessToken`: token
-  storage and silent renewal (server-only).
-- **`connection-token.ts`** — `mintToken`, `refreshToken`, `revokeToken`: the
-  Connections-store-integrated lifecycle (server-only).
-- **`oauth-apps.ts`** — `getOAuthApp(provider)`: admin-configured `client_id` +
-  `redirect_uri` per provider (no `client_secret` in this module).
-- **`drive-status.ts`** — `probeDrive(connection)`: reachability probe used by
-  `testConnection`; reads a single root-folder listing, returns boolean.
-- **`notion-flow.ts`** — Notion OAuth authorization + callback flow.
-- **`notion-mcp.ts`** — Notion MCP token binding (mints a Notion session for the MCP
-  surface from an existing OAuth token).
-- **`client.ts`** — `tokenExchange(url, params)`: low-level POST to token endpoints.
+Import via `@/lib/oauth` (the barrel):
+
+**Pure (client-safe)**
+- `providers.ts` — `OAUTH_PROVIDERS`, `providerForTemplate`, `filesProviderFor`,
+  `asOAuthProvider`, `providerConfig`, `type OAuthProvider`, `type OAuthProviderConfig`
+- `pkce.ts` — `randomVerifier`, `challengeFor`, `createPkcePair`, `type PkcePair`
+- `state.ts` — `newNonce`, `signState`, `verifyState`, `nonceMatches`,
+  `OAUTH_STATE_COOKIE`, `type OAuthState`
+- `redirect.ts` — `publicBaseUrl`, `callbackUri`
+- `token-set.ts` — `tokenSetFromResponse`, `serializeTokenSet`, `parseTokenSet`,
+  `isExpired`, `buildAuthorizeUrl`, `exchangeBody`, `refreshBody`,
+  `type TokenSet`, `type TokenResponse`
+- `drive-status.ts` — `driveConnectionStatus`, `driveAuthorizePath`,
+  `type DriveConnectionStatus`
+
+**`server-only`**
+- `connection-token.ts` — `storeTokens`, `readTokens`, `resolveAccessToken`,
+  `type TokenResolution`
+- `oauth-apps.ts` — `ensureHydrated`, `registerOAuthApp`, `getOAuthApp`,
+  `isConfigured`, `listOAuthApps`, `getClientCredentials`, `providerCatalog`,
+  `type OAuthApp`
+- `client.ts` — `exchangeCode`, `refreshTokens`, `probeDrive`
+- `notion-flow.ts` — `putPendingFlow`, `takePendingFlow`, `type NotionPendingFlow`
+- `notion-mcp.ts` — `NOTION_MCP_ENDPOINT`, `discoverMetadata`, `registerClient`,
+  `buildNotionAuthorizeUrl`, `exchangeNotionCode`, `refreshNotionToken`,
+  `listNotionMcpTools`, `serializeClientReg`, `parseClientReg`, + its types
+
+### Documented exceptions (deep-path, intentional)
+
+- `components/connections/ConnectionBuilder.tsx:37,38` — a `'use client'`
+  component importing `providers` + `drive-status` as VALUES. The barrel
+  re-exports `server-only` surfaces, so it must stay deep-path.
+
+### Internal
+
+- `_reset()` — exported by both `notion-flow.ts` and `oauth-apps.ts` (test
+  helpers). The name collides, so neither is re-exported.
+
+NOTE: this section previously named `generatePkce`, `buildAuthorizationUrl`,
+`handleRedirect`, `storeTokenSet`, `loadTokenSet`, `refreshAccessToken`,
+`mintToken`, `refreshToken`, `revokeToken` and `tokenExchange` — none of which
+exist. It placed `probeDrive` under `drive-status.ts` (it is in `client.ts`),
+omitted `client.ts` entirely, and had `server-only` on `token-set.ts` (pure)
+instead of `oauth-apps.ts` (server-only). Rewritten against the real exports.
 
 ## Invariants & Dependencies
 

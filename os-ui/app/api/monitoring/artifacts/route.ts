@@ -3,7 +3,7 @@
  */
 import { NextResponse } from 'next/server';
 import { withRoute } from '@/lib/core/route-server';
-import { artifactMonitoring } from '@/lib/monitoring/artifacts-view';
+import { artifactMonitoring } from '@/lib/monitoring';
 
 export const dynamic = 'force-dynamic';
 

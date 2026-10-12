@@ -16,8 +16,11 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Workflow store: the `wf_legacy` id does NOT exist here (miss → throw).
+const realKnowStore = await import('@/lib/knowledge/store');
+
 mock.module('@/lib/knowledge/store', {
   namedExports: {
+    ...realKnowStore,
     getWorkflow: (id: string) => {
       throw new Error(`workflow ${id} not found`);
     },
@@ -25,8 +28,11 @@ mock.module('@/lib/knowledge/store', {
   },
 });
 // Personal store: the mis-prefixed `wf_legacy` id lives HERE.
+const realPersonalStore = await import('@/lib/knowledge/personal-store');
+
 mock.module('@/lib/knowledge/personal-store', {
   namedExports: {
+    ...realPersonalStore,
     getPersonalKnowledge: (id: string) => {
       if (id === 'wf_legacy') return { title: 'Legacy Note', md: 'the legacy note body' };
       throw new Error(`personal ${id} not found`);

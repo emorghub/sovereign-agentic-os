@@ -29,7 +29,7 @@
  */
 
 import type { CatalogRegistration } from './registration.ts';
-import { k8s as liveK8s } from '@/lib/infra/k8s.ts';
+import { k8s as liveK8s } from '@/lib/infra';
 
 /** The injectable in-cluster client (a subset of lib/infra/k8s.ts's `k8s`). */
 export type RegK8s = (

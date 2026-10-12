@@ -2,11 +2,9 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import { roleModel } from '@/lib/models/roles';
+import { roleModel } from '@/lib/models';
 import { requireUser } from '@/lib/core/auth';
-import { mcpTabForPath, runOsAssistant } from '@/lib/assistant/agent-loop';
-import { sanitizePageContext } from '@/lib/assistant/page-context';
-import { AssistantNotConfiguredError } from '@/lib/assistant/complete';
+import { mcpTabForPath, runOsAssistant, sanitizePageContext, AssistantNotConfiguredError } from '@/lib/assistant';
 
 export const dynamic = 'force-dynamic';
 

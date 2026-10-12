@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CurrentUser } from '@/lib/core/auth';
-import type { LlmCall } from '@/lib/assistant/agentic';
+import type { LlmCall } from '@/lib/assistant';
 import { parseSystem, serializeSystem, type System } from '../system-schema.ts';
 import { type OsToolDeps } from './os-tools.ts';
 import { runOsTeam } from './agentic-graph-server.ts';

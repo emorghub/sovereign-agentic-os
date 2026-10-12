@@ -5,7 +5,7 @@ import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import type { Connection } from '@/lib/connections/schema';
 import { config } from '@/lib/core/config';
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 import { listConnectionsForUser, getConnectionForUser } from '@/lib/connections/store';
 import {
   type OmConn,

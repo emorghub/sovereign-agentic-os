@@ -11,7 +11,7 @@ import { buildStage } from '@/lib/data/build/server';
 import { silverPlan, type TransformOp } from '@/lib/data/transform';
 import { rematerializeDomainTableLive } from '@/lib/data/publish-server';
 import { roleAtLeast } from '@/lib/core/session';
-import type { ExecuteIdentity } from '@/lib/infra/governed';
+import type { ExecuteIdentity } from '@/lib/infra';
 
 export const dynamic = 'force-dynamic';
 

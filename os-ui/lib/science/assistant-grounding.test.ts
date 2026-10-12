@@ -16,6 +16,10 @@ const DATASETS = {
   marketplace: [],
 };
 
+// Explicit stubs, not a spread: the real data/store imports dataset-schema and
+// store-fqn, which are mocked below this block. Spreading here would load them with
+// real bindings first. Convertible by reordering; not done because this block has no
+// placeholders to remove.
 mock.module('@/lib/data/store', {
   namedExports: {
     listDatasets: (u: { id?: string }) => (u?.id === 'nobody' ? { mine: [], domain: [], marketplace: [] } : DATASETS),
@@ -28,13 +32,17 @@ mock.module('@/lib/data/store', {
   },
 });
 
-mock.module('@/lib/data/dataset-schema', { namedExports: { LAYERS: ['bronze', 'silver', 'gold'] } });
+const realDatasetSchema = await import('@/lib/data/dataset-schema');
+mock.module('@/lib/data/dataset-schema', { namedExports: { ...realDatasetSchema, LAYERS: ['bronze', 'silver', 'gold'] } });
 const COLS = [
   { name: 'churned', type: 'boolean' },
   { name: 'recency_days', type: 'integer' },
   { name: 'monetary_value', type: 'double' },
   { name: 'duration_days', type: 'double' },
 ];
+// Explicit stubs, not a spread: the real data/profile imports infra/governed, mocked
+// below this block. Same reason as the store block above — convertible by reordering,
+// not worth it for a block with no placeholders.
 mock.module('@/lib/data/profile', {
   namedExports: {
     parseDescribe: () => COLS,
@@ -43,7 +51,8 @@ mock.module('@/lib/data/profile', {
     classifyType: (t: string) => (/^(tinyint|smallint|integer|int|bigint|real|double|decimal|numeric)\b/.test((t || '').toLowerCase()) ? 'numeric' : (t || '').toLowerCase() === 'boolean' ? 'boolean' : 'string'),
   },
 });
-mock.module('@/lib/data/store-fqn', { namedExports: { slug: (s: string) => s.toLowerCase() } });
+const realStoreFqn = await import('@/lib/data/store-fqn');
+mock.module('@/lib/data/store-fqn', { namedExports: { ...realStoreFqn, slug: (s: string) => s.toLowerCase() } });
 // The per-target content profile the stubbed governed query returns (distinct/non-null/frac).
 // duration_days = a continuous double (many distinct, fractional values present → regression).
 const PROFILE: Record<string, { n: number; distinct_n: number; non_null: number; frac?: number }> = {
@@ -52,8 +61,11 @@ const PROFILE: Record<string, { n: number; distinct_n: number; non_null: number;
   recency_days: { n: 1000, distinct_n: 45, non_null: 1000, frac: 0 },
 };
 // A governed query stub that answers DESCRIBE, the content-profile SELECT, and the row-sample SELECT.
+const realGoverned = await import('@/lib/infra/governed');
+
 mock.module('@/lib/infra/governed', {
   namedExports: {
+    ...realGoverned,
     queryRun: async (sql: string) => {
       if (/^\s*describe/i.test(sql)) {
         return { engine: 'trino', tables: [], columns: ['Column', 'Type'], rows: COLS.map((c) => [c.name, c.type]), rowCount: COLS.length };
@@ -73,6 +85,11 @@ mock.module('@/lib/infra/governed', {
         rows: [['true', '12', '340.5', '5.5'], ['false', '3', '1290.0', '18.0']], rowCount: 2,
       };
     },
+    authorize: async () => ({ allowed: true, policy: 'opa-allow' }),
+    scrubSecurityContext: (ctx: unknown) => ctx,
+    cubeLoad: async () => ({ rows: [], annotation: {} }),
+    executeRun: async () => ({ ok: true, rowsAffected: null }),
+    SALES: {},
   },
 });
 

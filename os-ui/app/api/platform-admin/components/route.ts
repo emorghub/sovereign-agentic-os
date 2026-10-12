@@ -8,9 +8,7 @@ import { selfHealFor, versionFor, nodes, pools, OPTIONAL_LAYERS } from '@/lib/pl
 import { assertGuarded } from '@/lib/platform-admin/guard';
 import { audit } from '@/lib/platform-admin/audit';
 import { probeServices, type ServicesStatus } from '@/lib/platform-admin/services';
-import { collectAll, correlate } from '@/lib/monitoring';
-import { collectSystem } from '@/lib/monitoring/adapters/system-health';
-import { deriveScope } from '@/lib/monitoring/scope-core';
+import { collectAll, correlate, collectSystem, deriveScope } from '@/lib/monitoring';
 import type { Correlation, HealthItem } from '@/lib/monitoring';
 
 export const dynamic = 'force-dynamic';

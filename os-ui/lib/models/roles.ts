@@ -37,7 +37,8 @@
  * rebuild) while making mock the default when nothing is wired. It never rewrites
  * the fixed LiteLLM aliases — it only chooses WHICH live alias each app role uses.
  *
- * Server-only (reads the in-process admin settings store).
+ * Reads the in-process admin settings store (no `server-only` guard — the
+ * store is isomorphic, so this module is safe from any layer).
  */
 
 import { config } from '../core/config.ts';

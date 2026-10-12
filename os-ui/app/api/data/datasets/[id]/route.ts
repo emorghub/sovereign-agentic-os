@@ -9,7 +9,7 @@ import { requireUser } from '@/lib/core/auth';
 import { getDataset, isDatasetArchived, archiveDataset, unarchiveDataset, deleteDataset, renameDataset, listAllDatasets } from '@/lib/data/store';
 import { dropPhysicalTables, sharedFootprintFqns } from '@/lib/data/physical-delete';
 import { domainTableMissing } from '@/lib/data/reconcile-server';
-import { executeRun } from '@/lib/infra/governed';
+import { executeRun } from '@/lib/infra';
 import { stepperStages } from '@/lib/data/panels';
 import { goldOutputColumns } from '@/lib/data/metrics';
 import { firstOmCatalogFor, omSoftDeleteForConnection, omReactivateForConnection } from '@/lib/connections/openmetadata';

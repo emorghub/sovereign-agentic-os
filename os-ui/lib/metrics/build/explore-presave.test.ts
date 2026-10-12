@@ -18,8 +18,11 @@ import { previewTrinoSql, sqlRowsToExploreRows, exploreSpec } from '../explorer.
 
 const calls: { queryRun: { sql: string; principal?: string }[]; cubeLoad: number } = { queryRun: [], cubeLoad: 0 };
 
+const realGoverned = await import('@/lib/infra/governed');
+
 mock.module('@/lib/infra/governed', {
   namedExports: {
+    ...realGoverned,
     queryRun: async (sql: string, principal?: string) => {
       calls.queryRun.push({ sql, principal });
       return { engine: 'trino', tables: [], columns: ['revenue'], rows: [['123.5']], rowCount: 1 };
@@ -28,6 +31,10 @@ mock.module('@/lib/infra/governed', {
       calls.cubeLoad++;
       return { rows: [{ 'Sales.revenue': 999 }], annotation: {} };
     },
+    authorize: async () => ({ allowed: true, policy: 'opa-allow' }),
+    scrubSecurityContext: (ctx: unknown) => ctx,
+    executeRun: async () => ({ ok: true, rowsAffected: null }),
+    SALES: {},
   },
 });
 

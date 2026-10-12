@@ -2,14 +2,8 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import { NextResponse } from 'next/server';
-import {
-  authorizeAppTool,
-  trace,
-  metricsTool,
-  retrieveTool,
-  SALES,
-  type DlsPrincipal,
-} from '@/lib/infra/agent-governed';
+import { trace, SALES } from '@/lib/infra/agent-governed';
+import { authorizeAppTool, metricsTool, retrieveTool, type DlsPrincipal } from '@/lib/infra';
 import { principalFor, type GovernedToolResponse } from '@/lib/agents/build/runtime-contract';
 import { runtimeTokenOk } from '@/lib/agents/build/runtime-auth';
 import { ensureHydrated, systemForScheduler } from '@/lib/agents/store';

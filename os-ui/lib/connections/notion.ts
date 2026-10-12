@@ -7,7 +7,7 @@ import type { Connection } from '@/lib/connections/schema';
 // notion-mcp the raw access token is stored as an OAuth token-set via storeNotionConnection;
 // the token is resolved from the vault by `store.ts:notionConnFor` (readTokens) before
 // being injected here — the raw value NEVER leaves the server boundary.
-import { getSecretServerSide } from '@/lib/infra/secrets';
+import { getSecretServerSide } from '@/lib/infra';
 
 /**
  * Notion REST client (`https://api.notion.com/v1`) — the REAL execution surface for

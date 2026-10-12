@@ -12,7 +12,7 @@ import { __resetStore as resetFiles } from '@/lib/files/store';
 import { __resetDashboards } from '@/lib/dashboards/store';
 import { __resetBets, auditLog } from '@/lib/bigbets/store';
 import { __resetSources, __resetStrategy, __seedStrategy } from '@/lib/bigbets';
-import { __resetApprovals } from '@/lib/governance/approvals';
+import { __resetApprovals } from '@/lib/governance';
 import { __resetAppsCache } from '@/lib/software/apps';
 import { __resetForTests as resetPillars, createPillar } from '@/lib/strategy/pillars';
 

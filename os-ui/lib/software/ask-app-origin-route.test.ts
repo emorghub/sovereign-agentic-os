@@ -42,24 +42,63 @@ mock.module('@/lib/core/auth', {
   },
 });
 
+const realStoreFqn = await import('@/lib/data/store-fqn');
+
+// store-fqn and models/roles are mocked FIRST: the real data/store imports store-fqn,
+// and the real assistant/runtime reaches roles through the @/lib/models barrel. Loading
+// either for its spread before these are mocked would bind the real modules.
+mock.module('@/lib/data/store-fqn', {
+  namedExports: {
+    ...realStoreFqn,
+    readPrincipalFor: (_sql: string, u: { id: string }) => u.id,
+    slug: (name: string) => name,
+    physicalSlug: (d: { slug?: string; name: string }) => d.slug ?? d.name,
+    sanitizeIdent: (value: string) => value,
+    personalSchema: (principal: string) => principal,
+    domainSchema: (domain: string) => domain,
+    bronzeTarget: (schema: string, nameOrSlug: string) => `${schema}.${nameOrSlug}`,
+  },
+});
+
+const realRoles = await import('@/lib/models/roles');
+
+mock.module('@/lib/models/roles', {
+  namedExports: {
+    ...realRoles,
+    roleModel: () => 'test-model',
+    standardFirstEscalationEnabled: () => false,
+    roleDefault: () => 'test-model',
+    roleModels: () => ({ reasoning: 'test-model', standard: 'test-model', tools: 'test-model', embeddings: 'test-model' }),
+    MOCK_MODEL: 'test-model',
+  },
+});
+
 // The FULL canView-scoped set the session user can see: a granted dataset + an ungranted
 // one. `ensureHydrated` is what requirePrincipal awaits — a no-op here.
 const ALL_ASKABLE = [
   { id: 'ds_zpco1s6n7y', name: 'Northpeak Products', domain: 'sales', tier: 'dataset', fqn: 'iceberg.personal_own.gold_products', description: '', columns: [] },
   { id: 'ds_other', name: 'Other Dataset', domain: 'sales', tier: 'dataset', fqn: 'iceberg.personal_own.gold_other', description: '', columns: [] },
 ];
+const realDataStore = await import('@/lib/data/store');
+
 mock.module('@/lib/data/store', {
   namedExports: {
+    ...realDataStore,
     ensureHydrated: async () => {},
     listAskable: () => ALL_ASKABLE,
+    listDatasets: () => ({ personal: [], shared: [], certified: [] }),
+    listFiles: () => ({ files: [], dataset: {} }),
   },
 });
 
 // Capture the datasets runAsk actually receives — that IS the model's prompt context AND
 // the only tables the generated SQL can target. Returns a benign no_dataset outcome.
 let seenDatasetIds: string[] | null = null;
+const realAsk = await import('@/lib/data/ask');
+
 mock.module('@/lib/data/ask', {
   namedExports: {
+    ...realAsk,
     runAsk: async (input: { datasets: { id: string }[] }) => {
       seenDatasetIds = input.datasets.map((d) => d.id);
       return { ok: false, kind: 'no_dataset', message: 'none' };
@@ -67,25 +106,32 @@ mock.module('@/lib/data/ask', {
   },
 });
 
+const realRuntime = await import('@/lib/assistant/runtime');
+
 mock.module('@/lib/assistant/runtime', {
-  namedExports: { liteLlmCaller: () => async () => ({ content: '' }) },
+  namedExports: {
+    ...realRuntime,
+    liteLlmCaller: () => async () => ({ content: '' }),
+    tabToolExecutor: () => async () => ({ text: '', isError: false }),
+    bindToolArgs: (executor: unknown) => executor,
+    boundExecutor: (executor: unknown) => executor,
+    stripHarmonyTokens: (s: string) => s,
+    parseLlmMessage: () => ({ content: '' }),
+    runTabAgent: async () => ({ steps: [], finalText: '' }),
+  },
 });
+const realGoverned = await import('@/lib/infra/governed');
+
 mock.module('@/lib/infra/governed', {
   namedExports: {
+    ...realGoverned,
     queryRun: async () => ({ columns: [], rows: [], rowCount: 0 }),
     trace: async () => ({ ok: true }),
+    authorize: async () => ({ ok: true }),
+    scrubSecurityContext: (x: unknown) => x,
+    SALES: {},
   },
 });
-mock.module('@/lib/models/roles', {
-  namedExports: {
-    roleModel: () => 'test-model',
-    standardFirstEscalationEnabled: () => false,
-  },
-});
-mock.module('@/lib/data/store-fqn', {
-  namedExports: { readPrincipalFor: (_sql: string, u: { id: string }) => u.id },
-});
-
 const { createApp, writeThroughApp, __resetAppsCache } = await import('./apps.ts');
 
 beforeEach(() => {

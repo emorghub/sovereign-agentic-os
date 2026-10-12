@@ -10,10 +10,9 @@ import {
   type LlmCall,
   type ToolExecutor,
   type ToolSpec,
-} from '@/lib/assistant/agentic';
-import { compactToolResult } from '@/lib/infra/context/context-assembler';
+} from '@/lib/assistant';
+import { compactToolResult, curateContext, type CurateCandidate, type EmbedFn } from '@/lib/infra';
 import { estimateTokens } from '@/lib/knowledge/context-pack';
-import { curateContext, type CurateCandidate, type EmbedFn } from '@/lib/infra/context/librarian';
 
 /**
  * THE AGENTIC GRAPH EXECUTOR — the core of the Software Delivery Team.
@@ -640,7 +639,7 @@ export async function runNode(
   nodeId: string,
   messages: { role: 'user' | 'assistant'; content: string }[],
   deps: AgenticGraphDeps,
-  opts: { extraGuidance?: string; onStep?: (step: import('@/lib/assistant/agentic').AgenticStep) => void } = {},
+  opts: { extraGuidance?: string; onStep?: (step: import('@/lib/assistant').AgenticStep) => void } = {},
 ): Promise<NodeRun> {
   const node = ir.nodes.find((n) => n.id === nodeId);
   if (!node) throw new Error(`Unknown team node: ${nodeId}`);

@@ -5,8 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CurrentUser } from '@/lib/core/auth';
 import { createApp, deleteAppRepo, rehydrateConnection } from '@/lib/software/apps';
-import { authorizeConnectionCall } from '@/lib/infra/agent-governed';
-import { getConnectionByApp } from '@/lib/infra/app-registry';
+import { authorizeConnectionCall } from '@/lib/infra';
+import { getConnectionByApp } from '@/lib/infra';
 import { archiveApp, unarchiveApp, deleteApp, useAsData, consumeResource, dependentsOf, demoteApp } from './lifecycle.ts';
 import { getAppByIdInternal, promoteApp } from '@/lib/software/apps';
 

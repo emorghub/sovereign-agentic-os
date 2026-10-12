@@ -7,7 +7,7 @@ import type { CurrentUser } from '@/lib/core/auth';
 import { requirePrincipal } from '@/lib/data/server';
 import { requestPromotion, getDataset } from '@/lib/data/store';
 import { transparencyGate } from '@/lib/data/transparency';
-import { enqueue, listApprovals } from '@/lib/governance/approvals';
+import { enqueue, listApprovals } from '@/lib/governance';
 import type { DataVisibility, Grant } from '@/lib/data';
 
 export const dynamic = 'force-dynamic';

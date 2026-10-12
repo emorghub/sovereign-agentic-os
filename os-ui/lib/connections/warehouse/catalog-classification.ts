@@ -4,14 +4,12 @@
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import { roleAtLeast } from '@/lib/core/session';
-import { osMirror } from '@/lib/infra/os-mirror';
+import { osMirror } from '@/lib/infra';
 import { trace } from '@/lib/infra/agent-governed';
 import { getConnectionForUser } from '@/lib/connections/store';
 import { getCatalogSnapshot, describeTable, type CatalogSnapshot, type CatalogTableRef, type TableColumn } from '@/lib/connections/warehouse/catalog-snapshot';
 import { listDomains } from '@/lib/platform-admin/domains';
-import { completeWithEscalation } from '@/lib/assistant/escalate';
-import { parseJsonArrayReply } from '@/lib/assistant/json-reply';
-import type { AssistantCaller } from '@/lib/assistant/complete';
+import { completeWithEscalation, parseJsonArrayReply, type AssistantCaller } from '@/lib/assistant';
 
 /**
  * Per-connection CATALOG CLASSIFICATION — the AI-suggested folder taxonomy the Organize

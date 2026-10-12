@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { errorResponse } from '@/lib/core/route-server';
-import { verifyChain } from '@/lib/governance/audit';
+import { verifyChain } from '@/lib/governance';
 import { ensureHydrated, listAudit } from '@/lib/platform-admin/audit';
 
 export const dynamic = 'force-dynamic';

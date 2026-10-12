@@ -6,7 +6,7 @@ import type { McpTool, JsonSchema } from './server';
 
 // --- The EXACT governed monitoring spine the Monitoring tab + /api/monitoring call
 import { buildOverview, scopeForUser, filterScope, fetchTrace, assertInScope } from '@/lib/monitoring';
-import { collectRuns } from '@/lib/monitoring/adapters/run-trace';
+import { collectRuns } from '@/lib/monitoring';
 
 /**
  * THE MONITORING MCP SURFACE (mcp-v2 P4) — READ-ONLY and HARD-SCOPED. Three thin

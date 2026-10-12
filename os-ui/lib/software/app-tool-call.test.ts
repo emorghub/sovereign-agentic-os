@@ -16,21 +16,31 @@ const enqueued: unknown[] = [];
 const traced: { decision: string }[] = [];
 let executed = false;
 
+const realAgentGoverned = await import('@/lib/infra/agent-governed');
+
 mock.module('@/lib/infra/agent-governed', {
   namedExports: {
+    ...realAgentGoverned,
     authorizeConnectionCall: () => AUTHZ_CONN,
     authorizeAppTool: async () => ({ effect: 'allow', policy: 'app-grant', reason: 'grant' }),
     trace: async (e: { decision: string }) => {
       traced.push(e);
       return { id: `tr_${traced.length}` };
     },
+    authorize: async () => ({ effect: 'allow', policy: 'app-grant', reason: 'grant' }),
+    metricsTool: async () => ({ value: 0, source: 'seed-offline', measure: '' }),
+    SALES: {},
   },
 });
+const realApprovals = await import('@/lib/governance/approvals');
+
 mock.module('@/lib/governance/approvals', {
   namedExports: {
+    ...realApprovals,
     enqueue: (x: unknown) => {
       enqueued.push(x);
     },
+    ensureHydrated: async () => {},
   },
 });
 mock.module('./app-records.ts', {

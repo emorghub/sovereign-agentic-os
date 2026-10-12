@@ -26,11 +26,8 @@
 import 'server-only';
 import type { CurrentUser } from '@/lib/core/auth';
 import { config } from '@/lib/core/config';
-import { roleModel } from '@/lib/models/roles';
-import { inputBudget } from '@/lib/models/context-windows';
-import { type Candidate } from '@/lib/infra/context/context-assembler';
-import { curateThenAssemble, type EmbedFn } from '@/lib/infra/context/librarian';
-import { guardedEmbedder } from '@/lib/infra/context/librarian-live';
+import { roleModel, inputBudget } from '@/lib/models';
+import { type Candidate, curateThenAssemble, type EmbedFn, guardedEmbedder } from '@/lib/infra';
 import { trace } from '@/lib/infra/governed';
 import { getTabConfig } from './config.ts';
 import { getTabMetadata } from './metadata.ts';

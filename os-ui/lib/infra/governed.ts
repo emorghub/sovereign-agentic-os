@@ -3,7 +3,7 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { serviceBearerHeader } from '@/lib/infra/service-bearer';
+import { serviceBearerHeader } from './service-bearer.ts';
 import type { Role } from '@/lib/core/session';
 
 /**

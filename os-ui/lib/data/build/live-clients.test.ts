@@ -17,11 +17,17 @@ import assert from 'node:assert/strict';
 mock.module('@/lib/core/config', {
   namedExports: { config: { queryToolUrl: 'http://qt.test', opaUrl: 'http://opa.test' } },
 });
+const realGoverned = await import('@/lib/infra/governed');
+
 mock.module('@/lib/infra/governed', {
   namedExports: {
+    ...realGoverned,
     queryRun: async () => ({ engine: 'trino', tables: [], columns: [], rows: [], rowCount: 0 }),
     executeRun: async () => ({ ok: true, rowsAffected: null }),
     cubeLoad: async () => ({ rows: [], annotation: {} }),
+    authorize: async () => ({ allowed: true, policy: 'opa-allow' }),
+    scrubSecurityContext: (ctx: unknown) => ctx,
+    SALES: {},
   },
 });
 

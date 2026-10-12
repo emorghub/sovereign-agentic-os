@@ -5,6 +5,8 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useUser } from '@/lib/useUser';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { canManageArtifact } from '@/lib/governance/edit-scope';
 import { roleAtLeast } from '@/lib/core/session';
 import { anchorAttr, ANCHORS } from '@/lib/tutorials';
@@ -26,7 +28,7 @@ import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import DemoteButton from '@/components/lifecycle/DemoteButton';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
-import type { FiledApproval } from '@/lib/governance/approval-notice';
+import type { FiledApproval } from '@/lib/governance';
 import DomainTag from '@/components/DomainTag';
 import type { Visibility } from '@/lib/core/lifecycle';
 import { usePublishPageContext } from '@/components/core/PageContext';

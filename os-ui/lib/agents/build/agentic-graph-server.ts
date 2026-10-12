@@ -3,21 +3,19 @@
  */
 import 'server-only';
 import { config } from '@/lib/core/config';
-import { roleModel } from '@/lib/models/roles';
-import { inputBudget, modelContext } from '@/lib/models/context-windows';
+import { roleModel, inputBudget, modelContext } from '@/lib/models';
 import type { CurrentUser } from '@/lib/core/auth';
 import { ALL_MCP_TOOLS, isMcpTab, listToolsForRole, toolsForTab, type McpTab } from '@/lib/mcp/server';
 import { loadTabContext } from '@/lib/tabs/context';
 import { trace as gvTrace } from '@/lib/infra/agent-governed';
-import { tabToolExecutor, liteLlmCaller } from '@/lib/assistant/runtime';
-import { trackUsage, type ToolSpec, type AgenticStep, type LlmCall, type UsageTracker } from '@/lib/assistant/agentic';
+import { tabToolExecutor, liteLlmCaller, trackUsage, type ToolSpec, type AgenticStep, type LlmCall, type UsageTracker } from '@/lib/assistant';
 import { loadBuildSpec } from '@/lib/tabs/build-spec';
 import { parseSystem, type System } from '../system-schema.ts';
 import { compile } from '../langgraph-compile.ts';
 import { principalFor, runCostUsd, type ModelPrice } from './runtime-contract.ts';
 import { effectiveModelPrices } from '@/lib/platform-admin/model-prices';
 import { runAgenticGraph, runNode, type AgenticGraphResult, type AgenticGraphDeps } from './agentic-graph.ts';
-import { liveEmbedder } from '@/lib/infra/context/librarian-live.ts';
+import { liveEmbedder } from '@/lib/infra';
 import {
   grantedToolSpecs,
   grantedToolBrief,

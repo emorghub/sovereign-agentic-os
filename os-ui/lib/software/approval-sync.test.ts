@@ -6,9 +6,7 @@ import assert from 'node:assert/strict';
 import type { CurrentUser } from '@/lib/core/auth';
 import { createApp } from '@/lib/software/apps';
 import { requestDeploy, getReviewCard } from './review.ts';
-import { applyEffect } from '@/lib/governance/effects';
-import { buildEffectDeps } from '@/lib/governance/ladder';
-import { decide, listApprovals, __resetApprovals } from '@/lib/governance/approvals';
+import { applyEffect, buildEffectDeps, decide, listApprovals, __resetApprovals } from '@/lib/governance';
 
 /**
  * REGRESSION: approving a Software deploy-review in Policies & Approvals must

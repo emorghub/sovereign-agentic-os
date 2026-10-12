@@ -11,8 +11,10 @@ import { reuploadVersion, saveTextVersion } from '@/lib/files/upload-client';
 import { ConfirmProvider } from '@/components/lifecycle/ConfirmDialog';
 import LifecycleActions from '@/components/lifecycle/LifecycleActions';
 import { useApprovalNotifier } from '@/components/lifecycle/useApprovalNotifier';
-import type { FiledApproval } from '@/lib/governance/approval-notice';
+import type { FiledApproval } from '@/lib/governance';
 import type { Visibility } from '@/lib/core/lifecycle';
+// Deep-path by design: 'use client' component; the @/lib/governance barrel
+// re-exports server-only approvals/ladder.
 import { canManageArtifact, type ArtifactScope } from '@/lib/governance/edit-scope';
 import { FolderPickerModal } from '@/components/core/FolderTree';
 import { usePublishPageContext } from '@/components/core/PageContext';

@@ -6,7 +6,7 @@ import { withRoute } from '@/lib/core/route-server';
 import { roleAtLeast } from '@/lib/core/session';
 import { getWorkflow, getDomainKnowledge } from '@/lib/knowledge/store';
 import { indexWorkflow, indexDomain } from '@/lib/knowledge/index-pipeline';
-import { promoteThroughSeam, fileArtifactPromotion, fileArtifactCertification } from '@/lib/governance/ladder';
+import { promoteThroughSeam, fileArtifactPromotion, fileArtifactCertification } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

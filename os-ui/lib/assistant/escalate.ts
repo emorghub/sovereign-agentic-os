@@ -2,7 +2,7 @@
  * Copyright 2026 Borek Data Ventures UG (haftungsbeschränkt)
  */
 import 'server-only';
-import { roleModel, standardFirstEscalationEnabled } from '@/lib/models/roles';
+import { roleModel, standardFirstEscalationEnabled } from '@/lib/models';
 import { assistantComplete, type AssistantMessage, type AssistantCaller } from './complete.ts';
 
 /**

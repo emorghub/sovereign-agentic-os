@@ -6,7 +6,7 @@ import { config } from '@/lib/core/config';
 import { requireUser } from '@/lib/core/auth';
 import { errorResponse } from '@/lib/data/server';
 import { ensureHydrated, listDatasets, type Principal } from '@/lib/data/store';
-import { queryRun } from '@/lib/infra/governed';
+import { queryRun } from '@/lib/infra';
 import {
   assembleCatalog,
   registryAssets,

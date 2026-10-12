@@ -24,7 +24,7 @@ import {
   type ModelSpecInput,
   type ServiceModel,
 } from '@/lib/science';
-import { promoteThroughSeam } from '@/lib/governance/ladder';
+import { promoteThroughSeam } from '@/lib/governance';
 
 export const dynamic = 'force-dynamic';
 

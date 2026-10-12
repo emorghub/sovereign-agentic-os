@@ -4,7 +4,7 @@
 import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { withRoute } from '@/lib/core/route-server';
-import { decide, getApproval, listApprovals } from '@/lib/governance/approvals';
+import { decide, getApproval, listApprovals } from '@/lib/governance';
 import { curateFact, proposeFact } from '@/lib/agents/agent-memory';
 import { trace } from '@/lib/infra/agent-governed';
 import {

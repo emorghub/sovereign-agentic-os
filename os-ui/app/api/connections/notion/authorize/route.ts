@@ -5,11 +5,13 @@ import { NextResponse } from 'next/server';
 import { requireUser } from '@/lib/core/auth';
 import { config } from '@/lib/core/config';
 import { getConnectionForUser } from '@/lib/connections';
-import { discoverMetadata, registerClient, buildNotionAuthorizeUrl } from '@/lib/oauth/notion-mcp';
-import { createPkcePair } from '@/lib/oauth/pkce';
-import { signState, newNonce, OAUTH_STATE_COOKIE } from '@/lib/oauth/state';
-import { publicBaseUrl } from '@/lib/oauth/redirect';
-import { putPendingFlow } from '@/lib/oauth/notion-flow';
+import {
+  discoverMetadata, registerClient, buildNotionAuthorizeUrl,
+  createPkcePair,
+  signState, newNonce, OAUTH_STATE_COOKIE,
+  publicBaseUrl,
+  putPendingFlow,
+} from '@/lib/oauth';
 
 export const dynamic = 'force-dynamic';
 

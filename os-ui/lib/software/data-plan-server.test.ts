@@ -15,10 +15,31 @@ import assert from 'node:assert/strict';
 
 globalThis.fetch = (() => Promise.reject(new Error('offline-stub'))) as typeof fetch;
 
+// The dummy-row generator — return two rows for the requested columns.
+const realComplete = await import('@/lib/assistant/complete');
+
+mock.module('@/lib/assistant/complete', {
+  namedExports: {
+    ...realComplete,
+    assistantComplete: async () => ({
+      content: JSON.stringify({ rows: [{ id: 1, name: 'Ada' }, { id: 2, name: 'Grace' }] }),
+      model: 'test',
+    }),
+    resolveAssistantModelId: () => 'test-model',
+    liteLlmAssistantCaller: () => async () => ({ content: '', model: 'test-model' }),
+  },
+});
+
 // The physical bronze landing — capture the grid, return an OK landing.
+// Mocked AFTER assistant/complete above: the real data/ingest imports the
+// @/lib/assistant barrel, so loading it for the spread must happen once that
+// barrel will resolve to the mock, not the real complete.ts.
 let LANDED: { datasetId: string; rows: number } | null = null;
+const realIngest = await import('@/lib/data/ingest');
+
 mock.module('@/lib/data/ingest', {
   namedExports: {
+    ...realIngest,
     landGridAsBronze: async (
       _user: unknown,
       datasetId: string,
@@ -27,16 +48,6 @@ mock.module('@/lib/data/ingest', {
       LANDED = { datasetId, rows: grid.rows.length };
       return { ok: true, report: { ok: true }, dataset: { id: datasetId } };
     },
-  },
-});
-
-// The dummy-row generator — return two rows for the requested columns.
-mock.module('@/lib/assistant/complete', {
-  namedExports: {
-    assistantComplete: async () => ({
-      content: JSON.stringify({ rows: [{ id: 1, name: 'Ada' }, { id: 2, name: 'Grace' }] }),
-      model: 'test',
-    }),
   },
 });
 

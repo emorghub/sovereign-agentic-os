@@ -8,7 +8,7 @@ import { compile } from '../langgraph-compile.ts';
 import { listToolsForRole, toolsForTab } from '@/lib/mcp/server';
 import { SOFTWARE_TEAM_YAML } from '../software-team.ts';
 import { nodeOrder, runAgenticGraph, classifyStepError, type AgenticGraphDeps } from './agentic-graph.ts';
-import type { LlmCall, LlmCompletion, ToolExecutor, ToolSpec } from '@/lib/assistant/agentic';
+import type { LlmCall, LlmCompletion, ToolExecutor, ToolSpec } from '@/lib/assistant';
 
 const IR = compile(parseSystem(SOFTWARE_TEAM_YAML));
 

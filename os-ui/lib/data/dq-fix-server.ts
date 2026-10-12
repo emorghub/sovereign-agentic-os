@@ -40,8 +40,7 @@ import {
   recordRemediation,
   type RemediationRecord,
 } from './dq-remediations.ts';
-import { assistantComplete } from '@/lib/assistant/complete';
-import { completeWithEscalation } from '@/lib/assistant/escalate';
+import { assistantComplete, completeWithEscalation } from '@/lib/assistant';
 
 /**
  * AI-PROPOSED DQ REMEDIATIONS — the governed server orchestration (Validate stage).
