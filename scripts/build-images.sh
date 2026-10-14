@@ -30,6 +30,7 @@ terminal-broker:0.1.0
 sandbox-shell:0.1.0
 workbench-broker:0.1.0
 code-server-workbench:0.1.0
+data-runner:0.2.1
 "
 
 build_one() {

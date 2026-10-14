@@ -50,11 +50,12 @@ spec:
       {{- include "soa.priorityClassName" (dict "ctx" . "tier" "infra") | nindent 6 }}
       securityContext:
         {{- include "soa.podSecurityContext" . | nindent 8 }}
-        runAsUser: 1000
-        fsGroup: 1000
+        {{- /* Chainguard's minio image is nonroot UID 65532; the old quay.io image ran as 1000. */}}
+        runAsUser: {{ $os.image.runAsUser | default 65532 }}
+        fsGroup: {{ $os.image.runAsUser | default 65532 }}
       containers:
         - name: minio
-          image: "{{ $os.image.repository }}@{{ $os.image.digest }}"
+          image: "{{ $os.image.repository }}{{ if $os.image.digest }}@{{ $os.image.digest }}{{ else }}:{{ $os.image.tag | default "latest" }}{{ end }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           securityContext:
             {{- include "soa.containerSecurityContext" . | nindent 12 }}
