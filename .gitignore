@@ -8,6 +8,8 @@ sa-key.json
 *.pem
 .env
 .env.*
+# ...but the checked-in template of which vars to set IS tracked (see os-ui/.env.example).
+!.env.example
 
 # Helm
 # Vendored subchart archives are pulled via `helm dependency build` — not committed.

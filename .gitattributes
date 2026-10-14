@@ -1,0 +1,4 @@
+# Normalise line endings: LF in the repo and on checkout everywhere.
+# Without this, Windows clones (core.autocrlf=true) get CRLF and byte-for-byte
+# fixture tests fail (e.g. lib/agents/software-team.test.ts). See #25.
+* text=auto eol=lf
