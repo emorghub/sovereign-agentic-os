@@ -8,6 +8,7 @@ sa-key.json
 *.pem
 .env
 .env.*
+!.env.example
 
 # Helm
 # Vendored subchart archives are pulled via `helm dependency build` — not committed.

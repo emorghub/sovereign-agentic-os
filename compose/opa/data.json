@@ -10,6 +10,10 @@
       "metrics",
       "retrieve"
     ],
+    "platform": [
+      "query",
+      "metrics"
+    ],
     "churn-model": [
       "predict"
     ],

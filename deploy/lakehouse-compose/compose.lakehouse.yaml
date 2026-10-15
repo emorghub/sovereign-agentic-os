@@ -1,0 +1,430 @@
+# Sovereign Agentic OS — lakehouse overlay for Docker Compose (Bronze -> Silver -> Gold).
+#
+# An OVERRIDE on top of the unchanged repo-root compose.yaml, run as its OWN Compose
+# project (`name:` below) with its OWN env file — separate containers, network and
+# volumes, and remapped host ports, so it can run next to the default stack.
+# Always invoke it with BOTH files and this directory's env file (see README.md, or
+# use ./lakehouse.ps1 / ./lakehouse.sh which do exactly that):
+#
+#   docker compose -f compose.yaml -f deploy/lakehouse-compose/compose.lakehouse.yaml \
+#     --env-file deploy/lakehouse-compose/.env up -d --build
+#
+# Relative paths below resolve against the PROJECT directory (the repo root, where
+# compose.yaml lives), so they are written as ./deploy/lakehouse-compose/... .
+#
+# Services and settings are derived from the Helm chart's lakehouse + cube extensions
+# (charts/sovereign-agentic-os/templates/extensions/{lakehouse,cube}/ and values.yaml):
+# same images/digests, same env contract, same Polaris bootstrap + catalog registration.
+# Requires Docker Compose >= 2.24 (`!override` / `!reset` YAML tags).
+
+name: sovereign-lakehouse
+
+x-s3-creds: &s3-creds
+  AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-agentic-os-local}
+  AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-agentic-os-local-secret}
+
+x-polaris-jdbc: &polaris-jdbc
+  POLARIS_PERSISTENCE_TYPE: relational-jdbc
+  POLARIS_REALM: ${POLARIS_REALM:-default-realm}
+  POLARIS_BOOTSTRAP_CREDENTIALS: ${POLARIS_REALM:-default-realm},${POLARIS_ROOT_CLIENT_ID:?set POLARIS_ROOT_CLIENT_ID in the lakehouse env file},${POLARIS_ROOT_CLIENT_SECRET:?set POLARIS_ROOT_CLIENT_SECRET in the lakehouse env file}
+  QUARKUS_DATASOURCE_DB_KIND: postgresql
+  QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://${POSTGRES_HOST:-pg-rw}:5432/polaris
+  QUARKUS_DATASOURCE_USERNAME: ${POLARIS_DB_USER:-polaris}
+  QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_DB_PASSWORD:?set POLARIS_DB_PASSWORD in the lakehouse env file}
+
+services:
+  # ---------------------------------------------------------------- base overrides --
+  # Postgres + MinIO are REQUIRED by the lakehouse (Polaris metastore, Iceberg data),
+  # so they always run here regardless of COMPOSE_PROFILES.
+  pg-rw:
+    profiles: !reset []
+  minio:
+    profiles: !reset []
+  minio-bucket-init:
+    profiles: !reset []
+
+  # Host ports remapped so this project never collides with the default stack.
+  litellm:
+    ports: !override
+      - "${LH_LITELLM_PORT:-14000}:4000"
+  opa:
+    ports: !override
+      - "${LH_OPA_PORT:-18181}:8181"
+  forgejo-http:
+    ports: !override
+      - "${LH_FORGEJO_PORT:-13001}:3000"
+  agent-runtime:
+    ports: !override
+      - "${LH_AGENT_RUNTIME_PORT:-18000}:8000"
+  langfuse-web:
+    ports: !override
+      - "${LH_LANGFUSE_PORT:-13002}:3000"
+
+  # os-ui: the SAME image/build as compose.yaml, plus the lakehouse endpoints it reads
+  # from config.ts (DATA_RUNNER_URL, QUERY_TOOL_URL, CUBE_URL, S3_*, UPLOADS_BUCKET,
+  # FILES_BUCKET, AWS_*, SERVICE_BEARER_TOKEN, TRINO_*).
+  os-ui:
+    ports: !override
+      - "${LH_OS_UI_PORT:-13000}:3000"
+    environment:
+      <<: *s3-creds
+      DATA_RUNNER_URL: http://data-runner:8000
+      QUERY_TOOL_URL: http://query-tool:8000
+      CUBE_URL: http://cube:4000
+      SERVICE_BEARER_TOKEN: ${SERVICE_BEARER_TOKEN:?set SERVICE_BEARER_TOKEN in the lakehouse env file}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      UPLOADS_BUCKET: lakehouse
+      FILES_BUCKET: files
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_CATALOG: iceberg
+      # The Silver/Gold/metric builds run a hard OpenMetadata step (lib/experimental/
+      # data/build/live.ts STAGE_TOOLS: silver/gold -> ['dbt','om']).
+      OPENMETADATA_API_URL: http://openmetadata:8585
+    depends_on:
+      data-runner:
+        condition: service_healthy
+      query-tool:
+        condition: service_healthy
+      cube:
+        condition: service_healthy
+      openmetadata:
+        condition: service_healthy
+
+  # query-tool: the SAME build as compose.yaml, now pointed at a real Trino
+  # (soa.queryToolEnv in the chart) with a readiness probe that runs a real query.
+  query-tool:
+    environment:
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_USER: query-agent
+      TRINO_CATALOG: iceberg
+      TRINO_SCHEMA: sales
+      SERVICE_BEARER_TOKEN: ${SERVICE_BEARER_TOKEN}
+    volumes:
+      - ./deploy/lakehouse-compose/healthchecks:/healthchecks:ro
+    healthcheck: !override
+      test: ["CMD", "python3", "/healthchecks/query_tool_ready.py"]
+      interval: 10s
+      timeout: 25s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      trino:
+        condition: service_healthy
+
+  # ------------------------------------------------------------- new lakehouse ----
+  # Buckets the chart's objectStorage.buckets declares for the lakehouse (lakehouse, files).
+  lakehouse-bucket-init:
+    image: amazon/aws-cli@sha256:e14216fb361cce909ce199616711ad103182d5937f851cda9bebf25867d7180a
+    entrypoint: ["/bin/sh", "/init/lakehouse-bucket-init.sh"]
+    volumes:
+      - ./deploy/lakehouse-compose/minio/lakehouse-bucket-init.sh:/init/lakehouse-bucket-init.sh:ro
+    environment:
+      <<: *s3-creds
+      AWS_DEFAULT_REGION: us-east-1
+      ENDPOINT: http://minio:9000
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # Polaris JDBC metastore DB + bootstrap gate (chart: polaris.yaml bootstrap-check).
+  polaris-db-init:
+    image: postgres:17
+    entrypoint: ["/bin/sh", "/init/db-init.sh"]
+    volumes:
+      - ./deploy/lakehouse-compose/polaris/db-init.sh:/init/db-init.sh:ro
+      - polaris-bootstrap-state:/bootstrap-state
+    environment:
+      PG_HOST: ${POSTGRES_HOST:-pg-rw}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POLARIS_DB_USER: ${POLARIS_DB_USER:-polaris}
+      POLARIS_DB_PASSWORD: ${POLARIS_DB_PASSWORD}
+      POLARIS_REALM: ${POLARIS_REALM:-default-realm}
+    depends_on:
+      pg-rw:
+        condition: service_healthy
+
+  # One-time realm bootstrap (chart: polaris.yaml `bootstrap` initContainer).
+  polaris-bootstrap:
+    image: apache/polaris-admin-tool:1.1.0-incubating@sha256:7cdd9216c2e55a45ad0e725f47949c7632e6eadcf1e18bbcaeee19ea65f2c94e
+    entrypoint: ["/bin/sh", "/init/bootstrap.sh"]
+    volumes:
+      - ./deploy/lakehouse-compose/polaris/bootstrap.sh:/init/bootstrap.sh:ro
+      - polaris-bootstrap-state:/bootstrap-state:ro
+    environment:
+      <<: *polaris-jdbc
+    depends_on:
+      polaris-db-init:
+        condition: service_completed_successfully
+
+  # Apache Polaris — Iceberg REST catalog, DURABLE (relational-jdbc on pg-rw).
+  polaris:
+    image: apache/polaris:1.1.0-incubating@sha256:27d081a539aa021df00f18ff1ae0a59d9b9e7a1db2a44b643ba29c61eaa9cdf9
+    environment:
+      <<: [*polaris-jdbc, *s3-creds]
+      POLARIS_REALM_CONTEXT_REALMS: ${POLARIS_REALM:-default-realm}
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL_S3: http://minio:9000
+    # Ready = Quarkus readiness (incl. the JDBC datasource) AND the realm issues an
+    # OAuth2 token to the root principal — i.e. the catalog API is actually usable.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:8182/q/health/ready >/dev/null &&
+          curl -fsS -X POST http://127.0.0.1:8181/api/catalog/v1/oauth/tokens
+          -d grant_type=client_credentials
+          -d client_id=$$(echo "$$POLARIS_BOOTSTRAP_CREDENTIALS" | cut -d, -f2)
+          -d client_secret=$$(echo "$$POLARIS_BOOTSTRAP_CREDENTIALS" | cut -d, -f3)
+          -d scope=PRINCIPAL_ROLE:ALL | grep -q access_token
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    depends_on:
+      polaris-bootstrap:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+
+  # Registers the `lakehouse` catalog (chart: polaris-bootstrap.yaml Job).
+  polaris-catalog-init:
+    image: curlimages/curl:8.11.1
+    entrypoint: ["/bin/sh", "/init/catalog-init.sh"]
+    volumes:
+      - ./deploy/lakehouse-compose/polaris/catalog-init.sh:/init/catalog-init.sh:ro
+    environment:
+      <<: *s3-creds
+      CLIENT_ID: ${POLARIS_ROOT_CLIENT_ID}
+      CLIENT_SECRET: ${POLARIS_ROOT_CLIENT_SECRET}
+      CATALOG: lakehouse
+      BASE_LOCATION: s3://lakehouse/wh
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      POLARIS_CATALOG_API: http://polaris:8181
+      POLARIS_MGMT: http://polaris:8182
+    depends_on:
+      polaris:
+        condition: service_healthy
+      lakehouse-bucket-init:
+        condition: service_completed_successfully
+
+  # Apache Trino — central governed engine, Iceberg REST -> Polaris, OPA access control.
+  trino:
+    image: trinodb/trino:476
+    ports:
+      - "${LH_TRINO_PORT:-18080}:8080"
+    environment:
+      <<: *s3-creds
+      POLARIS_OAUTH_CREDENTIAL: ${POLARIS_ROOT_CLIENT_ID}:${POLARIS_ROOT_CLIENT_SECRET}
+    volumes:
+      - ./deploy/lakehouse-compose/trino/config.properties:/etc/trino/config.properties:ro
+      - ./deploy/lakehouse-compose/trino/node.properties:/etc/trino/node.properties:ro
+      - ./deploy/lakehouse-compose/trino/jvm.config:/etc/trino/jvm.config:ro
+      - ./deploy/lakehouse-compose/trino/log.properties:/etc/trino/log.properties:ro
+      - ./deploy/lakehouse-compose/trino/access-control.properties:/etc/trino/access-control.properties:ro
+      - ./deploy/lakehouse-compose/trino/catalog:/etc/trino/catalog:ro
+      - trino-data:/data/trino
+    # Ready = the engine answers AND the Iceberg catalog (Polaris + S3) AND the OPA
+    # access-control plugin all work: listing iceberg schemas exercises all three.
+    healthcheck:
+      test: ["CMD", "trino", "--user", "lakehouse-healthcheck", "--execute", "SHOW SCHEMAS FROM iceberg"]
+      interval: 10s
+      timeout: 20s
+      retries: 3
+      start_period: 240s
+    depends_on:
+      polaris-catalog-init:
+        condition: service_completed_successfully
+      opa:
+        condition: service_healthy
+
+  # data-runner — REAL Bronze ingest (CSV in MinIO -> Iceberg table via Polaris).
+  data-runner:
+    build:
+      context: ./images/extensions/data-runner
+    environment:
+      <<: *s3-creds
+      PORT: "8000"
+      HOME: /tmp
+      POLARIS_URI: http://polaris:8181/api/catalog
+      POLARIS_WAREHOUSE: lakehouse
+      POLARIS_OAUTH_SCOPE: PRINCIPAL_ROLE:ALL
+      POLARIS_OAUTH_CREDENTIAL: ${POLARIS_ROOT_CLIENT_ID}:${POLARIS_ROOT_CLIENT_SECRET}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_PATH_STYLE: "true"
+      UPLOADS_BUCKET: lakehouse
+      SERVICE_BEARER_TOKEN: ${SERVICE_BEARER_TOKEN}
+    volumes:
+      - ./deploy/lakehouse-compose/healthchecks:/healthchecks:ro
+    healthcheck:
+      test: ["CMD", "python", "/healthchecks/data_runner_ready.py"]
+      interval: 10s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      polaris-catalog-init:
+        condition: service_completed_successfully
+      lakehouse-bucket-init:
+        condition: service_completed_successfully
+
+  # Cube — semantic layer reading THROUGH Trino (chart: extensions/cube/cube.yaml).
+  cube:
+    image: cubejs/cube@sha256:42418fc85830763178abd45ca93e60fefec27effb92418f9d977699bc38483f5
+    ports:
+      - "${LH_CUBE_PORT:-14040}:4000"
+    environment:
+      HOME: /tmp
+      CUBEJS_DEV_MODE: "true"
+      CUBEJS_SCHEMA_PATH: model
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "2000"
+      CUBEJS_DB_TYPE: trino
+      CUBEJS_DB_HOST: trino
+      CUBEJS_DB_PORT: "8080"
+      CUBEJS_DB_USER: cube-sales
+      CUBEJS_DB_PRESTO_CATALOG: iceberg
+      CUBEJS_API_SECRET: ${CUBE_API_SECRET:?set CUBE_API_SECRET in the lakehouse env file}
+    volumes:
+      - ./deploy/lakehouse-compose/cube/cube.js:/cube/conf/cube.js:ro
+      - cube-models:/cube/conf/model
+    # /readyz = Cube's own readiness, which tests the data-source (Trino) connection.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:4000/readyz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    depends_on:
+      trino:
+        condition: service_healthy
+
+  # Cube model-sync sidecar: pulls governed dataset models from os-ui into Cube.
+  cube-model-sync:
+    image: cubejs/cube@sha256:42418fc85830763178abd45ca93e60fefec27effb92418f9d977699bc38483f5
+    entrypoint: ["node", "/scripts/sync.js"]
+    environment:
+      HOME: /tmp
+      OSUI_MODELS_URL: http://os-ui:3000/api/cube/models
+      MODEL_DIR: /cube/conf/model
+      POLL_SECONDS: "30"
+    volumes:
+      - ./deploy/lakehouse-compose/cube/model-sync.js:/scripts/sync.js:ro
+      - cube-models:/cube/conf/model
+    depends_on:
+      os-ui:
+        condition: service_healthy
+
+  # ------------------------------------------------------- OpenMetadata catalog ----
+  # Derived from the chart's vendored subcharts (charts/openmetadata-1.13.0.tgz,
+  # charts/opensearch-3.7.0.tgz) + the overrides in charts/sovereign-agentic-os/values.yaml
+  # (openmetadata.openmetadata.config.*, opensearch.*): Postgres on pg-rw, OpenSearch
+  # with the security plugin disabled over plain HTTP, no Airflow pipeline client.
+
+  # OpenSearch — OpenMetadata's search backend (chart: opensearch subchart, single node).
+  opensearch:
+    image: opensearchproject/opensearch:3.7.0
+    environment:
+      discovery.type: single-node
+      cluster.name: opensearch
+      OPENSEARCH_JAVA_OPTS: "-Xmx512M -Xms512M"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    # Ready = the cluster answers AND its health is yellow or green.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS "http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=5s"
+          | grep -qE '"status":"(yellow|green)"'
+      interval: 10s
+      timeout: 15s
+      retries: 3
+      start_period: 180s
+
+  openmetadata-db-init:
+    image: postgres:17
+    entrypoint: ["/bin/sh", "/init/db-init.sh"]
+    volumes:
+      - ./deploy/lakehouse-compose/openmetadata/db-init.sh:/init/db-init.sh:ro
+    environment:
+      PG_HOST: ${POSTGRES_HOST:-pg-rw}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      OM_DB_USER: ${OM_DB_USER:-openmetadata}
+      OM_DB_PASSWORD: ${OM_DB_PASSWORD:?set OM_DB_PASSWORD in the lakehouse env file}
+    depends_on:
+      pg-rw:
+        condition: service_healthy
+
+  # Schema migration (chart: deployment.yaml `run-db-migrations` initContainer,
+  # OpenMetadata.buildUpgradeCommand).
+  openmetadata-migrate:
+    image: docker.getcollate.io/openmetadata/server:1.13.0
+    entrypoint: ["/bin/bash", "-c", "/opt/openmetadata/bootstrap/openmetadata-ops.sh migrate"]
+    environment: &om-env
+      OPENMETADATA_CLUSTER_NAME: openmetadata
+      SERVER_HOST_API_URL: http://openmetadata:8585/api
+      DB_DRIVER_CLASS: org.postgresql.Driver
+      DB_SCHEME: postgresql
+      DB_HOST: ${POSTGRES_HOST:-pg-rw}
+      DB_PORT: "5432"
+      DB_PARAMS: sslmode=prefer
+      OM_DATABASE: openmetadata
+      DB_USER: ${OM_DB_USER:-openmetadata}
+      DB_USER_PASSWORD: ${OM_DB_PASSWORD}
+      SEARCH_TYPE: opensearch
+      ELASTICSEARCH_HOST: opensearch
+      ELASTICSEARCH_PORT: "9200"
+      ELASTICSEARCH_SCHEME: http
+      PIPELINE_SERVICE_CLIENT_ENABLED: "false"
+      FERNET_KEY: ${OM_FERNET_KEY:?set OM_FERNET_KEY in the lakehouse env file}
+      OPENMETADATA_HEAP_OPTS: "-Xmx2g -Xms1g"
+    depends_on:
+      openmetadata-db-init:
+        condition: service_completed_successfully
+      opensearch:
+        condition: service_healthy
+
+  openmetadata:
+    image: docker.getcollate.io/openmetadata/server:1.13.0
+    environment: *om-env
+    ports:
+      - "${LH_OPENMETADATA_PORT:-18585}:8585"
+    # Ready = Dropwizard admin healthcheck (DB + search health checks) AND the API
+    # os-ui's build calls (/api/v1/system/version) answers 200. The server image ships
+    # no curl/wget, so this is a plain HTTP/1.0 GET over bash's /dev/tcp.
+    healthcheck:
+      test:
+        - CMD
+        - /bin/bash
+        - -c
+        - >-
+          get() { exec 3<>/dev/tcp/127.0.0.1/$$1 || return 1;
+          printf 'GET %s HTTP/1.0\r\nHost: localhost\r\n\r\n' "$$2" >&3;
+          read -r status <&3; exec 3<&-; [[ $$status == *" 200"* ]]; };
+          get 8586 /healthcheck && get 8585 /api/v1/system/version
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 600s
+    depends_on:
+      openmetadata-migrate:
+        condition: service_completed_successfully
+
+volumes:
+  polaris-bootstrap-state:
+  trino-data:
+  cube-models:
+  opensearch-data:
